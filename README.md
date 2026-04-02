@@ -170,8 +170,8 @@ cd ..
 # Terminal 1: Start the dashboard
 cd dashboard && npm run dev
 
-# Terminal 2: Start the trading agent (runs forever)
-python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100 --interval 30
+# Terminal 2: Start the trading agent (5-min candles, runs forever)
+python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100
 
 # Open http://localhost:3000 in your browser
 ```
@@ -186,13 +186,14 @@ start_all.bat
 ### CLI Options
 
 ```
---pairs       Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)
---balance     Reference balance for position sizing in USD (default: 100)
---interval    Seconds between ticks (default: 30)
---duration    Total duration in seconds, 0 = forever (default: 0)
---ws-port     WebSocket port for dashboard (default: 8765)
---mode        Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
---paper       Use paper trading — no API keys needed, no real money
+--pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)
+--balance          Reference balance for position sizing in USD (default: 100)
+--candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 5)
+--interval         Seconds between ticks (default: auto from candle interval)
+--duration         Total duration in seconds, 0 = forever (default: 0)
+--ws-port          WebSocket port for dashboard (default: 8765)
+--mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
+--paper            Use paper trading — no API keys needed, no real money
 ```
 
 ### Competition Mode
