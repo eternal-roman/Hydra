@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hydra_engine import HydraEngine, Regime, REGIME_STRATEGY_MAP
+from hydra_engine import HydraEngine
 
 # ═══════════════════════════════════════════════════════════════
 # KRAKEN CLI WRAPPER (via WSL)
@@ -85,9 +85,9 @@ class KrakenCLI:
             if isinstance(val, dict) and "c" in val:
                 return {
                     "pair": pair,
-                    "price": float(val["c"][0]),
-                    "ask": float(val["a"][0]),
-                    "bid": float(val["b"][0]),
+                    "price": float(val["c"][0]) if val.get("c") else 0,
+                    "ask": float(val["a"][0]) if val.get("a") else 0,
+                    "bid": float(val["b"][0]) if val.get("b") else 0,
                     "high_24h": float(val["h"][1]) if len(val.get("h", [])) > 1 else 0,
                     "low_24h": float(val["l"][1]) if len(val.get("l", [])) > 1 else 0,
                     "volume_24h": float(val["v"][1]) if len(val.get("v", [])) > 1 else 0,
@@ -627,8 +627,8 @@ def main():
                         help="Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)")
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
-    parser.add_argument("--interval", type=int, default=60,
-                        help="Seconds between ticks (default: 60)")
+    parser.add_argument("--interval", type=int, default=30,
+                        help="Seconds between ticks (default: 30)")
     parser.add_argument("--duration", type=int, default=0,
                         help="Total duration in seconds (default: 0 = run forever, Ctrl+C to stop)")
     parser.add_argument("--ws-port", type=int, default=8765,

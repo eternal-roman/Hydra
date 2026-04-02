@@ -168,7 +168,7 @@ start_all.bat
 ```
 --pairs       Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)
 --balance     Reference balance for position sizing in USD (default: 100)
---interval    Seconds between ticks (default: 60)
+--interval    Seconds between ticks (default: 30)
 --duration    Total duration in seconds, 0 = forever (default: 0)
 --ws-port     WebSocket port for dashboard (default: 8765)
 ```
