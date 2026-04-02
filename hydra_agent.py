@@ -24,7 +24,25 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Load .env file if present (no dependency needed)
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                if _v and _k.strip() not in os.environ:
+                    os.environ[_k.strip()] = _v.strip()
+
 from hydra_engine import HydraEngine, SIZING_CONSERVATIVE, SIZING_COMPETITION
+
+try:
+    from hydra_brain import HydraBrain
+    HAS_BRAIN = True
+except ImportError:
+    HAS_BRAIN = False
 
 # ═══════════════════════════════════════════════════════════════
 # KRAKEN CLI WRAPPER (via WSL)
@@ -330,6 +348,17 @@ class HydraAgent:
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
 
+        # AI Brain (optional — Claude for analysis, Grok for strategic depth)
+        self.brain = None
+        if HAS_BRAIN:
+            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            xai_key = os.environ.get("XAI_API_KEY", "")
+            if anthropic_key or xai_key:
+                try:
+                    self.brain = HydraBrain(anthropic_key=anthropic_key, xai_key=xai_key)
+                except Exception as e:
+                    print(f"  [WARN] Brain init failed: {e}")
+
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
@@ -455,7 +484,44 @@ class HydraAgent:
                     "open": p, "high": p, "low": p, "close": p, "volume": 0,
                 })
 
-        return engine.tick()
+        state = engine.tick()
+
+        # AI deliberation on actionable signals
+        if self.brain and state["signal"]["action"] != "HOLD":
+            try:
+                decision = self.brain.deliberate(state)
+                state["ai_decision"] = {
+                    "action": decision.action,
+                    "final_signal": decision.final_signal,
+                    "confidence_adj": decision.confidence_adj,
+                    "size_multiplier": decision.size_multiplier,
+                    "analyst_reasoning": decision.analyst_reasoning,
+                    "risk_reasoning": decision.risk_reasoning,
+                    "strategist_reasoning": decision.strategist_reasoning,
+                    "escalated": decision.escalated,
+                    "summary": decision.combined_summary,
+                    "risk_flags": decision.risk_flags,
+                    "portfolio_health": decision.portfolio_health,
+                    "fallback": decision.fallback,
+                    "tokens_used": decision.tokens_used,
+                    "latency_ms": round(decision.latency_ms, 0),
+                }
+                # Apply AI decision to engine state
+                if decision.action == "OVERRIDE":
+                    state["signal"]["action"] = decision.final_signal
+                    state["signal"]["confidence"] = decision.confidence_adj
+                    state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
+                    # Clear last_trade if overridden to HOLD
+                    if decision.final_signal == "HOLD":
+                        state.pop("last_trade", None)
+                elif decision.action == "ADJUST":
+                    state["signal"]["confidence"] = decision.confidence_adj
+                    state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
+                # CONFIRM leaves signal unchanged, just adds reasoning
+            except Exception as e:
+                state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
+
+        return state
 
     def _execute_trade(self, pair: str, trade: dict):
         """Execute a trade via kraken-cli — paper or live limit post-only."""
@@ -610,6 +676,7 @@ class HydraAgent:
             "pairs": pairs_data,
             "trade_log": self.trade_log[-20:],
             "running": self.running,
+            "ai_brain": self.brain.get_stats() if self.brain else None,
         }
 
     def _print_tick_status(self, pair: str, state: dict):
@@ -630,6 +697,10 @@ class HydraAgent:
             print(f"  |            | Pos: {pos['size']:.8f} @ ${pos['avg_entry']:,.4f} | "
                   f"Unrealized: ${pos['unrealized_pnl']:>+,.2f}")
 
+        if state.get("ai_decision") and not state["ai_decision"].get("fallback"):
+            ai = state["ai_decision"]
+            print(f"  |  [AI] {ai['action']} → {ai['final_signal']} | {ai.get('summary', '')[:70]}")
+
         if state.get("last_trade"):
             t = state["last_trade"]
             profit_str = f" | Profit: ${t['profit']:+,.2f}" if t.get("profit") is not None else ""
@@ -639,10 +710,12 @@ class HydraAgent:
     def _print_banner(self):
         trade_mode = "PAPER" if self.paper else "LIVE"
         sizing_mode = self.mode.upper()
+        brain_status = f"AI Brain: {self.brain.provider}/{self.brain.model}" if self.brain else "AI Brain: DISABLED (no API key)"
         print("")
         print("  HYDRA - Hyper-adaptive Dynamic Regime-switching Universal Agent")
         print("  ================================================================")
         print(f"  Trading: {trade_mode} | Sizing: {sizing_mode} | Kraken CLI v0.2.3 (WSL)")
+        print(f"  {brain_status}")
         if self.paper:
             print("  Paper trading — no real money at risk.")
         else:

@@ -11,9 +11,10 @@ HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market co
 ```
 hydra_engine.py     — Pure Python trading engine (indicators, regime detection, signals, position sizing)
 hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution)
+hydra_brain.py      — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
 dashboard/src/App.jsx — React dashboard (single-file, all inline styles)
 SKILL.md            — Full trading specification (agent-readable)
-AUDIT.md            — Technical audit with 49 test results
+AUDIT.md            — Technical audit with test results
 CHANGELOG.md        — Version history
 ```
 
@@ -72,15 +73,33 @@ python tests/test_engine.py
 - Price formatting: use `fmtPrice()` for prices, `fmtInd()` for indicator values
 - Charts use responsive SVG with `width="100%" viewBox`
 
+## AI Brain (hydra_brain.py)
+
+3-agent reasoning pipeline using Claude + Grok:
+- **Market Analyst** (Claude Sonnet) — evaluates engine signals, produces thesis + conviction
+- **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides trades, manages risk exposure
+- **Strategic Advisor** (Grok 4 Reasoning) — called only on contested decisions (ADJUST/OVERRIDE or conviction < 0.65)
+- Only fires on BUY/SELL signals (HOLD is free, no API call)
+- Falls back to engine-only on API failure, budget exceeded, or missing key
+- Enable by setting `ANTHROPIC_API_KEY` and/or `XAI_API_KEY` in `.env`
+- Cost: ~$3-5/day with Grok escalation on ~20-30% of signals
+- Do not change the JSON response format in system prompts — the parser depends on it
+- Do not change the escalation threshold (0.65) without testing — it controls when Grok fires
+- Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
+
 ## Testing
 
-Run the engine synthetic test:
+Run the full test suite (62 tests):
+```bash
+python tests/test_engine.py
+```
+
+Run the engine synthetic demo (no API keys needed):
 ```bash
 python hydra_engine.py
 ```
-This runs 300 ticks of random-walk data through the full pipeline. Expect a performance report at the end with trades, P&L, and metrics.
 
-See AUDIT.md for the full 49-point verification checklist.
+See AUDIT.md for the full verification checklist.
 
 ## Common Pitfalls
 

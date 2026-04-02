@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.0.0] — 2026-04-02
+
+### Added
+- **3-agent AI reasoning pipeline** (`hydra_brain.py`) — Claude + Grok evaluate every BUY/SELL signal before execution.
+  - **Market Analyst** (Claude Sonnet) — analyzes indicators, regime, price action; produces thesis, conviction, agreement/disagreement with engine signal.
+  - **Risk Manager** (Claude Sonnet) — evaluates portfolio risk, drawdown, exposure; produces CONFIRM / ADJUST / OVERRIDE decision with size multiplier.
+  - **Strategic Advisor** (Grok 4 Reasoning) — called only on contested decisions (ADJUST/OVERRIDE or conviction < 0.65). Re-evaluates with full context from both prior agents and makes the final call.
+- Multi-provider support: Anthropic Claude (primary) + xAI Grok (strategist). Both keys configurable via `.env`.
+- Intelligent escalation: clear CONFIRM signals skip Grok (~$0.008/decision), contested signals escalate (~$0.011/decision).
+- AI reasoning displayed in dashboard: decision badges (CONFIRM/ADJUST/OVERRIDE), analyst thesis, risk assessment, Grok strategist reasoning (when escalated), risk flags.
+- AI Brain sidebar panel: decisions, overrides, escalations, strategist status, API cost, latency, active/offline status.
+- Header badge switches to "AI LIVE" when brain is active.
+- 5-layer fallback system: single failure, repeated failures (disable 30 min), budget exceeded, missing API key, timeout.
+- Daily cost guard (`max_daily_cost`) prevents runaway API spend.
+- 8 new brain tests (fallback, budget guard, JSON parser, prompt builders, caching). Total: 62 tests.
+
+### Changed
+- Agent now routes BUY/SELL signals through 3-agent AI pipeline before execution (HOLD signals skip AI to save cost).
+- Trade log includes AI reasoning when brain is active.
+- Dashboard shows AI reasoning inline in each pair panel, with Grok strategist panel on escalated decisions.
+
+---
+
 ## [1.1.0] — 2026-04-01
 
 ### Added
