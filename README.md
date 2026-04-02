@@ -204,6 +204,9 @@ hydra/
 ├── .gitignore
 ├── LICENSE
 ├── README.md               # This file
+├── CLAUDE.md               # Agent instructions for Claude Code
+├── CHANGELOG.md            # Version history
+├── AUDIT.md                # Technical audit and test results
 ├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
 ├── .env                    # Kraken API keys (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
