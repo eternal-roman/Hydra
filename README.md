@@ -132,8 +132,8 @@ React + Vite dashboard at `http://localhost:3001` connected to the agent via Web
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/hydra.git
-cd hydra/Hydra
+git clone https://github.com/eternal-roman/Hydra.git
+cd Hydra
 
 # Install Python dependencies
 pip install websockets
@@ -200,27 +200,29 @@ This launches `start_all.bat` automatically on login.
 ## File Structure
 
 ```
-Hydra/
-├── hydra_engine.py        # Core: indicators, regime detection, signals, position sizing
-├── hydra_agent.py         # Kraken CLI integration, agent loop, trade execution, WebSocket
-├── SKILL.md               # Agent skill definition (Claude Code / MCP compatible)
-├── README.md              # This file
-├── .env                   # Kraken API keys (not committed)
-├── start_all.bat          # Launch agent + dashboard
-├── start_hydra.bat        # Agent with auto-restart
-├── start_dashboard.bat    # Dashboard with auto-restart
-├── create_shortcut.ps1    # Windows Startup shortcut creator
+hydra/
+├── .gitignore
+├── LICENSE
+├── README.md               # This file
+├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
+├── .env                    # Kraken API keys (not committed)
+├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
+├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket
+├── start_all.bat           # Launch agent + dashboard
+├── start_hydra.bat         # Agent with auto-restart
+├── start_dashboard.bat     # Dashboard with auto-restart
+├── create_shortcut.ps1     # Windows Startup shortcut creator
 └── dashboard/
-    ├── index.html          # Entry point
-    ├── package.json        # React 19 + Vite 8
-    ├── vite.config.js      # Dev server config
+    ├── index.html           # Entry point
+    ├── package.json         # React 19 + Vite 8
+    ├── vite.config.js       # Dev server config
     ├── public/
-    │   └── favicon.svg     # Three-headed Hydra icon
+    │   └── favicon.svg      # Three-headed Hydra icon
     └── src/
-        ├── main.jsx        # React root
-        ├── App.jsx         # Full dashboard (single-file, inline styles)
-        ├── App.css         # Empty (all styles inline)
-        └── index.css       # Base styles, fonts, scrollbar, pulse animation
+        ├── main.jsx         # React root
+        ├── App.jsx          # Full dashboard (single-file, inline styles)
+        ├── App.css          # Empty (all styles inline)
+        └── index.css        # Base styles, fonts, scrollbar, pulse animation
 ```
 
 ## Performance Metrics
