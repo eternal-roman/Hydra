@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  engine-tests:
+    name: Engine Tests (Python)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run engine test suite (47 tests)
+        run: python tests/test_engine.py
+
+      - name: Run engine synthetic demo
+        run: python hydra_engine.py
+
+      - name: Verify agent imports cleanly
+        run: python -c "import hydra_engine; print('hydra_engine OK')"
+
+  dashboard-build:
+    name: Dashboard Build (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Verify build output exists
+        working-directory: dashboard
+        run: |
+          test -f dist/index.html
+          echo "Dashboard build verified"

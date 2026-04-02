@@ -156,7 +156,7 @@ class Indicators:
             avg_gain = (avg_gain * (period - 1) + gain) / period
             avg_loss = (avg_loss * (period - 1) + loss) / period
         if avg_loss == 0:
-            return 100.0
+            return 100.0 if avg_gain > 0 else 50.0
         rs = avg_gain / avg_loss
         return 100.0 - 100.0 / (1.0 + rs)
 
@@ -456,7 +456,7 @@ class PositionSizer:
     def calculate(confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using modified quarter-Kelly."""
-        if confidence < PositionSizer.MIN_CONFIDENCE or balance < PositionSizer.MIN_TRADE_VALUE:
+        if confidence < PositionSizer.MIN_CONFIDENCE or balance < PositionSizer.MIN_TRADE_VALUE or price <= 0:
             return 0.0
 
         # Quarter-Kelly edge estimate: scale allocation by confidence edge

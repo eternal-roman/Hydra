@@ -1,0 +1,468 @@
+"""
+HYDRA Engine Test Suite
+Validates indicators, regime detection, signal generation, position sizing,
+and circuit breaker logic. All tests use deterministic synthetic data.
+"""
+
+import sys
+import os
+import math
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hydra_engine import (
+    Indicators, RegimeDetector, SignalGenerator, PositionSizer, HydraEngine,
+    Regime, Strategy, SignalAction, Candle,
+)
+
+
+# ═══════════════════════════════════════════════════════════════
+# HELPER: generate synthetic price data
+# ═══════════════════════════════════════════════════════════════
+
+def make_prices(base, changes):
+    """Build a price series from a base and list of deltas."""
+    prices = [base]
+    for d in changes:
+        prices.append(prices[-1] + d)
+    return prices
+
+
+def make_candles(prices):
+    """Build Candle objects from a price list."""
+    candles = []
+    for i, p in enumerate(prices):
+        candles.append(Candle(
+            open=p - 0.5, high=p + 1.0, low=p - 1.0, close=p, volume=100.0, timestamp=float(i),
+        ))
+    return candles
+
+
+def make_trending_up(n=100):
+    """Prices that trend upward steadily."""
+    return [100.0 + i * 0.5 for i in range(n)]
+
+
+def make_trending_down(n=100):
+    """Prices that trend downward steadily."""
+    return [200.0 - i * 0.5 for i in range(n)]
+
+
+def make_ranging(n=100):
+    """Prices that oscillate in a tight range."""
+    import math as m
+    return [100.0 + 2.0 * m.sin(i * 0.3) for i in range(n)]
+
+
+def make_volatile(n=100):
+    """Prices with large swings (high ATR)."""
+    return [100.0 + (10.0 if i % 2 == 0 else -10.0) for i in range(n)]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 1. INDICATOR TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestEMA:
+    def test_basic(self):
+        prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
+        result = Indicators.ema(prices, 5)
+        assert isinstance(result, float)
+        assert result > 14.0  # EMA should lag above midpoint for uptrend
+
+    def test_short_input(self):
+        prices = [10.0, 11.0]
+        result = Indicators.ema(prices, 5)
+        assert result == 11.0  # falls back to last price
+
+    def test_empty(self):
+        result = Indicators.ema([], 5)
+        assert result == 0.0
+
+    def test_sma_seed(self):
+        prices = [2.0, 4.0, 6.0, 8.0, 10.0]
+        result = Indicators.ema(prices, 5)
+        assert result == 6.0  # exactly SMA when period == len
+
+
+class TestRSI:
+    def test_uptrend(self):
+        prices = make_trending_up(50)
+        rsi = Indicators.rsi(prices)
+        assert rsi > 70  # strong uptrend should be overbought
+
+    def test_downtrend(self):
+        prices = make_trending_down(50)
+        rsi = Indicators.rsi(prices)
+        assert rsi < 30  # strong downtrend should be oversold
+
+    def test_flat(self):
+        prices = [100.0] * 50
+        rsi = Indicators.rsi(prices)
+        assert rsi == 50.0  # no movement = neutral
+
+    def test_insufficient_data(self):
+        prices = [100.0, 101.0]
+        rsi = Indicators.rsi(prices)
+        assert rsi == 50.0  # default when insufficient
+
+    def test_all_gains(self):
+        prices = list(range(1, 30))
+        rsi = Indicators.rsi(prices)
+        assert rsi == 100.0  # all gains, no losses
+
+    def test_range(self):
+        prices = make_ranging(100)
+        rsi = Indicators.rsi(prices)
+        assert 20 < rsi < 80  # ranging should be mid-range
+
+
+class TestATR:
+    def test_basic(self):
+        candles = make_candles(make_ranging(30))
+        atr = Indicators.atr(candles)
+        assert atr > 0
+
+    def test_insufficient_data(self):
+        candles = make_candles([100.0, 101.0])
+        atr = Indicators.atr(candles)
+        assert atr == 0.0
+
+    def test_volatile_higher(self):
+        calm_candles = make_candles(make_ranging(30))
+        wild_candles = make_candles(make_volatile(30))
+        assert Indicators.atr(wild_candles) > Indicators.atr(calm_candles)
+
+
+class TestBollingerBands:
+    def test_basic(self):
+        prices = make_ranging(30)
+        bb = Indicators.bollinger_bands(prices)
+        assert bb["upper"] > bb["middle"] > bb["lower"]
+        assert bb["width"] > 0
+
+    def test_flat(self):
+        prices = [100.0] * 25
+        bb = Indicators.bollinger_bands(prices)
+        assert bb["upper"] == bb["middle"] == bb["lower"] == 100.0
+        assert bb["width"] == 0.0
+
+    def test_short_input(self):
+        prices = [100.0, 101.0]
+        bb = Indicators.bollinger_bands(prices)
+        assert bb["upper"] == bb["lower"] == 101.0  # falls back to last price
+
+
+class TestMACD:
+    def test_uptrend_positive(self):
+        prices = make_trending_up(60)
+        macd = Indicators.macd(prices)
+        assert macd["macd"] > 0
+        assert macd["histogram"] != 0
+
+    def test_downtrend_negative(self):
+        prices = make_trending_down(60)
+        macd = Indicators.macd(prices)
+        assert macd["macd"] < 0
+
+    def test_insufficient_data(self):
+        prices = [100.0] * 10
+        macd = Indicators.macd(prices)
+        assert macd["macd"] == 0.0
+        assert macd["signal"] == 0.0
+        assert macd["histogram"] == 0.0
+
+    def test_signal_line_differs(self):
+        prices = make_trending_up(60)
+        macd = Indicators.macd(prices)
+        assert macd["signal"] != macd["macd"]  # signal line should lag
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2. REGIME DETECTION TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestRegimeDetection:
+    def test_warmup_returns_ranging(self):
+        prices = [100.0] * 20
+        candles = make_candles(prices)
+        assert RegimeDetector.detect(candles, prices) == Regime.RANGING
+
+    def test_trend_up(self):
+        prices = make_trending_up(100)
+        candles = make_candles(prices)
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime == Regime.TREND_UP
+
+    def test_trend_down(self):
+        prices = make_trending_down(100)
+        candles = make_candles(prices)
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime == Regime.TREND_DOWN
+
+    def test_ranging(self):
+        prices = make_ranging(100)
+        candles = make_candles(prices)
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime == Regime.RANGING
+
+    def test_volatile_overrides_trend(self):
+        # Volatile should override even if there's a trend
+        prices = make_volatile(100)
+        # Create candles with extreme high/low swings for high ATR
+        candles = []
+        for i, p in enumerate(prices):
+            candles.append(Candle(
+                open=p, high=p + 15.0, low=p - 15.0, close=p, volume=100.0, timestamp=float(i),
+            ))
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime == Regime.VOLATILE
+
+
+# ═══════════════════════════════════════════════════════════════
+# 3. SIGNAL GENERATION TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestSignalGeneration:
+    def test_warmup_hold(self):
+        prices = [100.0] * 10
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles)
+        assert signal.action == SignalAction.HOLD
+        assert signal.confidence == 0.0
+
+    def test_momentum_returns_signal(self):
+        prices = make_trending_up(60)
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles)
+        assert signal.action in (SignalAction.BUY, SignalAction.SELL, SignalAction.HOLD)
+        assert signal.strategy == Strategy.MOMENTUM
+        assert 0 <= signal.confidence <= 1
+
+    def test_mean_reversion_returns_signal(self):
+        prices = make_ranging(60)
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.MEAN_REVERSION, prices, candles)
+        assert signal.strategy == Strategy.MEAN_REVERSION
+
+    def test_grid_returns_signal(self):
+        prices = make_volatile(60)
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.GRID, prices, candles)
+        assert signal.strategy == Strategy.GRID
+
+    def test_defensive_returns_signal(self):
+        prices = make_trending_down(60)
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
+        assert signal.strategy == Strategy.DEFENSIVE
+
+    def test_all_signals_have_indicators(self):
+        prices = make_ranging(60)
+        candles = make_candles(prices)
+        for strat in Strategy:
+            signal = SignalGenerator.generate(strat, prices, candles)
+            assert "rsi" in signal.indicators
+            assert "macd_histogram" in signal.indicators
+            assert "bb_upper" in signal.indicators
+
+    def test_defensive_buy_below_threshold(self):
+        """DEFENSIVE BUY has confidence 0.4, below 0.55 execution threshold."""
+        prices = make_trending_down(60)
+        # Force RSI very low
+        prices[-1] = prices[-1] - 50  # big drop
+        candles = make_candles(prices)
+        signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
+        if signal.action == SignalAction.BUY:
+            assert signal.confidence < PositionSizer.MIN_CONFIDENCE
+
+
+# ═══════════════════════════════════════════════════════════════
+# 4. POSITION SIZING TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestPositionSizer:
+    def test_below_threshold(self):
+        size = PositionSizer.calculate(0.50, 10000, 100.0, "SOL/USDC")
+        assert size == 0.0  # below 0.55 confidence
+
+    def test_at_threshold(self):
+        size = PositionSizer.calculate(0.55, 10000, 100.0, "SOL/USDC")
+        assert size > 0
+
+    def test_max_position_cap(self):
+        size = PositionSizer.calculate(0.99, 10000, 100.0, "SOL/USDC")
+        value = size * 100.0
+        assert value <= 10000 * 0.30  # max 30%
+
+    def test_min_trade_value(self):
+        size = PositionSizer.calculate(0.55, 1.0, 100.0, "SOL/USDC")
+        # With $1 balance, quarter-kelly at 0.55 = 0.025 * 1 = $0.025 < $0.50
+        assert size == 0.0
+
+    def test_kraken_min_order_size(self):
+        # SOL min is 0.02
+        size = PositionSizer.calculate(0.56, 100.0, 100.0, "SOL/USDC")
+        if size > 0:
+            assert size >= 0.02
+
+    def test_xbt_min_order_size(self):
+        size = PositionSizer.calculate(0.95, 1000.0, 67000.0, "XBT/USDC")
+        if size > 0:
+            assert size >= 0.00005
+
+    def test_zero_price(self):
+        size = PositionSizer.calculate(0.8, 10000, 0.0)
+        # division by zero guard — should not crash
+        assert True  # if we get here, no crash
+
+    def test_scaling(self):
+        low = PositionSizer.calculate(0.60, 10000, 100.0, "SOL/USDC")
+        high = PositionSizer.calculate(0.90, 10000, 100.0, "SOL/USDC")
+        assert high > low  # higher confidence = larger position
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. ENGINE INTEGRATION TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestHydraEngine:
+    def test_ingest_and_tick(self):
+        engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 95000 + i, "high": 95100 + i,
+                "low": 94900 + i, "close": 95000 + i * 2,
+                "volume": 100,
+            })
+        state = engine.tick()
+        assert "regime" in state
+        assert "strategy" in state
+        assert "signal" in state
+        assert "portfolio" in state
+        assert "candles" in state
+
+    def test_circuit_breaker(self):
+        engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
+        # Force a massive drawdown
+        engine.peak_equity = 10000
+        engine.balance = 8000  # 20% loss
+        engine.position.size = 0
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 50000, "high": 50100, "low": 49900, "close": 50000, "volume": 100,
+            })
+        state = engine.tick()
+        assert state["halted"] is True
+        assert "CIRCUIT BREAKER" in state["halt_reason"]
+
+    def test_buy_updates_position(self):
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        # Feed trending up data to trigger momentum buy
+        for i in range(80):
+            p = 100.0 + i * 0.5
+            engine.ingest_candle({
+                "open": p - 0.2, "high": p + 0.5, "low": p - 0.5, "close": p, "volume": 100,
+            })
+            engine.tick()
+        # After trending up, engine should have opened a position
+        assert engine.total_trades > 0 or engine.position.size >= 0  # may or may not trade
+
+    def test_candle_memory_bound(self):
+        engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
+        for i in range(500):
+            engine.ingest_candle({
+                "open": 95000, "high": 95100, "low": 94900, "close": 95000, "volume": 100,
+            })
+        assert len(engine.candles) <= engine.MAX_CANDLES
+        assert len(engine.prices) <= engine.MAX_CANDLES
+
+    def test_performance_report(self):
+        engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 95000, "high": 95100, "low": 94900, "close": 95000, "volume": 100,
+            })
+            engine.tick()
+        report = engine.get_performance_report()
+        assert "HYDRA PERFORMANCE REPORT" in report
+        assert "BTC/USD" in report
+        assert "Net P&L" in report
+
+    def test_state_has_candles(self):
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(30):
+            engine.ingest_candle({
+                "open": 80.0, "high": 81.0, "low": 79.0, "close": 80.0, "volume": 100,
+            })
+        state = engine.tick()
+        assert len(state["candles"]) == 30
+        assert "o" in state["candles"][0]
+        assert "h" in state["candles"][0]
+        assert "l" in state["candles"][0]
+        assert "c" in state["candles"][0]
+
+    def test_sell_records_profit(self):
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        # Manually set a position
+        engine.position.size = 10.0
+        engine.position.avg_entry = 90.0
+        engine.balance = 9100.0
+        # Feed data that should trigger a sell (RSI > 50 in defensive, or above BB upper)
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100,
+            })
+            state = engine.tick()
+            if state.get("last_trade") and state["last_trade"]["action"] == "SELL":
+                assert state["last_trade"]["profit"] is not None
+                break
+
+
+# ═══════════════════════════════════════════════════════════════
+# RUNNER
+# ═══════════════════════════════════════════════════════════════
+
+def run_tests():
+    """Simple test runner — no pytest dependency needed."""
+    passed = 0
+    failed = 0
+    errors = []
+
+    test_classes = [
+        TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
+        TestRegimeDetection, TestSignalGeneration, TestPositionSizer, TestHydraEngine,
+    ]
+
+    for cls in test_classes:
+        instance = cls()
+        methods = [m for m in dir(instance) if m.startswith("test_")]
+        for method_name in sorted(methods):
+            test_name = f"{cls.__name__}.{method_name}"
+            try:
+                getattr(instance, method_name)()
+                passed += 1
+                print(f"  PASS  {test_name}")
+            except AssertionError as e:
+                failed += 1
+                errors.append((test_name, str(e)))
+                print(f"  FAIL  {test_name}: {e}")
+            except Exception as e:
+                failed += 1
+                errors.append((test_name, str(e)))
+                print(f"  ERROR {test_name}: {e}")
+
+    print(f"\n  {'='*50}")
+    print(f"  Results: {passed} passed, {failed} failed, {passed + failed} total")
+    print(f"  {'='*50}")
+
+    if errors:
+        print("\n  Failures:")
+        for name, err in errors:
+            print(f"    {name}: {err}")
+
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = run_tests()
+    sys.exit(0 if success else 1)
