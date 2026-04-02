@@ -1,5 +1,7 @@
 # HYDRA — Hyper-adaptive Dynamic Regime-switching Universal Agent
 
+[![CI](https://github.com/eternal-roman/Hydra/actions/workflows/ci.yml/badge.svg)](https://github.com/eternal-roman/Hydra/actions/workflows/ci.yml)
+
 A multi-strategy crypto trading agent that detects market regimes in real-time and switches between four optimized strategies. Built for [Kraken](https://www.kraken.com) via [kraken-cli](https://github.com/krakenfx/kraken-cli), with a live React dashboard.
 
 ## The Problem
