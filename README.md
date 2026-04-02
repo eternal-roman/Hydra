@@ -39,7 +39,7 @@ HYDRA Agent Loop (30s tick)
   (Quarter-Kelly)                        --type limit
                                          --oflags post
        │
-  WebSocket ──> React Dashboard (localhost:3001)
+  WebSocket ──> React Dashboard (localhost:3000)
 ```
 
 ## Trading Pairs
@@ -98,9 +98,37 @@ This means lower fees (maker rate) and no slippage from market orders.
 | **Validation** | Every order is validated via `--validate` before real execution |
 | **Graceful Shutdown** | Ctrl+C triggers SIGINT handler → final performance report → trade log export |
 
+## AI Brain — 3-Agent Reasoning Pipeline
+
+Every BUY/SELL signal passes through a multi-agent AI pipeline before execution:
+
+```
+Engine signal (BUY/SELL)
+  → Agent 1: Market Analyst (Claude Sonnet) — thesis, conviction, agreement
+  → Agent 2: Risk Manager (Claude Sonnet) — CONFIRM / ADJUST / OVERRIDE
+  → Agent 3: Strategic Advisor (Grok 4 Reasoning) — only on contested decisions
+  → Execute or skip
+```
+
+| Agent | Model | When | Cost |
+|-------|-------|------|------|
+| Market Analyst | Claude Sonnet | Every BUY/SELL signal | ~$0.004 |
+| Risk Manager | Claude Sonnet | Every BUY/SELL signal | ~$0.004 |
+| Strategic Advisor | Grok 4 Reasoning | Only when ADJUST/OVERRIDE or conviction < 65% | ~$0.003 |
+
+**Grok escalation:** When the Analyst and Risk Manager disagree, or the Analyst's conviction is low, Grok 4 is called as the final decision-maker with full context from both prior agents. Clear CONFIRM signals skip Grok entirely.
+
+**Fallback:** If AI is unavailable (API failure, budget exceeded, no key), the system falls back to engine-only mode. Trading continues without interruption.
+
+Enable by setting API keys in `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-api03-...
+XAI_API_KEY=xai-...
+```
+
 ## Live Dashboard
 
-React + Vite dashboard at `http://localhost:3001` connected to the agent via WebSocket on port 8765.
+React + Vite dashboard at `http://localhost:3000` connected to the agent via WebSocket on port 8765.
 
 **Components:**
 - **Header** — Hydra logo, LIVE TRADING badge, connection status with tick counter, session elapsed time
@@ -145,7 +173,7 @@ cd dashboard && npm run dev
 # Terminal 2: Start the trading agent (runs forever)
 python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100 --interval 30
 
-# Open http://localhost:3001 in your browser
+# Open http://localhost:3000 in your browser
 ```
 
 Or use the launcher scripts:
@@ -222,8 +250,9 @@ hydra/
 ├── CHANGELOG.md            # Version history
 ├── AUDIT.md                # Technical audit and test results
 ├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
-├── .env                    # Kraken API keys (not committed)
+├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
+├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
 ├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
@@ -296,7 +325,7 @@ This executes 300 ticks of random-walk price data through the full pipeline and 
 |-------|----------|
 | `kraken: command not found` | Install kraken-cli in WSL: `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh \| sh` |
 | `wsl: not found` or WSL errors | Ensure WSL is installed with Ubuntu: `wsl --install -d Ubuntu` |
-| Port 3001 in use | Dashboard auto-picks next port, or kill the process: `npx kill-port 3001` |
+| Port 3000 in use | Dashboard auto-picks next port, or kill the process: `npx kill-port 3000` |
 | Port 8765 in use | Stop any running agent, or change port: `--ws-port 8766` |
 | `websockets` not installed | `pip install websockets` |
 | Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |
