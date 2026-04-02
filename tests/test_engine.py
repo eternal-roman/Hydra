@@ -403,15 +403,28 @@ class TestHydraEngine:
 
     def test_buy_updates_position(self):
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
-        # Feed trending up data to trigger momentum buy
-        for i in range(80):
-            p = 100.0 + i * 0.5
+        # Phase 1: stable ranging to establish Bollinger Bands
+        import random
+        rng = random.Random(42)
+        for i in range(55):
+            p = 100.0 + rng.uniform(-0.3, 0.3)
             engine.ingest_candle({
-                "open": p - 0.2, "high": p + 0.5, "low": p - 0.5, "close": p, "volume": 100,
+                "open": p - 0.1, "high": p + 0.2, "low": p - 0.2, "close": p, "volume": 100,
             })
             engine.tick()
-        # After trending up, engine should have opened a position
-        assert engine.total_trades > 0 or engine.position.size >= 0  # may or may not trade
+        # Phase 2: price dips below BB lower with RSI < 35 to trigger mean reversion BUY
+        p = 100.0
+        for i in range(20):
+            p -= 0.5
+            engine.ingest_candle({
+                "open": p + 0.1, "high": p + 0.2, "low": p - 0.2, "close": p, "volume": 100,
+            })
+            engine.tick()
+        # Engine should have opened a position via mean reversion buy
+        assert engine.total_trades > 0, "Expected at least one buy trade"
+        assert engine.position.size > 0, "Expected position to be open"
+        assert engine.position.avg_entry > 0, "Expected valid entry price"
+        assert engine.balance < 10000, "Expected balance to decrease after buying"
 
     def test_candle_memory_bound(self):
         engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
