@@ -438,11 +438,23 @@ class SignalGenerator:
 # POSITION SIZER (Quarter-Kelly Criterion)
 # ═══════════════════════════════════════════════════════════════
 
+# ─── Sizing Presets ───
+
+SIZING_CONSERVATIVE = {
+    "kelly_multiplier": 0.25,   # Quarter-Kelly
+    "min_confidence": 0.55,
+    "max_position_pct": 0.30,
+}
+
+SIZING_COMPETITION = {
+    "kelly_multiplier": 0.50,   # Half-Kelly — more aggressive
+    "min_confidence": 0.50,     # Lower threshold — trades more often
+    "max_position_pct": 0.40,   # Larger positions allowed
+}
+
+
 class PositionSizer:
-    MAX_POSITION_PCT = 0.30   # Never more than 30% of balance per trade
-    BASE_ALLOCATION = 0.10    # Base 10% allocation, scaled by confidence
     MIN_TRADE_VALUE = 0.50    # Minimum $0.50 trade (Kraken costmin)
-    MIN_CONFIDENCE = 0.55     # Don't trade below this
 
     # Kraken minimum order sizes per base asset
     MIN_ORDER_SIZE = {
@@ -452,35 +464,38 @@ class PositionSizer:
         "ETH": 0.001,
     }
 
-    @staticmethod
-    def calculate(confidence: float, balance: float, price: float,
+    def __init__(self, kelly_multiplier: float = 0.25,
+                 min_confidence: float = 0.55,
+                 max_position_pct: float = 0.30):
+        self.kelly_multiplier = kelly_multiplier
+        self.min_confidence = min_confidence
+        self.max_position_pct = max_position_pct
+
+    def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
-        """Returns position size in asset units using modified quarter-Kelly."""
-        if confidence < PositionSizer.MIN_CONFIDENCE or balance < PositionSizer.MIN_TRADE_VALUE or price <= 0:
+        """Returns position size in asset units using Kelly criterion."""
+        if confidence < self.min_confidence or balance < self.MIN_TRADE_VALUE or price <= 0:
             return 0.0
 
-        # Quarter-Kelly edge estimate: scale allocation by confidence edge
+        # Kelly edge estimate scaled by multiplier
         edge = max(0.0, (confidence * 2.0 - 1.0))  # 0 at 50% conf, 1 at 100%
-        kelly_quarter = edge * 0.25
+        kelly = edge * self.kelly_multiplier
 
-        # Position value = kelly fraction * balance
-        # At 0.55 conf: edge=0.1, kelly_q=0.025, value=0.025*bal= $2.50 on $100
-        # At 0.95 conf: edge=0.9, kelly_q=0.225, value=0.225*bal= $22.50 on $100
-        position_value = kelly_quarter * balance
+        position_value = kelly * balance
 
         # Enforce max position limit
-        max_value = balance * PositionSizer.MAX_POSITION_PCT
+        max_value = balance * self.max_position_pct
         position_value = min(position_value, max_value)
 
         # Enforce minimum cost
-        if position_value < PositionSizer.MIN_TRADE_VALUE:
+        if position_value < self.MIN_TRADE_VALUE:
             return 0.0
 
         size = position_value / price
 
         # Enforce Kraken minimum order sizes
         base_asset = asset.split("/")[0] if "/" in asset else asset
-        min_size = PositionSizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
+        min_size = self.MIN_ORDER_SIZE.get(base_asset, 0.02)
         if size < min_size:
             return 0.0
 
@@ -504,11 +519,14 @@ class HydraEngine:
     MAX_CANDLES = 250
     CIRCUIT_BREAKER_PCT = 15.0  # Stop if drawdown exceeds 15%
 
-    def __init__(self, initial_balance: float = 10000.0, asset: str = "BTC/USD"):
+    def __init__(self, initial_balance: float = 10000.0, asset: str = "BTC/USD",
+                 sizing: Optional[Dict[str, float]] = None):
         self.asset = asset
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.position = Position(asset=asset)
+        cfg = sizing or SIZING_CONSERVATIVE
+        self.sizer = PositionSizer(**cfg)
         self.candles: List[Candle] = []
         self.prices: List[float] = []
         self.trades: List[Trade] = []
@@ -587,8 +605,8 @@ class HydraEngine:
 
         current_price = self.prices[-1]
 
-        if signal.action == SignalAction.BUY and signal.confidence >= PositionSizer.MIN_CONFIDENCE:
-            size = PositionSizer.calculate(signal.confidence, self.balance, current_price, self.asset)
+        if signal.action == SignalAction.BUY and signal.confidence >= self.sizer.min_confidence:
+            size = self.sizer.calculate(signal.confidence, self.balance, current_price, self.asset)
             if size > 0:
                 cost = size * current_price
                 # Update position (average in)

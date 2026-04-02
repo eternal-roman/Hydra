@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hydra_engine import HydraEngine
+from hydra_engine import HydraEngine, SIZING_CONSERVATIVE, SIZING_COMPETITION
 
 # ═══════════════════════════════════════════════════════════════
 # KRAKEN CLI WRAPPER (via WSL)
@@ -188,6 +188,30 @@ class KrakenCLI:
         """Cancel all open orders."""
         return KrakenCLI._run(["order", "cancel-all", "--yes"])
 
+    # ─── Paper Trading ───
+
+    @staticmethod
+    def paper_buy(pair: str, volume: float, order_type: str = "market") -> dict:
+        """Paper trade buy — no API keys needed."""
+        p = KrakenCLI._resolve_pair(pair)
+        return KrakenCLI._run(["paper", "buy", p, "--type", order_type, "--volume", f"{volume:.8f}"])
+
+    @staticmethod
+    def paper_sell(pair: str, volume: float, order_type: str = "market") -> dict:
+        """Paper trade sell — no API keys needed."""
+        p = KrakenCLI._resolve_pair(pair)
+        return KrakenCLI._run(["paper", "sell", p, "--type", order_type, "--volume", f"{volume:.8f}"])
+
+    @staticmethod
+    def paper_balance() -> dict:
+        """Get paper trading balance."""
+        return KrakenCLI._run(["paper", "balance"])
+
+    @staticmethod
+    def paper_positions() -> dict:
+        """Get paper trading positions."""
+        return KrakenCLI._run(["paper", "positions"])
+
 
 # ═══════════════════════════════════════════════════════════════
 # WEBSOCKET BROADCAST SERVER (for React Dashboard)
@@ -278,14 +302,21 @@ class HydraAgent:
         interval_seconds: int = 60,
         duration_seconds: int = 600,
         ws_port: int = 8765,
+        mode: str = "conservative",
+        paper: bool = False,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
         self.interval = interval_seconds
         self.duration = duration_seconds
+        self.mode = mode
+        self.paper = paper
         self.running = True
         self.start_time = None
         self.trade_log = []
+
+        # Sizing config based on mode
+        sizing = SIZING_COMPETITION if mode == "competition" else SIZING_CONSERVATIVE
 
         # One engine per pair
         self.engines: Dict[str, HydraEngine] = {}
@@ -293,6 +324,7 @@ class HydraAgent:
             self.engines[pair] = HydraEngine(
                 initial_balance=initial_balance / len(pairs),
                 asset=pair,
+                sizing=sizing,
             )
 
         # Dashboard broadcaster
@@ -318,13 +350,14 @@ class HydraAgent:
         self.broadcaster.start()
         time.sleep(0.5)
 
-        # Set dead man's switch
-        print("  [HYDRA] Setting dead man's switch (60s)...")
-        result = KrakenCLI.cancel_after(60)
-        if "error" not in result:
-            print("  [HYDRA] Dead man's switch active")
-        else:
-            print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
+        # Set dead man's switch (live mode only)
+        if not self.paper:
+            print("  [HYDRA] Setting dead man's switch (60s)...")
+            result = KrakenCLI.cancel_after(60)
+            if "error" not in result:
+                print("  [HYDRA] Dead man's switch active")
+            else:
+                print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
 
         # Check account balance
         print("  [HYDRA] Checking account balance...")
@@ -362,9 +395,10 @@ class HydraAgent:
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             print(f"\n  === Tick {tick} | {ts} | Elapsed: {elapsed:.0f}s | Remaining: {remaining} ===")
 
-            # Refresh dead man's switch every tick for safety
-            KrakenCLI.cancel_after(60)
-            time.sleep(2)  # Rate limit
+            # Refresh dead man's switch every tick (live mode only)
+            if not self.paper:
+                KrakenCLI.cancel_after(60)
+                time.sleep(2)  # Rate limit
 
             all_states = {}
             for pair in self.pairs:
@@ -415,15 +449,18 @@ class HydraAgent:
         return engine.tick()
 
     def _execute_trade(self, pair: str, trade: dict):
-        """Execute a real trade via kraken-cli using limit post-only orders."""
+        """Execute a trade via kraken-cli — paper or live limit post-only."""
         action = trade["action"].lower()
         amount = trade["amount"]
 
-        # Fetch current bid/ask for limit price
-        time.sleep(2)  # Rate limit before ticker fetch
+        if self.paper:
+            return self._execute_paper_trade(pair, action, amount, trade)
+
+        # ─── Live: limit post-only ───
+        time.sleep(2)
         ticker = KrakenCLI.ticker(pair)
         if "error" in ticker or "bid" not in ticker:
-            print(f"  [TRADE] Cannot fetch ticker for {pair}, skipping trade")
+            print(f"  [TRADE] Cannot fetch ticker for {pair}, skipping")
             self.trade_log.append({
                 "time": datetime.now(timezone.utc).isoformat(),
                 "pair": pair, "action": trade["action"], "amount": amount,
@@ -432,14 +469,10 @@ class HydraAgent:
             })
             return
 
-        # Post-only: BUY at bid (sit on book), SELL at ask (sit on book)
-        if action == "buy":
-            limit_price = ticker["bid"]
-        else:
-            limit_price = ticker["ask"]
+        limit_price = ticker["bid"] if action == "buy" else ticker["ask"]
 
-        # Validate first
-        time.sleep(2)  # Rate limit
+        # Validate
+        time.sleep(2)
         print(f"  [TRADE] Validating {action.upper()} {amount:.8f} {pair} @ {limit_price} (post-only limit)...")
         if action == "buy":
             val_result = KrakenCLI.order_buy(pair, amount, price=limit_price, validate=True)
@@ -456,8 +489,8 @@ class HydraAgent:
             })
             return
 
-        # Execute limit post-only order
-        time.sleep(2)  # Rate limit
+        # Execute
+        time.sleep(2)
         print(f"  [TRADE] Executing {action.upper()} {amount:.8f} {pair} @ {limit_price} (limit post-only)...")
         if action == "buy":
             result = KrakenCLI.order_buy(pair, amount, price=limit_price)
@@ -479,6 +512,36 @@ class HydraAgent:
             "amount": amount,
             "price": limit_price,
             "order_type": "limit post-only",
+            "reason": trade["reason"],
+            "confidence": trade.get("confidence"),
+            "status": status,
+            "result": result if "error" not in result else None,
+            "error": result.get("error"),
+        })
+
+    def _execute_paper_trade(self, pair: str, action: str, amount: float, trade: dict):
+        """Execute a paper trade via kraken-cli paper commands."""
+        time.sleep(2)
+        print(f"  [PAPER] Executing {action.upper()} {amount:.8f} {pair} (paper market)...")
+        if action == "buy":
+            result = KrakenCLI.paper_buy(pair, amount)
+        else:
+            result = KrakenCLI.paper_sell(pair, amount)
+
+        if "error" in result:
+            print(f"  [PAPER] FAILED: {result['error']}")
+            status = "PAPER_FAILED"
+        else:
+            print(f"  [PAPER] SUCCESS: {action.upper()} {amount:.8f} {pair}")
+            status = "PAPER_EXECUTED"
+
+        self.trade_log.append({
+            "time": datetime.now(timezone.utc).isoformat(),
+            "pair": pair,
+            "action": trade["action"],
+            "amount": amount,
+            "price": trade["price"],
+            "order_type": "paper market",
             "reason": trade["reason"],
             "confidence": trade.get("confidence"),
             "status": status,
@@ -565,11 +628,16 @@ class HydraAgent:
             print(f"  |      Reason: {t['reason'][:75]}")
 
     def _print_banner(self):
+        trade_mode = "PAPER" if self.paper else "LIVE"
+        sizing_mode = self.mode.upper()
         print("")
         print("  HYDRA - Hyper-adaptive Dynamic Regime-switching Universal Agent")
         print("  ================================================================")
-        print("  Mode: LIVE TRADING | Kraken CLI v0.2.3 (WSL)")
-        print("  WARNING: Real trades with real money. Dead man's switch active.")
+        print(f"  Trading: {trade_mode} | Sizing: {sizing_mode} | Kraken CLI v0.2.3 (WSL)")
+        if self.paper:
+            print("  Paper trading — no real money at risk.")
+        else:
+            print("  WARNING: Real trades with real money. Dead man's switch active.")
         print("")
 
     def _print_final_report(self):
@@ -602,8 +670,9 @@ class HydraAgent:
             print(f"\n  No trades executed during session.")
 
         # Export trade log
-        log_file = os.path.join(os.path.dirname(__file__),
-                                f"hydra_trades_{int(time.time())}.json")
+        ts = int(time.time())
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        log_file = os.path.join(base_dir, f"hydra_trades_{ts}.json")
         try:
             with open(log_file, "w") as f:
                 json.dump(self.trade_log, f, indent=2)
@@ -611,8 +680,67 @@ class HydraAgent:
         except Exception as e:
             print(f"\n  [WARN] Could not export trade log: {e}")
 
+        # Export competition results summary
+        self._export_competition_results(base_dir, ts)
+
         print(f"\n  Past performance does not guarantee future results. Not financial advice.")
         print(f"  {'='*80}")
+
+    def _export_competition_results(self, base_dir: str, ts: int):
+        """Export a competition_results.json for submission proof."""
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        pair_results = {}
+        total_pnl = 0.0
+        total_trades = 0
+
+        for pair in self.pairs:
+            engine = self.engines[pair]
+            price = engine.prices[-1] if engine.prices else 0
+            equity = engine.balance + engine.position.size * price
+            pnl = equity - engine.initial_balance
+            total_pnl += pnl
+            total_trades += engine.total_trades
+            win_rate = (engine.win_count / (engine.win_count + engine.loss_count) * 100) if (engine.win_count + engine.loss_count) > 0 else 0
+
+            pair_results[pair] = {
+                "initial_balance": engine.initial_balance,
+                "final_equity": round(equity, 4),
+                "net_pnl": round(pnl, 4),
+                "pnl_pct": round((pnl / engine.initial_balance) * 100, 4) if engine.initial_balance > 0 else 0,
+                "max_drawdown_pct": round(engine.max_drawdown, 4),
+                "total_trades": engine.total_trades,
+                "wins": engine.win_count,
+                "losses": engine.loss_count,
+                "win_rate_pct": round(win_rate, 2),
+                "sharpe": round(engine._calc_sharpe(), 4),
+                "final_price": round(price, 8),
+                "position_size": round(engine.position.size, 8),
+            }
+
+        results = {
+            "agent": "HYDRA",
+            "version": "1.1.0",
+            "mode": self.mode,
+            "paper": self.paper,
+            "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
+            "timestamp_end": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": round(elapsed, 1),
+            "pairs": self.pairs,
+            "total_initial_balance": self.initial_balance,
+            "total_net_pnl": round(total_pnl, 4),
+            "total_pnl_pct": round((total_pnl / self.initial_balance) * 100, 4) if self.initial_balance > 0 else 0,
+            "total_trades": total_trades,
+            "pair_results": pair_results,
+            "trade_log": self.trade_log,
+        }
+
+        results_file = os.path.join(base_dir, f"competition_results_{ts}.json")
+        try:
+            with open(results_file, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"  Competition results exported to: {results_file}")
+        except Exception as e:
+            print(f"  [WARN] Could not export competition results: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -633,15 +761,25 @@ def main():
                         help="Total duration in seconds (default: 0 = run forever, Ctrl+C to stop)")
     parser.add_argument("--ws-port", type=int, default=8765,
                         help="WebSocket port for dashboard (default: 8765)")
+    parser.add_argument("--mode", type=str, default="conservative",
+                        choices=["conservative", "competition"],
+                        help="Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)")
+    parser.add_argument("--paper", action="store_true",
+                        help="Use paper trading (no API keys needed, no real money)")
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
 
-    print("\n  WARNING: HYDRA will execute REAL trades on Kraken.")
+    if args.paper:
+        print(f"\n  HYDRA — Paper trading mode. No real money at risk.")
+    else:
+        print(f"\n  WARNING: HYDRA will execute REAL trades on Kraken.")
     print(f"  Pairs: {', '.join(pairs)}")
-    print(f"  Balance ref: ${args.balance}")
+    print(f"  Mode: {args.mode} | Balance ref: ${args.balance}")
     print(f"  Duration: {args.duration}s")
-    print(f"  Dead man's switch will be active.\n")
+    if not args.paper:
+        print(f"  Dead man's switch will be active.")
+    print()
 
     agent = HydraAgent(
         pairs=pairs,
@@ -649,6 +787,8 @@ def main():
         interval_seconds=args.interval,
         duration_seconds=args.duration,
         ws_port=args.ws_port,
+        mode=args.mode,
+        paper=args.paper,
     )
     agent.run()
 
