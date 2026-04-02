@@ -199,11 +199,10 @@ class HydraBrain:
         self.tick_counter += 1
         self._maybe_reset_daily()
 
-        # Skip if not an AI tick
+        # Skip if not an AI tick — return fallback instead of stale decision
+        # to avoid replaying old BUY/SELL signals into changed market conditions
         if self.call_interval > 1 and self.tick_counter % self.call_interval != 0:
-            if self.last_decision and not self.last_decision.fallback:
-                return self.last_decision
-            return self._fallback(state)
+            return self._fallback(state, reason="Non-AI tick")
 
         # Skip if API is down
         if not self.api_available:

@@ -648,11 +648,14 @@ class HydraEngine:
                 self.position.size = 0.0
                 self.position.avg_entry = 0.0
 
-            self.total_trades += 1
-            if profit > 0:
-                self.win_count += 1
-            else:
-                self.loss_count += 1
+            # Only count as a completed trade when position is fully closed
+            if self.position.size == 0.0:
+                self.total_trades += 1
+                if profit > 0:
+                    self.win_count += 1
+                elif profit < 0:
+                    self.loss_count += 1
+                # profit == 0 is break-even, don't count as win or loss
 
             trade = Trade(
                 action="SELL",
