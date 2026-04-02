@@ -311,7 +311,7 @@
 
 ### 8.2 Windows Startup
 - **Location:** `create_shortcut.ps1`
-- **Target:** `C:\Users\elamj\hydra\start_all.bat`
+- **Target:** `<repo_root>\start_all.bat` (resolved dynamically via `$MyInvocation`)
 - **Result:** PASS — shortcut created in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`
 
 ### 8.3 Pair Mapping
