@@ -348,12 +348,15 @@ class HydraAgent:
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
 
-        # AI Brain (optional — degrades gracefully without API key)
+        # AI Brain (optional — tries Anthropic first, then xAI, then engine-only)
         self.brain = None
         if HAS_BRAIN:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if api_key:
-                self.brain = HydraBrain(api_key=api_key)
+            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            xai_key = os.environ.get("XAI_API_KEY", "")
+            if anthropic_key:
+                self.brain = HydraBrain(api_key=anthropic_key, provider="anthropic")
+            elif xai_key:
+                self.brain = HydraBrain(api_key=xai_key, provider="xai")
 
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
@@ -704,7 +707,7 @@ class HydraAgent:
     def _print_banner(self):
         trade_mode = "PAPER" if self.paper else "LIVE"
         sizing_mode = self.mode.upper()
-        brain_status = f"AI Brain: {self.brain.model}" if self.brain else "AI Brain: DISABLED (no API key)"
+        brain_status = f"AI Brain: {self.brain.provider}/{self.brain.model}" if self.brain else "AI Brain: DISABLED (no API key)"
         print("")
         print("  HYDRA - Hyper-adaptive Dynamic Regime-switching Universal Agent")
         print("  ================================================================")

@@ -4,14 +4,12 @@ HYDRA Brain — Multi-Agent AI Reasoning Layer
 
 Two-agent system: Market Analyst + Risk Manager.
 Analyst evaluates the engine signal, Risk Manager approves or overrides.
-Uses Claude Sonnet via the Anthropic SDK. Falls back to engine-only on failure.
+Supports multiple AI providers: Anthropic Claude (primary) and xAI Grok (fallback).
 
 Usage:
     brain = HydraBrain(api_key="sk-ant-...")
+    brain = HydraBrain(api_key="xai-...", provider="xai")
     decision = brain.deliberate(engine_state)
-    # decision.action: "CONFIRM", "ADJUST", "OVERRIDE"
-    # decision.analyst_reasoning: "RSI oversold with MACD turning..."
-    # decision.risk_reasoning: "Drawdown within limits, confirming..."
 """
 
 import json
@@ -27,6 +25,12 @@ try:
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
+
+try:
+    import openai
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -95,25 +99,39 @@ Respond ONLY with this JSON (no other text):
 # HYDRA BRAIN
 # ═══════════════════════════════════════════════════════════════
 
-class HydraBrain:
-    """Two-agent AI reasoning layer for HYDRA trading decisions."""
+    # Provider configs: (default_model, input_cost_per_M, output_cost_per_M)
+PROVIDER_DEFAULTS = {
+    "anthropic": ("claude-sonnet-4-20250514", 3.0, 15.0),
+    "xai":       ("grok-3-mini",              0.30, 0.50),
+}
 
-    # Sonnet pricing per million tokens
-    INPUT_COST_PER_M = 3.0
-    OUTPUT_COST_PER_M = 15.0
+
+class HydraBrain:
+    """Two-agent AI reasoning layer for HYDRA trading decisions.
+    Supports multiple providers: 'anthropic' (Claude) and 'xai' (Grok)."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-sonnet-4-20250514",
+        provider: str = "anthropic",
+        model: str = None,
         max_daily_cost: float = 5.0,
         call_interval: int = 1,
     ):
-        if not HAS_ANTHROPIC:
-            raise ImportError("anthropic package not installed: pip install anthropic")
+        self.provider = provider
+        defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["anthropic"])
+        self.INPUT_COST_PER_M = defaults[1]
+        self.OUTPUT_COST_PER_M = defaults[2]
 
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
+        if provider == "xai":
+            if not HAS_OPENAI:
+                raise ImportError("openai package not installed: pip install openai")
+            self.client = openai.OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+        else:
+            if not HAS_ANTHROPIC:
+                raise ImportError("anthropic package not installed: pip install anthropic")
+            self.client = anthropic.Anthropic(api_key=api_key)
+        self.model = model or defaults[0]
         self.max_daily_cost = max_daily_cost
         self.call_interval = call_interval
 
@@ -222,37 +240,43 @@ class HydraBrain:
 
     # ─── Agent Calls ───
 
+    def _call_llm(self, system_prompt: str, user_msg: str, max_tokens: int = 300) -> tuple:
+        """Call the LLM provider. Returns (text, input_tokens, output_tokens)."""
+        if self.provider == "xai":
+            response = self.client.chat.completions.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                timeout=10.0,
+            )
+            text = response.choices[0].message.content if response.choices else ""
+            usage = response.usage
+            return text, usage.prompt_tokens if usage else 0, usage.completion_tokens if usage else 0
+        else:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_msg}],
+                timeout=10.0,
+            )
+            text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
+            return text, response.usage.input_tokens, response.usage.output_tokens
+
     def _run_analyst(self, state: Dict) -> tuple:
         """Call Market Analyst agent. Returns (parsed_output, input_tokens, output_tokens)."""
         user_msg = self._build_analyst_prompt(state)
-
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=300,
-            system=ANALYST_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-            timeout=10.0,
-        )
-
-        text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
-        parsed = self._parse_json(text)
-        return parsed, response.usage.input_tokens, response.usage.output_tokens
+        text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 300)
+        return self._parse_json(text), tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:
         """Call Risk Manager agent. Returns (parsed_output, input_tokens, output_tokens)."""
         user_msg = self._build_risk_prompt(state, analyst)
-
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=250,
-            system=RISK_MANAGER_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-            timeout=10.0,
-        )
-
-        text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
-        parsed = self._parse_json(text)
-        return parsed, response.usage.input_tokens, response.usage.output_tokens
+        text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 250)
+        return self._parse_json(text), tok_in, tok_out
 
     # ─── Prompt Builders ───
 
