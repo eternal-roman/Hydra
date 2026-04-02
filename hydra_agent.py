@@ -676,6 +676,7 @@ class HydraAgent:
             "pairs": pairs_data,
             "trade_log": self.trade_log[-20:],
             "running": self.running,
+            "interval": self.interval,
             "ai_brain": self.brain.get_stats() if self.brain else None,
         }
 
