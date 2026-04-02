@@ -21,7 +21,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run engine test suite (47 tests)
+      - name: Install Python dependencies
+        run: pip install anthropic openai
+
+      - name: Run engine test suite
         run: python tests/test_engine.py
 
       - name: Run engine synthetic demo
