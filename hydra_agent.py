@@ -20,6 +20,7 @@ import argparse
 import signal as sig
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
@@ -322,6 +323,7 @@ class HydraAgent:
         ws_port: int = 8765,
         mode: str = "conservative",
         paper: bool = False,
+        candle_interval: int = 5,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
@@ -329,9 +331,11 @@ class HydraAgent:
         self.duration = duration_seconds
         self.mode = mode
         self.paper = paper
+        self.candle_interval = candle_interval
         self.running = True
         self.start_time = None
         self.trade_log = []
+        self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
 
         # Sizing config based on mode
         sizing = SIZING_COMPETITION if mode == "competition" else SIZING_CONSERVATIVE
@@ -339,10 +343,16 @@ class HydraAgent:
         # One engine per pair
         self.engines: Dict[str, HydraEngine] = {}
         for pair in pairs:
+            # Scale regime thresholds for candle interval (tuned for 5-min)
+            vol_atr = 3.0 if candle_interval >= 5 else 4.0
+            vol_bb = 0.06 if candle_interval >= 5 else 0.08
             self.engines[pair] = HydraEngine(
                 initial_balance=initial_balance / len(pairs),
                 asset=pair,
                 sizing=sizing,
+                candle_interval=candle_interval,
+                volatile_atr_pct=vol_atr,
+                volatile_bb_width=vol_bb,
             )
 
         # Dashboard broadcaster
@@ -355,7 +365,11 @@ class HydraAgent:
             xai_key = os.environ.get("XAI_API_KEY", "")
             if anthropic_key or xai_key:
                 try:
-                    self.brain = HydraBrain(anthropic_key=anthropic_key, xai_key=xai_key)
+                    strategist_threshold = 0.50 if self.mode == "competition" else 0.65
+                    self.brain = HydraBrain(
+                        anthropic_key=anthropic_key, xai_key=xai_key,
+                        strategist_threshold=strategist_threshold,
+                    )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
 
@@ -379,10 +393,11 @@ class HydraAgent:
         self.broadcaster.start()
         time.sleep(0.5)
 
-        # Set dead man's switch (live mode only)
+        # Set dead man's switch (live mode only) — timeout must exceed tick interval
+        self._dms_timeout = max(60, self.interval + 30)
         if not self.paper:
-            print("  [HYDRA] Setting dead man's switch (60s)...")
-            result = KrakenCLI.cancel_after(60)
+            print(f"  [HYDRA] Setting dead man's switch ({self._dms_timeout}s)...")
+            result = KrakenCLI.cancel_after(self._dms_timeout)
             if "error" not in result:
                 print("  [HYDRA] Dead man's switch active")
             else:
@@ -400,7 +415,7 @@ class HydraAgent:
         # Warmup: fetch historical candles for each pair
         print("\n  [HYDRA] Warming up with historical candles...")
         for pair in self.pairs:
-            candles = KrakenCLI.ohlc(pair, interval=1)
+            candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
             if candles:
                 for c in candles[-200:]:
                     self.engines[pair].ingest_candle(c)
@@ -426,23 +441,49 @@ class HydraAgent:
 
             # Refresh dead man's switch every tick (live mode only)
             if not self.paper:
-                KrakenCLI.cancel_after(60)
+                KrakenCLI.cancel_after(self._dms_timeout)
                 time.sleep(2)  # Rate limit
 
-            all_states = {}
+            # Phase 1: Fetch data and run all engines (regimes, signals, positions)
+            engine_states = {}
             for pair in self.pairs:
-                state = self._process_pair(pair)
+                engine_states[pair] = self._fetch_and_tick(pair)
                 time.sleep(2)  # Rate limit after OHLC fetch
-                if state:
-                    all_states[pair] = state
-                    self._print_tick_status(pair, state)
 
-                    # Execute trade if signal is actionable
+            # Phase 2: Run brain with full cross-pair context (parallel across pairs)
+            all_states = {}
+            brain_pairs = []
+            for pair in self.pairs:
+                state = engine_states.get(pair)
+                if state:
+                    if state["signal"]["action"] != "HOLD" and self.brain:
+                        brain_pairs.append((pair, state))
+                    else:
+                        all_states[pair] = state
+
+            if brain_pairs:
+                with ThreadPoolExecutor(max_workers=len(brain_pairs)) as executor:
+                    futures = {
+                        executor.submit(self._apply_brain, pair, state, engine_states): pair
+                        for pair, state in brain_pairs
+                    }
+                    for future in as_completed(futures):
+                        pair = futures[future]
+                        try:
+                            all_states[pair] = future.result(timeout=60)
+                        except Exception as e:
+                            print(f"  [WARN] Brain failed for {pair}: {e}")
+                            all_states[pair] = engine_states[pair]
+
+            # Print status and execute trades (sequential — rate limiting required)
+            for pair in self.pairs:
+                state = all_states.get(pair)
+                if state:
+                    self._print_tick_status(pair, state)
                     if state.get("last_trade"):
                         self._execute_trade(pair, state["last_trade"])
-                        # _execute_trade has its own 2s rate limits internally
 
-            # Check for regime-driven cross-pair swaps
+            # Phase 3: Check for regime-driven cross-pair swaps
             self._check_cross_pair_swaps(all_states)
 
             # Broadcast state to dashboard (uses cached balance, no extra API call)
@@ -467,12 +508,12 @@ class HydraAgent:
         # Final report
         self._print_final_report()
 
-    def _process_pair(self, pair: str) -> Optional[dict]:
-        """Fetch latest data and run engine tick for one pair."""
+    def _fetch_and_tick(self, pair: str) -> Optional[dict]:
+        """Phase 1: Fetch latest data from Kraken and run engine tick. No brain call."""
         engine = self.engines[pair]
 
         # Fetch latest candle
-        candles = KrakenCLI.ohlc(pair, interval=1)
+        candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
         if candles:
             engine.ingest_candle(candles[-1])
         else:
@@ -484,44 +525,111 @@ class HydraAgent:
                     "open": p, "high": p, "low": p, "close": p, "volume": 0,
                 })
 
-        state = engine.tick()
+        return engine.tick()
 
-        # AI deliberation on actionable signals
-        if self.brain and state["signal"]["action"] != "HOLD":
-            try:
-                decision = self.brain.deliberate(state)
-                state["ai_decision"] = {
-                    "action": decision.action,
-                    "final_signal": decision.final_signal,
-                    "confidence_adj": decision.confidence_adj,
-                    "size_multiplier": decision.size_multiplier,
-                    "analyst_reasoning": decision.analyst_reasoning,
-                    "risk_reasoning": decision.risk_reasoning,
-                    "strategist_reasoning": decision.strategist_reasoning,
-                    "escalated": decision.escalated,
-                    "summary": decision.combined_summary,
-                    "risk_flags": decision.risk_flags,
-                    "portfolio_health": decision.portfolio_health,
-                    "fallback": decision.fallback,
-                    "tokens_used": decision.tokens_used,
-                    "latency_ms": round(decision.latency_ms, 0),
-                }
-                # Apply AI decision to engine state
-                if decision.action == "OVERRIDE":
-                    state["signal"]["action"] = decision.final_signal
-                    state["signal"]["confidence"] = decision.confidence_adj
-                    state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
-                    # Clear last_trade if overridden to HOLD
-                    if decision.final_signal == "HOLD":
-                        state.pop("last_trade", None)
-                elif decision.action == "ADJUST":
-                    state["signal"]["confidence"] = decision.confidence_adj
-                    state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
-                # CONFIRM leaves signal unchanged, just adds reasoning
-            except Exception as e:
-                state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
+    def _apply_brain(self, pair: str, state: dict, all_engine_states: dict) -> dict:
+        """Phase 2: Run brain with full cross-pair context. Mutates state in place."""
+        if not self.brain or state["signal"]["action"] == "HOLD":
+            return state
+
+        # Pre-brain filter: skip brain for BUY signals that can't produce tradeable order size
+        if state["signal"]["action"] == "BUY":
+            engine = self.engines[pair]
+            test_size = engine.sizer.calculate(
+                state["signal"]["confidence"], engine.balance, state["price"], pair,
+            )
+            if test_size == 0:
+                return state  # Signal too weak to trade; don't waste brain tokens
+
+        # Inject cross-pair triangle context before deliberation
+        state["triangle_context"] = self._build_triangle_context(pair, all_engine_states)
+
+        # Fetch spread data for risk assessment (serialized to respect Kraken rate limits)
+        try:
+            with self._kraken_lock:
+                time.sleep(2)  # Rate limit
+                ticker = KrakenCLI.ticker(pair)
+            if "error" not in ticker and "bid" in ticker:
+                bid, ask = ticker["bid"], ticker["ask"]
+                mid = (bid + ask) / 2
+                spread_bps = round((ask - bid) / mid * 10000, 1) if mid > 0 else 0
+                state["spread"] = {"bid": bid, "ask": ask, "spread_bps": spread_bps}
+        except Exception:
+            pass
+
+        try:
+            decision = self.brain.deliberate(state)
+            state["ai_decision"] = {
+                "action": decision.action,
+                "final_signal": decision.final_signal,
+                "confidence_adj": decision.confidence_adj,
+                "size_multiplier": decision.size_multiplier,
+                "analyst_reasoning": decision.analyst_reasoning,
+                "risk_reasoning": decision.risk_reasoning,
+                "strategist_reasoning": decision.strategist_reasoning,
+                "escalated": decision.escalated,
+                "summary": decision.combined_summary,
+                "risk_flags": decision.risk_flags,
+                "portfolio_health": decision.portfolio_health,
+                "fallback": decision.fallback,
+                "tokens_used": decision.tokens_used,
+                "latency_ms": round(decision.latency_ms, 0),
+            }
+            # Apply AI decision to engine state
+            if decision.action == "OVERRIDE":
+                state["signal"]["action"] = decision.final_signal
+                state["signal"]["confidence"] = decision.confidence_adj
+                state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
+                # Clear last_trade if overridden to HOLD
+                if decision.final_signal == "HOLD":
+                    state.pop("last_trade", None)
+            elif decision.action == "ADJUST":
+                state["signal"]["confidence"] = decision.confidence_adj
+                state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
+            # CONFIRM leaves signal unchanged, just adds reasoning
+        except Exception as e:
+            state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
 
         return state
+
+    def _build_triangle_context(self, current_pair: str, all_states: dict) -> dict:
+        """Build cross-pair context summary for brain deliberation."""
+        pairs = {}
+        sol_exposure = 0.0
+        xbt_exposure = 0.0
+
+        for pair, state in all_states.items():
+            if state is None:
+                continue
+            pos = state.get("position", {}).get("size", 0)
+            price = state.get("price", 0)
+
+            # Net asset exposure across the triangle
+            if pair == "SOL/USDC":
+                sol_exposure += pos
+            elif pair == "SOL/XBT":
+                sol_exposure += pos
+                xbt_exposure -= pos * price  # long SOL/XBT = short XBT
+            elif pair == "XBT/USDC":
+                xbt_exposure += pos
+
+            # Sibling pair summaries (exclude current pair)
+            if pair != current_pair:
+                pairs[pair] = {
+                    "regime": state.get("regime", "UNKNOWN"),
+                    "signal": state.get("signal", {}).get("action", "HOLD"),
+                    "confidence": state.get("signal", {}).get("confidence", 0),
+                    "position_size": pos,
+                    "price": price,
+                }
+
+        return {
+            "pairs": pairs,
+            "net_exposure": {
+                "SOL": round(sol_exposure, 6),
+                "XBT": round(xbt_exposure, 6),
+            },
+        }
 
     def _execute_trade(self, pair: str, trade: dict):
         """Execute a trade via kraken-cli — paper or live limit post-only."""
@@ -838,8 +946,10 @@ def main():
                         help="Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)")
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
-    parser.add_argument("--interval", type=int, default=30,
-                        help="Seconds between ticks (default: 30)")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="Seconds between ticks (default: auto from candle interval)")
+    parser.add_argument("--candle-interval", type=int, default=5, choices=[1, 5, 15, 30, 60],
+                        help="OHLC candle period in minutes (default: 5)")
     parser.add_argument("--duration", type=int, default=0,
                         help="Total duration in seconds (default: 0 = run forever, Ctrl+C to stop)")
     parser.add_argument("--ws-port", type=int, default=8765,
@@ -852,6 +962,18 @@ def main():
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
+    candle_interval = args.candle_interval
+
+    # Auto-derive tick interval: candle period + 5s buffer for candle close
+    auto_interval = candle_interval * 60 + 5
+    if args.interval is not None:
+        if args.interval < candle_interval * 60:
+            print(f"  [WARN] --interval {args.interval}s < candle period {candle_interval}m. Using {auto_interval}s.")
+            tick_interval = auto_interval
+        else:
+            tick_interval = args.interval
+    else:
+        tick_interval = auto_interval
 
     if args.paper:
         print(f"\n  HYDRA — Paper trading mode. No real money at risk.")
@@ -859,6 +981,7 @@ def main():
         print(f"\n  WARNING: HYDRA will execute REAL trades on Kraken.")
     print(f"  Pairs: {', '.join(pairs)}")
     print(f"  Mode: {args.mode} | Balance ref: ${args.balance}")
+    print(f"  Candles: {candle_interval}m | Tick: {tick_interval}s")
     print(f"  Duration: {args.duration}s")
     if not args.paper:
         print(f"  Dead man's switch will be active.")
@@ -867,11 +990,12 @@ def main():
     agent = HydraAgent(
         pairs=pairs,
         initial_balance=args.balance,
-        interval_seconds=args.interval,
+        interval_seconds=tick_interval,
         duration_seconds=args.duration,
         ws_port=args.ws_port,
         mode=args.mode,
         paper=args.paper,
+        candle_interval=candle_interval,
     )
     agent.run()
 

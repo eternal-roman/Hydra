@@ -18,6 +18,7 @@ import json
 import time
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
@@ -142,6 +143,7 @@ class HydraBrain:
         xai_key: str = "",
         max_daily_cost: float = 10.0,
         call_interval: int = 1,
+        strategist_threshold: float = 0.65,
     ):
         # Primary: Claude for Analyst + Risk Manager
         self.primary_client = None
@@ -173,13 +175,14 @@ class HydraBrain:
         self.provider = self.primary_provider
         self.max_daily_cost = max_daily_cost
         self.call_interval = call_interval
+        self.strategist_threshold = strategist_threshold
 
         # Cost tracking
         self.INPUT_COST_PER_M = COST_ANTHROPIC[0] if self.primary_provider == "anthropic" else COST_XAI[0]
         self.OUTPUT_COST_PER_M = COST_ANTHROPIC[1] if self.primary_provider == "anthropic" else COST_XAI[1]
 
         # State
-        self.decision_history: List[Dict] = []
+        self.decision_history: Dict[str, List[Dict]] = {}
         self.daily_tokens_in = 0
         self.daily_tokens_out = 0
         self.daily_decisions = 0
@@ -191,30 +194,30 @@ class HydraBrain:
         self.api_available = True
         self.retry_at_tick = 0
         self.last_decision: Optional[BrainDecision] = None
+        self._lock = threading.Lock()  # Thread safety for parallel brain calls
 
     # ─── Main Entry Point ───
 
     def deliberate(self, state: Dict[str, Any]) -> BrainDecision:
-        """Evaluate engine signal with 3-agent pipeline."""
-        self.tick_counter += 1
-        self._maybe_reset_daily()
+        """Evaluate engine signal with 3-agent pipeline. Thread-safe."""
+        # Pre-flight: shared state checks under lock
+        with self._lock:
+            self.tick_counter += 1
+            self._maybe_reset_daily()
 
-        # Skip if not an AI tick — return fallback instead of stale decision
-        # to avoid replaying old BUY/SELL signals into changed market conditions
-        if self.call_interval > 1 and self.tick_counter % self.call_interval != 0:
-            return self._fallback(state, reason="Non-AI tick")
+            if self.call_interval > 1 and self.tick_counter % self.call_interval != 0:
+                return self._fallback(state, reason="Non-AI tick")
 
-        # Skip if API is down
-        if not self.api_available:
-            if self.tick_counter >= self.retry_at_tick:
-                self.api_available = True
-            else:
-                return self._fallback(state)
+            if not self.api_available:
+                if self.tick_counter >= self.retry_at_tick:
+                    self.api_available = True
+                else:
+                    return self._fallback(state)
 
-        # Skip if budget exceeded
-        if self._estimated_cost() >= self.max_daily_cost:
-            return self._fallback(state, reason="Daily budget exceeded")
+            if self._estimated_cost() >= self.max_daily_cost:
+                return self._fallback(state, reason="Daily budget exceeded")
 
+        # API calls run OUTSIDE lock (I/O bound, each creates independent HTTP request)
         start = time.time()
         total_tokens_in = 0
         total_tokens_out = 0
@@ -240,7 +243,7 @@ class HydraBrain:
             needs_strategist = (
                 self.has_strategist and (
                     risk_output.get("decision") != "CONFIRM" or
-                    analyst_output.get("conviction", 1.0) < self.STRATEGIST_THRESHOLD
+                    analyst_output.get("conviction", 1.0) < self.strategist_threshold
                 )
             )
 
@@ -250,7 +253,6 @@ class HydraBrain:
                     total_tokens_in += s_in
                     total_tokens_out += s_out
                     escalated = True
-                    self.daily_escalations += 1
                 except Exception as e:
                     print(f"  [BRAIN] Strategist failed (continuing with Risk Manager decision): {e}")
 
@@ -285,33 +287,40 @@ class HydraBrain:
                 escalated=escalated,
             )
 
-            # Track stats
-            self.daily_tokens_in += total_tokens_in
-            self.daily_tokens_out += total_tokens_out
-            self.daily_decisions += 1
-            if decision.action == "OVERRIDE":
-                self.daily_overrides += 1
-            self.consecutive_failures = 0
-            self.last_decision = decision
+            # Bookkeeping: shared state writes under lock
+            with self._lock:
+                self.daily_tokens_in += total_tokens_in
+                self.daily_tokens_out += total_tokens_out
+                self.daily_decisions += 1
+                if escalated:
+                    self.daily_escalations += 1
+                if decision.action == "OVERRIDE":
+                    self.daily_overrides += 1
+                self.consecutive_failures = 0
+                self.last_decision = decision
 
-            self.decision_history.append({
-                "tick": state.get("tick", 0),
-                "action": decision.action,
-                "signal": decision.final_signal,
-                "conviction": decision.confidence_adj,
-                "escalated": escalated,
-            })
-            if len(self.decision_history) > 20:
-                self.decision_history = self.decision_history[-20:]
+                asset = state.get("asset", "UNKNOWN")
+                if asset not in self.decision_history:
+                    self.decision_history[asset] = []
+                self.decision_history[asset].append({
+                    "tick": state.get("tick", 0),
+                    "action": decision.action,
+                    "signal": decision.final_signal,
+                    "conviction": decision.confidence_adj,
+                    "escalated": escalated,
+                })
+                if len(self.decision_history[asset]) > 20:
+                    self.decision_history[asset] = self.decision_history[asset][-20:]
 
             return decision
 
         except Exception as e:
-            self.consecutive_failures += 1
-            if self.consecutive_failures >= 3:
-                self.api_available = False
-                self.retry_at_tick = self.tick_counter + 60
-                print(f"  [BRAIN] API disabled after {self.consecutive_failures} failures. Retry at tick {self.retry_at_tick}")
+            with self._lock:
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= 3:
+                    self.api_available = False
+                    self.retry_at_tick = self.tick_counter + 60
+                    print(f"  [BRAIN] API disabled after {self.consecutive_failures} failures. Retry at tick {self.retry_at_tick}")
             return self._fallback(state, reason=str(e))
 
     # ─── LLM Calls ───
@@ -370,57 +379,103 @@ class HydraBrain:
 
     # ─── Prompt Builders ───
 
+    @staticmethod
+    def _format_recent_closes(candles: List[Dict]) -> str:
+        """Format last 10 candle closes for prompt inclusion."""
+        if not candles:
+            return ""
+        return ", ".join(f"{c['c']:.4f}" for c in candles[-10:])
+
+    @staticmethod
+    def _format_spread(state: Dict) -> str:
+        """Format bid/ask spread for prompt inclusion."""
+        spread = state.get("spread", {})
+        if not spread:
+            return ""
+        return f"\nSPREAD: bid={spread['bid']} | ask={spread['ask']} | spread={spread['spread_bps']} bps"
+
+    def _format_triangle_context(self, state: Dict) -> str:
+        """Format cross-pair triangle context for prompt inclusion."""
+        triangle = state.get("triangle_context", {})
+        sibling_pairs = triangle.get("pairs", {})
+        net_exp = triangle.get("net_exposure", {})
+        if not sibling_pairs:
+            return ""
+        parts = [f"  {p}: regime={d['regime']}, signal={d['signal']}({d['confidence']:.2f}), pos={d['position_size']:.4f}"
+                 for p, d in sibling_pairs.items()]
+        lines = "\nCROSS-PAIR CONTEXT:\n" + "\n".join(parts)
+        lines += f"\n  Net SOL exposure: {net_exp.get('SOL', 0):.4f} | Net XBT exposure: {net_exp.get('XBT', 0):.4f}"
+        return lines
+
     def _build_analyst_prompt(self, state: Dict) -> str:
         sig = state.get("signal", {})
         ind = state.get("indicators", {})
         pos = state.get("position", {})
         port = state.get("portfolio", {})
+        trend = state.get("trend", {})
+        volatility = state.get("volatility", {})
+        vol = state.get("volume", {})
         candles = state.get("candles", [])
-        recent_closes = [f"{c['c']:.4f}" for c in candles[-10:]] if candles else []
+        recent_closes = self._format_recent_closes(candles)
+        asset = state.get("asset", "UNKNOWN")
+        pair_history = self.decision_history.get(asset, [])
         recent = ""
-        if self.decision_history:
+        if pair_history:
             recent = " | ".join(
                 f"{d['action']} {d['signal']} ({d['conviction']:.0%})"
-                for d in self.decision_history[-5:]
+                for d in pair_history[-5:]
             )
 
-        return f"""PAIR: {state.get('asset', '?')} | PRICE: {state.get('price', 0)} | REGIME: {state.get('regime', '?')} | STRATEGY: {state.get('strategy', '?')}
+        return f"""PAIR: {state.get('asset', '?')} | PRICE: {state.get('price', 0)} | REGIME: {state.get('regime', '?')} | STRATEGY: {state.get('strategy', '?')} | TIMEFRAME: {state.get('candle_interval', '?')}m | CANDLE: {state.get('candle_status', 'unknown')}
 ENGINE SIGNAL: {sig.get('action', '?')} @ {sig.get('confidence', 0):.2f} confidence
 REASON: {sig.get('reason', '')}
 
-INDICATORS: RSI={ind.get('rsi', '?')} | MACD_HIST={ind.get('macd_histogram', '?')} | BB=[{ind.get('bb_lower', '?')}, {ind.get('bb_middle', '?')}, {ind.get('bb_upper', '?')}] | BB_WIDTH={ind.get('bb_width', 0):.4f}
+INDICATORS: RSI={ind.get('rsi', '?')} | MACD=[line={ind.get('macd_line', '?')}, signal={ind.get('macd_signal', '?')}, hist={ind.get('macd_histogram', '?')}] | BB=[{ind.get('bb_lower', '?')}, {ind.get('bb_middle', '?')}, {ind.get('bb_upper', '?')}] | BB_WIDTH={ind.get('bb_width', 0):.4f}
+TREND: EMA20={trend.get('ema20', '?')} | EMA50={trend.get('ema50', '?')} | ATR={volatility.get('atr', '?')} ({volatility.get('atr_pct', '?')}%)
+VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
 
-RECENT CLOSES: {', '.join(recent_closes)}
+RECENT CLOSES: {recent_closes}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-RECENT AI DECISIONS: {recent or 'None yet'}"""
+RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}"""
 
     def _build_risk_prompt(self, state: Dict, analyst: Dict) -> str:
         sig = state.get("signal", {})
+        ind = state.get("indicators", {})
         pos = state.get("position", {})
         port = state.get("portfolio", {})
         perf = state.get("performance", {})
+        volatility = state.get("volatility", {})
+        vol = state.get("volume", {})
 
-        return f"""ENGINE SIGNAL: {sig.get('action', '?')} @ {sig.get('confidence', 0):.2f}
+        return f"""PAIR: {state.get('asset', '?')} | PRICE: {state.get('price', 0)} | REGIME: {state.get('regime', '?')} | TIMEFRAME: {state.get('candle_interval', '?')}m | CANDLE: {state.get('candle_status', 'unknown')}
+ENGINE SIGNAL: {sig.get('action', '?')} @ {sig.get('confidence', 0):.2f}
 ANALYST THESIS: {analyst.get('thesis', 'N/A')}
 ANALYST CONVICTION: {analyst.get('conviction', 0):.2f}
 ANALYST AGREES WITH ENGINE: {analyst.get('signal_agreement', '?')}
 ANALYST CONCERN: {analyst.get('concern', 'None')}
 
-POSITION: {pos.get('size', 0):.6f} | Unrealized P&L: {pos.get('unrealized_pnl', 0)}
-PORTFOLIO: Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-PERFORMANCE: {perf.get('total_trades', 0)} trades | Win Rate: {perf.get('win_rate_pct', 0):.0f}% | Sharpe: {perf.get('sharpe_estimate', 0):.2f}"""
+KEY RISK INDICATORS: RSI={ind.get('rsi', '?')} | ATR={volatility.get('atr_pct', '?')}% | BB_WIDTH={ind.get('bb_width', '?')}
+VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
+
+POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized P&L: {pos.get('unrealized_pnl', 0)}
+PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | Peak=${port.get('peak_equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
+PERFORMANCE: {perf.get('total_trades', 0)} trades | Win Rate: {perf.get('win_rate_pct', 0):.0f}% | Sharpe: {perf.get('sharpe_estimate', 0):.2f}{self._format_spread(state)}{self._format_triangle_context(state)}"""
 
     def _build_strategist_prompt(self, state: Dict, analyst: Dict, risk: Dict) -> str:
         sig = state.get("signal", {})
         ind = state.get("indicators", {})
         pos = state.get("position", {})
         port = state.get("portfolio", {})
+        trend = state.get("trend", {})
+        volatility = state.get("volatility", {})
+        vol = state.get("volume", {})
         candles = state.get("candles", [])
-        recent_closes = [f"{c['c']:.4f}" for c in candles[-10:]] if candles else []
+        recent_closes = self._format_recent_closes(candles)
 
         return f"""CONTESTED DECISION — Your strategic analysis is needed.
+PAIR: {state.get('asset', '?')} | TIMEFRAME: {state.get('candle_interval', '?')}m | CANDLE: {state.get('candle_status', 'unknown')}
 
 ENGINE SIGNAL: {sig.get('action', '?')} @ {sig.get('confidence', 0):.2f} confidence
 ENGINE REASON: {sig.get('reason', '')}
@@ -440,10 +495,12 @@ RISK MANAGER (Claude):
   Risk flags: {', '.join(risk.get('risk_flags', []))}
   Portfolio health: {risk.get('portfolio_health', '?')}
 
-INDICATORS: RSI={ind.get('rsi', '?')} | MACD_HIST={ind.get('macd_histogram', '?')} | BB=[{ind.get('bb_lower', '?')}, {ind.get('bb_middle', '?')}, {ind.get('bb_upper', '?')}]
-RECENT CLOSES: {', '.join(recent_closes)}
+INDICATORS: RSI={ind.get('rsi', '?')} | MACD=[line={ind.get('macd_line', '?')}, signal={ind.get('macd_signal', '?')}, hist={ind.get('macd_histogram', '?')}] | BB=[{ind.get('bb_lower', '?')}, {ind.get('bb_middle', '?')}, {ind.get('bb_upper', '?')}]
+TREND: EMA20={trend.get('ema20', '?')} | EMA50={trend.get('ema50', '?')} | ATR={volatility.get('atr', '?')} ({volatility.get('atr_pct', '?')}%)
+VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
+RECENT CLOSES: {recent_closes}
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
-PORTFOLIO: Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
+PORTFOLIO: Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%{self._format_spread(state)}{self._format_triangle_context(state)}
 
 Make the final call. Think carefully, then respond with JSON only."""
 

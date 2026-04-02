@@ -234,7 +234,8 @@ class RegimeDetector:
     """Detects market regime from indicator values."""
 
     @staticmethod
-    def detect(candles: List[Candle], prices: List[float]) -> Regime:
+    def detect(candles: List[Candle], prices: List[float],
+               volatile_atr_pct: float = 4.0, volatile_bb_width: float = 0.08) -> Regime:
         if len(prices) < 50:
             return Regime.RANGING
 
@@ -246,7 +247,7 @@ class RegimeDetector:
         atr_pct = (atr / current) * 100 if current > 0 else 0
 
         # High volatility overrides trend detection
-        if atr_pct > 4.0 or bb["width"] > 0.08:
+        if atr_pct > volatile_atr_pct or bb["width"] > volatile_bb_width:
             return Regime.VOLATILE
 
         # Trend detection with threshold
@@ -297,6 +298,8 @@ class SignalGenerator:
         price_decimals = 8 if current < 1 else 2
         indicators = {
             "rsi": round(rsi, 2),
+            "macd_line": round(macd["macd"], 8),
+            "macd_signal": round(macd["signal"], 8),
             "macd_histogram": round(macd["histogram"], 8),
             "bb_upper": round(bb["upper"], price_decimals),
             "bb_middle": round(bb["middle"], price_decimals),
@@ -520,13 +523,19 @@ class HydraEngine:
     CIRCUIT_BREAKER_PCT = 15.0  # Stop if drawdown exceeds 15%
 
     def __init__(self, initial_balance: float = 10000.0, asset: str = "BTC/USD",
-                 sizing: Optional[Dict[str, float]] = None):
+                 sizing: Optional[Dict[str, float]] = None,
+                 candle_interval: int = 5,
+                 volatile_atr_pct: float = 4.0,
+                 volatile_bb_width: float = 0.08):
         self.asset = asset
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.position = Position(asset=asset)
         cfg = sizing or SIZING_CONSERVATIVE
         self.sizer = PositionSizer(**cfg)
+        self.candle_interval = candle_interval
+        self.volatile_atr_pct = volatile_atr_pct
+        self.volatile_bb_width = volatile_bb_width
         self.candles: List[Candle] = []
         self.prices: List[float] = []
         self.trades: List[Trade] = []
@@ -541,7 +550,8 @@ class HydraEngine:
         self.halt_reason = ""
 
     def ingest_candle(self, raw: Dict[str, Any]) -> None:
-        """Add a candle from kraken ohlc JSON output."""
+        """Add a candle from kraken ohlc JSON output. Deduplicates by timestamp."""
+        has_timestamp = "timestamp" in raw
         candle = Candle(
             open=float(raw.get("open", 0)),
             high=float(raw.get("high", 0)),
@@ -550,6 +560,11 @@ class HydraEngine:
             volume=float(raw.get("volume", 0)),
             timestamp=float(raw.get("timestamp", time.time())),
         )
+        # Deduplicate: if Kraken timestamp matches last candle, update in place (incomplete candle refresh)
+        if has_timestamp and self.candles and self.candles[-1].timestamp == candle.timestamp:
+            self.candles[-1] = candle
+            self.prices[-1] = candle.close
+            return
         self.candles.append(candle)
         self.prices.append(candle.close)
         # Keep memory bounded
@@ -569,7 +584,7 @@ class HydraEngine:
             )
 
         # Detect regime
-        regime = RegimeDetector.detect(self.candles, self.prices)
+        regime = RegimeDetector.detect(self.candles, self.prices, self.volatile_atr_pct, self.volatile_bb_width)
         strategy = REGIME_STRATEGY_MAP[regime]
 
         # Generate signal
@@ -673,6 +688,15 @@ class HydraEngine:
 
         return None
 
+    def _candle_status(self) -> str:
+        """Check if the latest candle is still forming or closed."""
+        if not self.candles:
+            return "unknown"
+        age = time.time() - self.candles[-1].timestamp
+        if age < self.candle_interval * 60:
+            return "forming"
+        return "closed"
+
     def _build_state(
         self,
         regime: Regime,
@@ -689,6 +713,17 @@ class HydraEngine:
         # Sharpe estimate from equity curve
         sharpe = self._calc_sharpe()
 
+        # Trend & volatility (same indicators RegimeDetector uses, surfaced for AI agents)
+        atr_val = Indicators.atr(self.candles) if len(self.candles) > 14 else 0.0
+        ema20 = Indicators.ema(self.prices, 20) if len(self.prices) >= 20 else current_price
+        ema50 = Indicators.ema(self.prices, 50) if len(self.prices) >= 50 else current_price
+        atr_pct = (atr_val / current_price * 100) if current_price > 0 else 0.0
+
+        # Volume stats
+        vol_current = self.candles[-1].volume if self.candles else 0.0
+        vol_window = self.candles[-20:] if self.candles else []
+        vol_avg = (sum(c.volume for c in vol_window) / len(vol_window)) if vol_window else 0.0
+
         state = {
             "tick": self.tick_count,
             "timestamp": time.time(),
@@ -703,7 +738,7 @@ class HydraEngine:
             },
             "position": {
                 "size": round(self.position.size, 8),
-                "avg_entry": round(self.position.avg_entry, 2),
+                "avg_entry": round(self.position.avg_entry, 8),
                 "unrealized_pnl": round(self.position.unrealized_pnl, 2),
             },
             "portfolio": {
@@ -720,6 +755,20 @@ class HydraEngine:
                 "win_rate_pct": round(win_rate, 2),
                 "sharpe_estimate": round(sharpe, 4),
             },
+            "trend": {
+                "ema20": round(ema20, 8),
+                "ema50": round(ema50, 8),
+            },
+            "volatility": {
+                "atr": round(atr_val, 8),
+                "atr_pct": round(atr_pct, 4),
+            },
+            "volume": {
+                "current": round(vol_current, 4),
+                "avg_20": round(vol_avg, 4),
+            },
+            "candle_interval": self.candle_interval,
+            "candle_status": self._candle_status(),
             "halted": self.halted,
             "halt_reason": self.halt_reason,
             "indicators": signal.indicators if signal.indicators else {},
