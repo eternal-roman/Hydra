@@ -749,39 +749,50 @@ class HydraEngine:
         pnl_pct = (pnl / self.initial_balance) * 100
         win_rate = (self.win_count / (self.win_count + self.loss_count) * 100) if (self.win_count + self.loss_count) > 0 else 0
 
-        # Profit factor
         gross_profit = sum(t.profit for t in self.trades if t.profit and t.profit > 0)
         gross_loss = abs(sum(t.profit for t in self.trades if t.profit and t.profit < 0))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
-        report = f"""
-╔══════════════════════════════════════════════════════════════╗
-║                  HYDRA PERFORMANCE REPORT                    ║
-╠══════════════════════════════════════════════════════════════╣
-║  Asset:           {self.asset:<42}║
-║  Duration:        {self.tick_count} ticks{' ' * (36 - len(str(self.tick_count)))}║
-║  Initial Balance: ${self.initial_balance:>10,.2f}{' ' * 29}║
-║  Final Equity:    ${equity:>10,.2f}{' ' * 29}║
-╠══════════════════════════════════════════════════════════════╣
-║  NET P&L:         ${pnl:>+10,.2f}  ({pnl_pct:>+.2f}%){' ' * (21 - len(f'{pnl_pct:>+.2f}'))}║
-║  Max Drawdown:    {self.max_drawdown:>10.2f}%{' ' * 29}║
-║  Sharpe Ratio:    {self._calc_sharpe():>10.4f}{' ' * 30}║
-║  Profit Factor:   {profit_factor:>10.2f}{' ' * 30}║
-╠══════════════════════════════════════════════════════════════╣
-║  Total Trades:    {self.total_trades:>10}{' ' * 30}║
-║  Wins:            {self.win_count:>10}{' ' * 30}║
-║  Losses:          {self.loss_count:>10}{' ' * 30}║
-║  Win Rate:        {win_rate:>10.1f}%{' ' * 29}║
-╠══════════════════════════════════════════════════════════════╣
-║  Open Position:   {self.position.size:>10.6f} {self.asset.split('/')[0]}{' ' * (25 - len(self.asset.split('/')[0]))}║
-║  Avg Entry:       ${self.position.avg_entry:>10,.2f}{' ' * 29}║
-║  Unrealized P&L:  ${self.position.unrealized_pnl:>+10,.2f}{' ' * 29}║
-║  Cash Balance:    ${self.balance:>10,.2f}{' ' * 29}║
-╠══════════════════════════════════════════════════════════════╣
-║  Status:          {'HALTED — ' + self.halt_reason[:30] if self.halted else 'ACTIVE':<42}║
-╚══════════════════════════════════════════════════════════════╝
-"""
-        return report.strip()
+        w = 60  # inner width between ║ chars
+        def row(label, value):
+            content = f"  {label:<18}{value}"
+            return f"  {content:<{w}}"
+        def sep():
+            return "  " + "-" * w
+
+        status = f"HALTED — {self.halt_reason[:40]}" if self.halted else "ACTIVE"
+        base = self.asset.split("/")[0]
+
+        lines = [
+            "",
+            "  " + "=" * w,
+            f"  {'HYDRA PERFORMANCE REPORT':^{w}}",
+            "  " + "=" * w,
+            row("Asset", self.asset),
+            row("Duration", f"{self.tick_count} ticks"),
+            row("Initial Balance", f"${self.initial_balance:,.2f}"),
+            row("Final Balance", f"${equity:,.2f}"),
+            sep(),
+            row("Net P&L", f"${pnl:+,.2f}  ({pnl_pct:+.2f}%)"),
+            row("Max Drawdown", f"{self.max_drawdown:.2f}%"),
+            row("Sharpe Ratio", f"{self._calc_sharpe():.4f}"),
+            row("Profit Factor", f"{profit_factor:.2f}"),
+            sep(),
+            row("Total Trades", str(self.total_trades)),
+            row("Wins", str(self.win_count)),
+            row("Losses", str(self.loss_count)),
+            row("Win Rate", f"{win_rate:.1f}%"),
+            sep(),
+            row("Open Position", f"{self.position.size:.6f} {base}"),
+            row("Avg Entry", f"${self.position.avg_entry:,.2f}"),
+            row("Unrealized P&L", f"${self.position.unrealized_pnl:+,.2f}"),
+            row("Cash Balance", f"${self.balance:,.2f}"),
+            sep(),
+            row("Status", status),
+            "  " + "=" * w,
+            "",
+        ]
+        return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════
