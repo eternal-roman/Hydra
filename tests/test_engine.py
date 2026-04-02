@@ -386,6 +386,55 @@ class TestHydraEngine:
         assert "signal" in state
         assert "portfolio" in state
         assert "candles" in state
+        assert "trend" in state
+        assert "ema20" in state["trend"]
+        assert "ema50" in state["trend"]
+        assert "volatility" in state
+        assert "atr" in state["volatility"]
+        assert "atr_pct" in state["volatility"]
+        assert "volume" in state
+        assert "current" in state["volume"]
+        assert "avg_20" in state["volume"]
+        assert "candle_interval" in state
+        assert "candle_status" in state
+
+    def test_candle_deduplication(self):
+        """Duplicate timestamps update in place instead of appending."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        engine.ingest_candle({"open": 100, "high": 101, "low": 99, "close": 100, "volume": 50, "timestamp": 1000.0})
+        assert len(engine.candles) == 1
+        assert engine.prices[-1] == 100
+        # Same timestamp, different close — should update, not append
+        engine.ingest_candle({"open": 100, "high": 102, "low": 98, "close": 105, "volume": 80, "timestamp": 1000.0})
+        assert len(engine.candles) == 1
+        assert engine.prices[-1] == 105
+        # New timestamp — should append
+        engine.ingest_candle({"open": 105, "high": 106, "low": 104, "close": 105.5, "volume": 60, "timestamp": 1300.0})
+        assert len(engine.candles) == 2
+
+    def test_configurable_regime_thresholds(self):
+        """Regime thresholds can be overridden for different candle intervals."""
+        prices = make_ranging(100)
+        candles = make_candles(prices)
+        # With very low thresholds, even ranging data should be VOLATILE
+        regime = RegimeDetector.detect(candles, prices, volatile_atr_pct=0.01, volatile_bb_width=0.001)
+        assert regime == Regime.VOLATILE
+        # With very high thresholds, volatile data should NOT be VOLATILE
+        vol_prices = make_volatile(100)
+        vol_candles = [Candle(open=p, high=p+15, low=p-15, close=p, volume=100, timestamp=float(i)) for i, p in enumerate(vol_prices)]
+        regime2 = RegimeDetector.detect(vol_candles, vol_prices, volatile_atr_pct=999.0, volatile_bb_width=999.0)
+        assert regime2 != Regime.VOLATILE
+
+    def test_candle_status(self):
+        """Candle status reports forming/closed based on age."""
+        import time as _time
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC", candle_interval=5)
+        # Recent candle should be "forming"
+        engine.ingest_candle({"open": 100, "high": 101, "low": 99, "close": 100, "volume": 50, "timestamp": _time.time()})
+        assert engine._candle_status() == "forming"
+        # Old candle should be "closed"
+        engine.ingest_candle({"open": 100, "high": 101, "low": 99, "close": 100, "volume": 50, "timestamp": _time.time() - 600})
+        assert engine._candle_status() == "closed"
 
     def test_circuit_breaker(self):
         engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
@@ -519,7 +568,12 @@ class TestBrain:
             "position": {"size": 0, "avg_entry": 0, "unrealized_pnl": 0},
             "portfolio": {"balance": 1000, "equity": 1000, "pnl_pct": 0, "max_drawdown_pct": 0, "peak_equity": 1000},
             "performance": {"total_trades": 5, "win_count": 3, "loss_count": 2, "win_rate_pct": 60, "sharpe_estimate": 1.5},
-            "indicators": {"rsi": 55, "macd_histogram": 0.5, "bb_upper": 105, "bb_middle": 100, "bb_lower": 95, "bb_width": 0.1},
+            "indicators": {"rsi": 55, "macd_line": 0.3, "macd_signal": -0.2, "macd_histogram": 0.5, "bb_upper": 105, "bb_middle": 100, "bb_lower": 95, "bb_width": 0.1},
+            "trend": {"ema20": 101.0, "ema50": 99.5},
+            "volatility": {"atr": 2.5, "atr_pct": 2.5},
+            "volume": {"current": 150.0, "avg_20": 120.0},
+            "candle_interval": 5,
+            "candle_status": "closed",
             "candles": [{"o": 99, "h": 101, "l": 98, "c": 100, "t": i} for i in range(10)],
         }
 
@@ -591,6 +645,59 @@ class TestBrain:
         risk_prompt = brain._build_risk_prompt(state, {"thesis": "test", "conviction": 0.7, "signal_agreement": True, "concern": None})
         assert "ENGINE SIGNAL" in risk_prompt
         assert "ANALYST THESIS" in risk_prompt
+        # New fields from enriched prompts
+        assert "EMA20=" in prompt
+        assert "ATR=" in prompt
+        assert "VOLUME:" in prompt
+        assert "MACD=[line=" in prompt
+        # Risk prompt now has pair/price/regime and key indicators
+        assert "SOL/USDC" in risk_prompt
+        assert "RSI=" in risk_prompt
+        assert "Balance=" in risk_prompt
+        assert "Peak=" in risk_prompt
+        # Timeframe and candle status in prompts
+        assert "TIMEFRAME: 5m" in prompt
+        assert "CANDLE: closed" in prompt
+        assert "TIMEFRAME: 5m" in risk_prompt
+
+    def test_indicators_include_macd_full(self):
+        """Indicators dict includes MACD line, signal, and histogram."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100 + i * 0.1, "high": 101 + i * 0.1,
+                "low": 99 + i * 0.1, "close": 100 + i * 0.1, "volume": 100,
+            })
+        state = engine.tick()
+        ind = state["indicators"]
+        assert "macd_line" in ind
+        assert "macd_signal" in ind
+        assert "macd_histogram" in ind
+
+    def test_decision_history_per_pair(self):
+        """Decision history is keyed per pair, not a shared flat list."""
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
+        # decision_history should be a dict (per-pair), not a list
+        assert isinstance(brain.decision_history, dict)
+        # Simulate recording decisions for different pairs
+        brain.decision_history["SOL/USDC"] = [
+            {"tick": 1, "action": "CONFIRM", "signal": "BUY", "conviction": 0.7, "escalated": False},
+        ]
+        brain.decision_history["XBT/USDC"] = [
+            {"tick": 1, "action": "OVERRIDE", "signal": "HOLD", "conviction": 0.3, "escalated": True},
+        ]
+        # Verify per-pair isolation
+        assert len(brain.decision_history["SOL/USDC"]) == 1
+        assert len(brain.decision_history["XBT/USDC"]) == 1
+        assert brain.decision_history["SOL/USDC"][0]["signal"] == "BUY"
+        assert brain.decision_history["XBT/USDC"][0]["signal"] == "HOLD"
+        # Verify analyst prompt reads only the current pair's history
+        state = self._make_state()
+        state["asset"] = "SOL/USDC"
+        prompt = brain._build_analyst_prompt(state)
+        assert "CONFIRM BUY" in prompt
+        assert "OVERRIDE HOLD" not in prompt  # XBT/USDC history should not leak
 
     def test_call_interval_caching(self):
         from hydra_brain import HydraBrain
