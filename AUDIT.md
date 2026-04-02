@@ -4,6 +4,42 @@
 **Scope:** Full end-to-end audit of all components — engine, agent, dashboard, infrastructure
 **Status:** All critical issues resolved. System verified operational.
 
+> **Note:** Line numbers reference the codebase as of this audit date and may drift with future changes.
+
+---
+
+## Summary Scorecard
+
+| Area | Tests | Pass | Fixed | Status |
+|------|-------|------|-------|--------|
+| Technical Indicators | 5 | 3 | 2 (RSI, MACD) | PASS |
+| Regime Detection | 6 | 6 | 0 | PASS |
+| Signal Generation | 5 | 5 | 0 | PASS |
+| Position Sizing | 3 | 3 | 0 | PASS |
+| Order Execution | 6 | 3 | 3 (order type, rate limit, log price) | PASS |
+| WebSocket Broadcast | 3 | 3 | 0 | PASS |
+| Dashboard Components | 15 | 15 | 0 | PASS |
+| Infrastructure | 6 | 5 | 1 (dead man's switch refresh) | PASS |
+| **Total** | **49** | **43** | **6** | **ALL PASS** |
+
+**Bugs found:** 10 (all fixed)
+**Known limitations:** 5 (documented in section 9)
+
+---
+
+## Table of Contents
+
+1. [Technical Indicators](#1-technical-indicators-hydra_enginepy) — EMA, RSI, ATR, Bollinger Bands, MACD
+2. [Regime Detection](#2-regime-detection-hydra_enginepy) — Priority ordering, thresholds, warmup
+3. [Signal Generation](#3-signal-generation-hydra_enginepy) — Momentum, Mean Reversion, Grid, Defensive
+4. [Position Sizing](#4-position-sizing-hydra_enginepy) — Quarter-Kelly, hard limits, circuit breaker
+5. [Order Execution](#5-order-execution-hydra_agentpy) — Limit post-only, validation, rate limiting
+6. [WebSocket Broadcast](#6-websocket-broadcast-hydra_agentpy) — Server, state payload, candle data
+7. [Dashboard](#7-dashboard-appjsx) — All 15 UI components
+8. [Infrastructure](#8-infrastructure) — Auto-restart, startup, pair mapping, parsing
+9. [Known Limitations](#9-known-limitations) — 5 documented behaviors
+10. [Fixes Applied](#10-fixes-applied-during-audit) — 10 issues resolved
+
 ---
 
 ## 1. Technical Indicators (hydra_engine.py)

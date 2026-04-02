@@ -3,12 +3,12 @@ name: hydra-regime-trader
 description: >
   HYDRA (Hyper-adaptive Dynamic Regime-switching Universal Agent) is an autonomous
   crypto trading agent for Kraken CLI that detects market regimes and switches between
-  four strategies: Momentum, Mean Reversion, Grid, and Defensive. Use when: (1) running
-  an adaptive paper or live trading session on BTC, ETH, or SOL via Kraken CLI,
-  (2) analyzing current market regime from OHLC data, (3) generating trade signals with
-  position sizing, (4) monitoring and reporting on ongoing trading performance. Requires
-  kraken-cli installed. NOT for: non-Kraken exchanges, DeFi/on-chain trading, or
-  strategies outside the HYDRA framework.
+  four strategies: Momentum, Mean Reversion, Grid, and Defensive. Trades SOL/USDC,
+  SOL/XBT, and XBT/USDC using limit post-only orders. Use when: (1) running a live
+  trading session via Kraken CLI (WSL), (2) analyzing current market regime from OHLC
+  data, (3) generating trade signals with quarter-Kelly position sizing, (4) monitoring
+  performance via the React dashboard. Requires kraken-cli installed in WSL. NOT for:
+  non-Kraken exchanges, DeFi/on-chain trading, or strategies outside the HYDRA framework.
 ---
 
 # HYDRA — Regime-Adaptive Trading Agent for Kraken CLI
@@ -106,26 +106,20 @@ position_size = (risk_amount * kelly_fraction) / current_price
 ### Phase 5: Execute Trade
 
 ```bash
-# Paper trading (no API keys needed)
-kraken paper buy BTC/USD --type market --volume 0.001
-kraken paper sell BTC/USD --type market --volume 0.001
-
-# Check paper positions
-kraken paper positions -o json
-
-# Check paper balance
-kraken paper balance -o json
-
-# --- LIVE TRADING (requires API keys + extreme caution) ---
 # ALWAYS set dead man's switch first:
 kraken order cancel-after 60
 
-# Then execute:
-kraken order buy BTC/USD --type market --volume 0.001
-kraken order sell BTC/USD --type market --volume 0.001
+# Limit post-only orders (maker, sit on book, never cross spread):
+# BUY at bid price:
+kraken order buy SOL/USDC 0.02 --type limit --price 78.50 --oflags post --yes
+# SELL at ask price:
+kraken order sell SOL/USDC 0.02 --type limit --price 78.80 --oflags post --yes
 
 # Validate without executing:
-kraken order buy BTC/USD --type market --volume 0.001 --validate
+kraken order buy SOL/USDC 0.02 --type limit --price 78.50 --oflags post --validate
+
+# Cancel all open orders:
+kraken order cancel-all --yes
 ```
 
 ### Phase 6: Monitor & Report
@@ -233,10 +227,12 @@ END LOOP
 ```
 hydra/
 ├── SKILL.md              # This file — agent instructions
+├── README.md             # Project overview and setup guide
+├── AUDIT.md              # Technical audit and test results
 ├── hydra_engine.py       # Strategy engine (indicators, regime detection, signals)
-├── hydra_agent.py        # Main agent loop (Kraken CLI integration)
-├── hydra_dashboard.jsx   # React dashboard for visualization
-└── README.md             # Project overview for hackathon submission
+├── hydra_agent.py        # Agent loop (Kraken CLI, WebSocket, trade execution)
+└── dashboard/            # React + Vite live dashboard
+    └── src/App.jsx       # Dashboard UI (single-file)
 ```
 
 ## License

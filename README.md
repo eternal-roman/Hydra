@@ -251,6 +251,45 @@ HYDRA tracks and reports per pair:
 
 7. **Dead man's switch** — If the agent crashes, all open orders cancel within 60 seconds. Refreshed every tick.
 
+## Testing & Audit
+
+See **[AUDIT.md](AUDIT.md)** for the full technical audit report covering:
+
+- All 5 indicator implementations (EMA, RSI, ATR, BB, MACD) — correctness verified
+- Regime detection logic and priority ordering
+- Signal generation for all 4 strategies against specification
+- Position sizing formula and hard limits
+- Order execution (limit post-only, validation, rate limiting)
+- WebSocket broadcast and dashboard component verification
+- Infrastructure (auto-restart, startup, pair mapping)
+- 10 bugs found and fixed during audit
+- 5 known limitations documented
+
+To run the engine's built-in synthetic test (no API keys needed):
+
+```bash
+python hydra_engine.py
+```
+
+This executes 300 ticks of random-walk price data through the full pipeline and prints a performance report.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `kraken: command not found` | Install kraken-cli in WSL: `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh \| sh` |
+| `wsl: not found` or WSL errors | Ensure WSL is installed with Ubuntu: `wsl --install -d Ubuntu` |
+| Port 3001 in use | Dashboard auto-picks next port, or kill the process: `npx kill-port 3001` |
+| Port 8765 in use | Stop any running agent, or change port: `--ws-port 8766` |
+| `websockets` not installed | `pip install websockets` |
+| Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |
+| Dashboard shows "DISCONNECTED" | Ensure agent is running — it hosts the WebSocket server on port 8765 |
+| No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 55% |
+
+## SKILL.md
+
+`SKILL.md` is an agent skill definition file compatible with Claude Code and other MCP-compatible agents. It contains the full specification for HYDRA's trading logic, enabling AI coding assistants to understand, operate, and modify the agent. You can point any MCP agent at this file to give it context on how HYDRA works.
+
 ## Risk Disclaimer
 
 **This is experimental software. Not financial advice.**
