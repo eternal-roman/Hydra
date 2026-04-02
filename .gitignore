@@ -32,6 +32,7 @@ Desktop.ini
 # Logs & runtime
 *.log
 hydra_trades_*.json
+hydra_trades_live.json
 competition_results_*.json
 
 # Claude Code
