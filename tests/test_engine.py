@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hydra_engine import (
     Indicators, RegimeDetector, SignalGenerator, PositionSizer, HydraEngine,
     Regime, Strategy, SignalAction, Candle,
+    SIZING_CONSERVATIVE, SIZING_COMPETITION,
 )
 
 
@@ -268,12 +269,12 @@ class TestSignalGeneration:
     def test_defensive_buy_below_threshold(self):
         """DEFENSIVE BUY has confidence 0.4, below 0.55 execution threshold."""
         prices = make_trending_down(60)
-        # Force RSI very low
-        prices[-1] = prices[-1] - 50  # big drop
+        prices[-1] = prices[-1] - 50
         candles = make_candles(prices)
         signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
+        sizer = PositionSizer(**SIZING_CONSERVATIVE)
         if signal.action == SignalAction.BUY:
-            assert signal.confidence < PositionSizer.MIN_CONFIDENCE
+            assert signal.confidence < sizer.min_confidence
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -281,44 +282,89 @@ class TestSignalGeneration:
 # ═══════════════════════════════════════════════════════════════
 
 class TestPositionSizer:
+    def setup(self):
+        self.conservative = PositionSizer(**SIZING_CONSERVATIVE)
+        self.competition = PositionSizer(**SIZING_COMPETITION)
+
     def test_below_threshold(self):
-        size = PositionSizer.calculate(0.50, 10000, 100.0, "SOL/USDC")
-        assert size == 0.0  # below 0.55 confidence
+        self.setup()
+        size = self.conservative.calculate(0.50, 10000, 100.0, "SOL/USDC")
+        assert size == 0.0
 
     def test_at_threshold(self):
-        size = PositionSizer.calculate(0.55, 10000, 100.0, "SOL/USDC")
+        self.setup()
+        size = self.conservative.calculate(0.55, 10000, 100.0, "SOL/USDC")
         assert size > 0
 
     def test_max_position_cap(self):
-        size = PositionSizer.calculate(0.99, 10000, 100.0, "SOL/USDC")
+        self.setup()
+        size = self.conservative.calculate(0.99, 10000, 100.0, "SOL/USDC")
         value = size * 100.0
-        assert value <= 10000 * 0.30  # max 30%
+        assert value <= 10000 * 0.30
 
     def test_min_trade_value(self):
-        size = PositionSizer.calculate(0.55, 1.0, 100.0, "SOL/USDC")
-        # With $1 balance, quarter-kelly at 0.55 = 0.025 * 1 = $0.025 < $0.50
+        self.setup()
+        size = self.conservative.calculate(0.55, 1.0, 100.0, "SOL/USDC")
         assert size == 0.0
 
     def test_kraken_min_order_size(self):
-        # SOL min is 0.02
-        size = PositionSizer.calculate(0.56, 100.0, 100.0, "SOL/USDC")
+        self.setup()
+        size = self.conservative.calculate(0.56, 100.0, 100.0, "SOL/USDC")
         if size > 0:
             assert size >= 0.02
 
     def test_xbt_min_order_size(self):
-        size = PositionSizer.calculate(0.95, 1000.0, 67000.0, "XBT/USDC")
+        self.setup()
+        size = self.conservative.calculate(0.95, 1000.0, 67000.0, "XBT/USDC")
         if size > 0:
             assert size >= 0.00005
 
     def test_zero_price(self):
-        size = PositionSizer.calculate(0.8, 10000, 0.0)
-        # division by zero guard — should not crash
-        assert True  # if we get here, no crash
+        self.setup()
+        size = self.conservative.calculate(0.8, 10000, 0.0)
+        assert size == 0.0
 
     def test_scaling(self):
-        low = PositionSizer.calculate(0.60, 10000, 100.0, "SOL/USDC")
-        high = PositionSizer.calculate(0.90, 10000, 100.0, "SOL/USDC")
-        assert high > low  # higher confidence = larger position
+        self.setup()
+        low = self.conservative.calculate(0.60, 10000, 100.0, "SOL/USDC")
+        high = self.conservative.calculate(0.90, 10000, 100.0, "SOL/USDC")
+        assert high > low
+
+    # ─── Competition mode tests ───
+
+    def test_competition_lower_threshold(self):
+        self.setup()
+        # 0.52 confidence: below conservative (0.55) but above competition (0.50)
+        cons = self.conservative.calculate(0.52, 10000, 100.0, "SOL/USDC")
+        comp = self.competition.calculate(0.52, 10000, 100.0, "SOL/USDC")
+        assert cons == 0.0  # conservative rejects
+        assert comp > 0     # competition accepts
+
+    def test_competition_larger_positions(self):
+        self.setup()
+        cons = self.conservative.calculate(0.80, 10000, 100.0, "SOL/USDC")
+        comp = self.competition.calculate(0.80, 10000, 100.0, "SOL/USDC")
+        assert comp > cons  # half-Kelly > quarter-Kelly
+
+    def test_competition_higher_max(self):
+        self.setup()
+        cons = self.conservative.calculate(0.99, 10000, 100.0, "SOL/USDC")
+        comp = self.competition.calculate(0.99, 10000, 100.0, "SOL/USDC")
+        cons_val = cons * 100.0
+        comp_val = comp * 100.0
+        assert cons_val <= 10000 * 0.30  # conservative: 30% max
+        assert comp_val <= 10000 * 0.40  # competition: 40% max
+
+    def test_presets_valid(self):
+        """Verify sizing presets have all required keys."""
+        for preset in [SIZING_CONSERVATIVE, SIZING_COMPETITION]:
+            assert "kelly_multiplier" in preset
+            assert "min_confidence" in preset
+            assert "max_position_pct" in preset
+            sizer = PositionSizer(**preset)
+            assert sizer.kelly_multiplier > 0
+            assert 0 < sizer.min_confidence < 1
+            assert 0 < sizer.max_position_pct <= 1
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -418,6 +464,30 @@ class TestHydraEngine:
                 break
 
 
+class TestCompetitionMode:
+    def test_engine_accepts_competition_sizing(self):
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC", sizing=SIZING_COMPETITION)
+        assert engine.sizer.kelly_multiplier == 0.50
+        assert engine.sizer.min_confidence == 0.50
+        assert engine.sizer.max_position_pct == 0.40
+
+    def test_engine_defaults_to_conservative(self):
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        assert engine.sizer.kelly_multiplier == 0.25
+        assert engine.sizer.min_confidence == 0.55
+
+    def test_competition_uses_half_kelly(self):
+        """Competition mode positions are larger than conservative for same confidence."""
+        cons_sizer = PositionSizer(**SIZING_CONSERVATIVE)
+        comp_sizer = PositionSizer(**SIZING_COMPETITION)
+        # At 0.80 confidence, half-Kelly should produce larger size than quarter-Kelly
+        cons_size = cons_sizer.calculate(0.80, 10000, 100.0, "SOL/USDC")
+        comp_size = comp_sizer.calculate(0.80, 10000, 100.0, "SOL/USDC")
+        assert comp_size > cons_size
+        # Half-Kelly should be roughly 2x quarter-Kelly (before caps)
+        assert 1.5 < (comp_size / cons_size) < 2.5
+
+
 # ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
@@ -430,7 +500,8 @@ def run_tests():
 
     test_classes = [
         TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
-        TestRegimeDetection, TestSignalGeneration, TestPositionSizer, TestHydraEngine,
+        TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
+        TestHydraEngine, TestCompetitionMode,
     ]
 
     for cls in test_classes:

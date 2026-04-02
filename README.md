@@ -161,7 +161,29 @@ start_all.bat
 --interval    Seconds between ticks (default: 30)
 --duration    Total duration in seconds, 0 = forever (default: 0)
 --ws-port     WebSocket port for dashboard (default: 8765)
+--mode        Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
+--paper       Use paper trading — no API keys needed, no real money
 ```
+
+### Competition Mode
+
+For the [AI Trading Agents hackathon](https://lablab.ai/ai-hackathons/ai-trading-agents) ($55k prize pool, March 30 — April 12, 2026):
+
+```bash
+# Paper trade first to validate strategy
+python hydra_agent.py --mode competition --paper
+
+# Go live with competition sizing
+python hydra_agent.py --mode competition
+```
+
+Competition mode uses half-Kelly (2x position sizes), 50% confidence threshold (trades more often), and 40% max position. On shutdown, exports `competition_results_{timestamp}.json` with full PnL proof.
+
+| Setting | Conservative | Competition |
+|---------|-------------|-------------|
+| Kelly multiplier | 0.25 (quarter) | 0.50 (half) |
+| Min confidence | 55% | 50% |
+| Max position | 30% | 40% |
 
 ### Engine Demo (No Kraken Required)
 

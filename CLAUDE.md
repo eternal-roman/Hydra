@@ -31,11 +31,20 @@ CHANGELOG.md        — Version history
 # Dashboard
 cd dashboard && npm install && npm run dev
 
-# Agent (runs forever)
+# Agent — conservative (default, runs forever)
 python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100 --interval 30
+
+# Agent — competition mode (half-Kelly, lower threshold)
+python hydra_agent.py --mode competition
+
+# Agent — paper trading (no API keys needed)
+python hydra_agent.py --mode competition --paper
 
 # Engine test (no API keys needed)
 python hydra_engine.py
+
+# Run test suite (54 tests)
+python tests/test_engine.py
 ```
 
 ## Working with the Code
