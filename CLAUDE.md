@@ -32,11 +32,14 @@ CHANGELOG.md        — Version history
 # Dashboard
 cd dashboard && npm install && npm run dev
 
-# Agent — conservative (default, runs forever)
-python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100 --interval 30
+# Agent — conservative (default, 5-min candles, runs forever)
+python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100
 
 # Agent — competition mode (half-Kelly, lower threshold)
 python hydra_agent.py --mode competition
+
+# Agent — 1-min candles (faster ticks, noisier signals)
+python hydra_agent.py --candle-interval 1
 
 # Agent — paper trading (no API keys needed)
 python hydra_agent.py --mode competition --paper
@@ -44,7 +47,7 @@ python hydra_agent.py --mode competition --paper
 # Engine test (no API keys needed)
 python hydra_engine.py
 
-# Run test suite (54 tests)
+# Run test suite (67 tests)
 python tests/test_engine.py
 ```
 
@@ -84,12 +87,12 @@ python tests/test_engine.py
 - Enable by setting `ANTHROPIC_API_KEY` and/or `XAI_API_KEY` in `.env`
 - Cost: ~$3-5/day with Grok escalation on ~20-30% of signals
 - Do not change the JSON response format in system prompts — the parser depends on it
-- Do not change the escalation threshold (0.65) without testing — it controls when Grok fires
+- Escalation threshold is parameterized (0.65 conservative, 0.50 competition) — it controls when Grok fires
 - Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
 
 ## Testing
 
-Run the full test suite (62 tests):
+Run the full test suite (67 tests):
 ```bash
 python tests/test_engine.py
 ```

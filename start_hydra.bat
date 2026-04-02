@@ -9,7 +9,7 @@ echo.
 
 :loop
 echo [%date% %time%] Starting HYDRA agent...
-python -u hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100 --interval 30
+python -u hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100
 echo.
 echo [%date% %time%] HYDRA exited (code %errorlevel%). Restarting in 10 seconds...
 echo Press Ctrl+C to stop.
