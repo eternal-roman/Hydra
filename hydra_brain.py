@@ -234,7 +234,7 @@ class HydraBrain:
             timeout=10.0,
         )
 
-        text = response.content[0].text if response.content else ""
+        text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
         parsed = self._parse_json(text)
         return parsed, response.usage.input_tokens, response.usage.output_tokens
 
@@ -250,7 +250,7 @@ class HydraBrain:
             timeout=10.0,
         )
 
-        text = response.content[0].text if response.content else ""
+        text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
         parsed = self._parse_json(text)
         return parsed, response.usage.input_tokens, response.usage.output_tokens
 

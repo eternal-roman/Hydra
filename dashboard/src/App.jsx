@@ -451,8 +451,8 @@ export default function App() {
               {pairNames.map((pair) => {
                 const ps = pairs[pair];
                 const perf = ps.performance || {};
-                const winRate = (perf.win_count + perf.loss_count) > 0
-                  ? (perf.win_count / (perf.win_count + perf.loss_count) * 100)
+                const winRate = ((perf.win_count || 0) + (perf.loss_count || 0)) > 0
+                  ? ((perf.win_count || 0) / ((perf.win_count || 0) + (perf.loss_count || 0)) * 100)
                   : 0;
                 return (
                   <div key={pair} style={{ background: `${regimeColor(ps.regime)}08`, border: `1px solid ${regimeColor(ps.regime)}25`, borderRadius: 8, padding: 12 }}>
