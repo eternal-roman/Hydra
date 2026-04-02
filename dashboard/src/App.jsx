@@ -515,7 +515,7 @@ export default function App() {
                   <span style={{ color: COLORS.textDim }}>Orders</span>
                   <span style={{ color: COLORS.text, textAlign: "right" }}>Limit Post-Only</span>
                   <span style={{ color: COLORS.textDim }}>Interval</span>
-                  <span style={{ color: COLORS.text, textAlign: "right" }}>{data.interval ? `${data.interval}s` : "—"}</span>
+                  <span style={{ color: COLORS.text, textAlign: "right" }}>{state?.interval ? `${state.interval}s` : "—"}</span>
                   <span style={{ color: COLORS.textDim }}>Pairs</span>
                   <span style={{ color: COLORS.text, textAlign: "right" }}>{pairNames.length}</span>
                   <span style={{ color: COLORS.textDim }}>Circuit Brk</span>
