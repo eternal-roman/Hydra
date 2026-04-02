@@ -358,6 +358,12 @@ export default function App() {
                         {ps.ai_decision.risk_reasoning && (
                           <div style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, marginTop: 3, lineHeight: 1.3 }}>{ps.ai_decision.risk_reasoning}</div>
                         )}
+                        {ps.ai_decision.escalated && ps.ai_decision.strategist_reasoning && (
+                          <div style={{ marginTop: 4, padding: "4px 6px", background: `${COLORS.warn}10`, borderRadius: 3 }}>
+                            <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.warn, textTransform: "uppercase", marginRight: 6 }}>GROK STRATEGIST</span>
+                            <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.text, lineHeight: 1.3 }}>{ps.ai_decision.strategist_reasoning}</span>
+                          </div>
+                        )}
                         {ps.ai_decision.risk_flags && ps.ai_decision.risk_flags.length > 0 && (
                           <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
                             {ps.ai_decision.risk_flags.map((flag, fi) => (
@@ -488,6 +494,10 @@ export default function App() {
                     <span style={{ color: COLORS.text, textAlign: "right" }}>{aiBrain.decisions_today}</span>
                     <span style={{ color: COLORS.textDim }}>Overrides</span>
                     <span style={{ color: aiBrain.overrides_today > 0 ? COLORS.warn : COLORS.text, textAlign: "right" }}>{aiBrain.overrides_today}</span>
+                    <span style={{ color: COLORS.textDim }}>Escalations</span>
+                    <span style={{ color: aiBrain.escalations_today > 0 ? COLORS.warn : COLORS.text, textAlign: "right" }}>{aiBrain.escalations_today || 0}</span>
+                    <span style={{ color: COLORS.textDim }}>Strategist</span>
+                    <span style={{ color: aiBrain.has_strategist ? COLORS.accent : COLORS.textMuted, textAlign: "right" }}>{aiBrain.has_strategist ? "Grok 4" : "None"}</span>
                     <span style={{ color: COLORS.textDim }}>Cost Today</span>
                     <span style={{ color: COLORS.text, textAlign: "right" }}>${aiBrain.cost_today?.toFixed(3)}</span>
                     <span style={{ color: COLORS.textDim }}>Latency</span>

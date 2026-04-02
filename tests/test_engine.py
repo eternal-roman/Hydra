@@ -518,7 +518,7 @@ class TestBrain:
     def test_fallback_decision(self):
         from hydra_brain import HydraBrain
         # Create brain with dummy key (won't actually call API)
-        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         state = self._make_state("BUY", 0.72)
         # Force fallback by disabling API
         brain.api_available = False
@@ -530,7 +530,7 @@ class TestBrain:
 
     def test_fallback_preserves_hold(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         state = self._make_state("HOLD", 0.3)
         brain.api_available = False
         decision = brain.deliberate(state)
@@ -539,14 +539,14 @@ class TestBrain:
 
     def test_budget_guard(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key", max_daily_cost=0.0)
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key", max_daily_cost=0.0)
         state = self._make_state("BUY", 0.8)
         decision = brain.deliberate(state)
         assert decision.fallback is True  # budget exceeded immediately
 
     def test_get_stats(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         stats = brain.get_stats()
         assert "active" in stats
         assert "decisions_today" in stats
@@ -556,7 +556,7 @@ class TestBrain:
 
     def test_json_parser(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         # Direct JSON
         assert brain._parse_json('{"a": 1}') == {"a": 1}
         # Wrapped in markdown
@@ -568,7 +568,7 @@ class TestBrain:
 
     def test_prompt_builders(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         state = self._make_state()
         prompt = brain._build_analyst_prompt(state)
         assert "SOL/USDC" in prompt
@@ -581,7 +581,7 @@ class TestBrain:
 
     def test_call_interval_caching(self):
         from hydra_brain import HydraBrain
-        brain = HydraBrain(api_key="sk-ant-test-fake-key", call_interval=3)
+        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key", call_interval=3)
         brain.api_available = False  # force fallback
         state = self._make_state()
 

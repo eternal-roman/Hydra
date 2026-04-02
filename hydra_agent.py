@@ -348,15 +348,16 @@ class HydraAgent:
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
 
-        # AI Brain (optional — tries Anthropic first, then xAI, then engine-only)
+        # AI Brain (optional — Claude for analysis, Grok for strategic depth)
         self.brain = None
         if HAS_BRAIN:
             anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
             xai_key = os.environ.get("XAI_API_KEY", "")
-            if anthropic_key:
-                self.brain = HydraBrain(api_key=anthropic_key, provider="anthropic")
-            elif xai_key:
-                self.brain = HydraBrain(api_key=xai_key, provider="xai")
+            if anthropic_key or xai_key:
+                try:
+                    self.brain = HydraBrain(anthropic_key=anthropic_key, xai_key=xai_key)
+                except Exception as e:
+                    print(f"  [WARN] Brain init failed: {e}")
 
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
@@ -496,6 +497,8 @@ class HydraAgent:
                     "size_multiplier": decision.size_multiplier,
                     "analyst_reasoning": decision.analyst_reasoning,
                     "risk_reasoning": decision.risk_reasoning,
+                    "strategist_reasoning": decision.strategist_reasoning,
+                    "escalated": decision.escalated,
                     "summary": decision.combined_summary,
                     "risk_flags": decision.risk_flags,
                     "portfolio_health": decision.portfolio_health,
