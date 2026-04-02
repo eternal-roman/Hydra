@@ -1,0 +1,311 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="-4 -6 56 56" fill="none">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="eyeFire" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="1.8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- Body gradient — deep bruised purple -->
+    <linearGradient id="bodyGrad" x1="24" y1="46" x2="24" y2="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a0845"/>
+      <stop offset="0.4" stop-color="#5b1dbd"/>
+      <stop offset="0.8" stop-color="#7e14ff"/>
+      <stop offset="1" stop-color="#863bff"/>
+    </linearGradient>
+    <!-- Neck muscle gradient -->
+    <linearGradient id="neckGrad" x1="24" y1="14" x2="24" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9945ff"/>
+      <stop offset="0.5" stop-color="#6b18d4"/>
+      <stop offset="1" stop-color="#3d0a7a"/>
+    </linearGradient>
+    <!-- Belly / underbelly lighter tone -->
+    <linearGradient id="bellyGrad" x1="24" y1="24" x2="24" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9945ff" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#5b1dbd" stop-opacity="0.08"/>
+    </linearGradient>
+    <!-- Left head -->
+    <radialGradient id="headL" cx="8" cy="6" r="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b366ff"/>
+      <stop offset="0.6" stop-color="#7e14ff"/>
+      <stop offset="1" stop-color="#4a0eaa"/>
+    </radialGradient>
+    <!-- Center head -->
+    <radialGradient id="headC" cx="24" cy="2" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d4a0ff"/>
+      <stop offset="0.4" stop-color="#9945ff"/>
+      <stop offset="0.8" stop-color="#7e14ff"/>
+      <stop offset="1" stop-color="#5b1dbd"/>
+    </radialGradient>
+    <!-- Right head -->
+    <radialGradient id="headR" cx="40" cy="6" r="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b366ff"/>
+      <stop offset="0.6" stop-color="#7e14ff"/>
+      <stop offset="1" stop-color="#4a0eaa"/>
+    </radialGradient>
+    <!-- Eye fire -->
+    <radialGradient id="eyeFlame" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.3" stop-color="#47bfff"/>
+      <stop offset="0.7" stop-color="#0088ff"/>
+      <stop offset="1" stop-color="#47bfff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- === TAIL — sinuous, whip-like === -->
+  <path d="M24 46 C23 43 25 40 23 37 C21 34 24 32 24 30"
+        stroke="#3d0a7a" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+  <path d="M24 46 C23 43 25 40 23 37 C21 34 24 32 24 30"
+        stroke="url(#bodyGrad)" stroke-width="2.8" stroke-linecap="round" fill="none"/>
+  <!-- Tail tip — forked -->
+  <path d="M24 46 C25 47 26.5 47.5 27 46.5" stroke="#5b1dbd" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+  <path d="M24 46 C23 47.5 21.5 47.5 21 46.5" stroke="#5b1dbd" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+  <!-- Tail spine ridges -->
+  <path d="M24.5 44 L26 43.5 M23.5 41 L22 40 M24.5 38 L26 37" stroke="#7e14ff" stroke-width="0.6" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- === BODY — muscular, hunched torso === -->
+  <path d="M15 32 C13 28 14 24 18 21 C20 19.5 22 19 24 19
+           C26 19 28 19.5 30 21 C34 24 35 28 33 32
+           C31 36 27 37 24 37 C21 37 17 36 15 32Z"
+        fill="url(#bodyGrad)" filter="url(#glow)"/>
+  <!-- Underbelly highlight -->
+  <path d="M19 33 C21 35 27 35 29 33 C30 30 28 27 24 27 C20 27 18 30 19 33Z"
+        fill="url(#bellyGrad)"/>
+  <!-- Dorsal spine ridge -->
+  <path d="M24 19 L23 17.5 L24 18.5 L25 17.5 L24 19" fill="#9945ff" opacity="0.6"/>
+  <path d="M24 22 L22.5 20.5 L24 21.5 L25.5 20.5 L24 22" fill="#9945ff" opacity="0.5"/>
+  <!-- Scale rows — organic arcs -->
+  <g opacity="0.18" stroke="#ede6ff" stroke-width="0.4" fill="none">
+    <path d="M20 25 Q22 24 24 24.5 Q26 24 28 25"/>
+    <path d="M19 27 Q22 25.8 24 26 Q26 25.8 29 27"/>
+    <path d="M18 29 Q21 27.5 24 28 Q27 27.5 30 29"/>
+    <path d="M19 31 Q22 29.8 24 30 Q26 29.8 29 31"/>
+    <path d="M20 33 Q22 32 24 32.2 Q26 32 28 33"/>
+  </g>
+  <!-- Muscle striations on sides -->
+  <path d="M16 28 C15 26 15.5 24 17 22" stroke="#9945ff" stroke-width="0.5" fill="none" opacity="0.2"/>
+  <path d="M32 28 C33 26 32.5 24 31 22" stroke="#9945ff" stroke-width="0.5" fill="none" opacity="0.2"/>
+
+  <!-- === LEFT NECK — thick, serpentine curve === -->
+  <path d="M18 21 C14 17 10 15 7 12 C5 10 3.5 8 4 5"
+        stroke="#3d0a7a" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <path d="M18 21 C14 17 10 15 7 12 C5 10 3.5 8 4 5"
+        stroke="url(#neckGrad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow)"/>
+  <!-- Left neck muscle ridge -->
+  <path d="M16.5 19.5 C13 16 9 14 6.5 11" stroke="#b366ff" stroke-width="0.8" fill="none" opacity="0.3"/>
+  <!-- Left neck scales -->
+  <g opacity="0.15" stroke="#ede6ff" stroke-width="0.35" fill="none">
+    <path d="M15 18 Q13.5 17 12 17.5"/>
+    <path d="M12 15.5 Q10.5 15 9 15.5"/>
+    <path d="M9 13 Q7.5 12.5 6 13"/>
+  </g>
+
+  <!-- === CENTER NECK — thickest, dominant === -->
+  <path d="M24 19 C24 15 23.5 11 24 7 C24.3 4 24 2 24 0"
+        stroke="#3d0a7a" stroke-width="6.5" stroke-linecap="round" fill="none"/>
+  <path d="M24 19 C24 15 23.5 11 24 7 C24.3 4 24 2 24 0"
+        stroke="url(#neckGrad)" stroke-width="5.5" stroke-linecap="round" fill="none" filter="url(#glow)"/>
+  <!-- Center neck ridges -->
+  <path d="M22.5 17 C22.5 14 22.5 11 23 7" stroke="#b366ff" stroke-width="0.8" fill="none" opacity="0.3"/>
+  <!-- Spine bumps along center neck -->
+  <g fill="#9945ff" opacity="0.5">
+    <ellipse cx="24" cy="16" rx="1.2" ry="0.6" transform="rotate(-5 24 16)"/>
+    <ellipse cx="23.8" cy="13" rx="1.1" ry="0.55"/>
+    <ellipse cx="24" cy="10" rx="1" ry="0.5"/>
+  </g>
+
+  <!-- === RIGHT NECK === -->
+  <path d="M30 21 C34 17 38 15 41 12 C43 10 44.5 8 44 5"
+        stroke="#3d0a7a" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <path d="M30 21 C34 17 38 15 41 12 C43 10 44.5 8 44 5"
+        stroke="url(#neckGrad)" stroke-width="4.5" stroke-linecap="round" fill="none" filter="url(#glow)"/>
+  <path d="M31.5 19.5 C35 16 39 14 41.5 11" stroke="#b366ff" stroke-width="0.8" fill="none" opacity="0.3"/>
+  <g opacity="0.15" stroke="#ede6ff" stroke-width="0.35" fill="none">
+    <path d="M33 18 Q34.5 17 36 17.5"/>
+    <path d="M36 15.5 Q37.5 15 39 15.5"/>
+    <path d="M39 13 Q40.5 12.5 42 13"/>
+  </g>
+
+  <!-- === LEFT HEAD — snarling, jaw open === -->
+  <g filter="url(#softGlow)">
+    <!-- Skull -->
+    <path d="M-1 4 C0 1 3 -0.5 6 0 C9 0.5 11 3 11 6 C11 9 9 11 7 12
+             C5 12.5 3 11 2 9 C0 7 -1 6 -1 4Z"
+          fill="url(#headL)"/>
+    <!-- Upper jaw / snout — angular, bony -->
+    <path d="M-1 4 C-2.5 3.5 -4 2.5 -4.5 3.5 C-4 4.5 -2 5 -1 5.5"
+          fill="#6b18d4"/>
+    <path d="M-4.5 3.5 C-5.5 3 -6 3.5 -5.5 4.2" stroke="#9945ff" stroke-width="0.4" fill="none" opacity="0.5"/>
+    <!-- Lower jaw — open, aggressive -->
+    <path d="M-1 5.5 C-3 7 -5 7.5 -5 6.5 C-5 5.5 -3.5 5 -1.5 5"
+          fill="#4a0eaa"/>
+    <!-- Teeth — jagged -->
+    <g fill="#ede6ff" opacity="0.85">
+      <path d="M-3.5 4.2 L-3 5.5 L-2.5 4.3"/>
+      <path d="M-2 4 L-1.8 5.2 L-1.3 4.1"/>
+      <path d="M-1 4.5 L-0.7 5.5 L-0.2 4.5"/>
+    </g>
+    <!-- Brow ridge — heavy, aggressive -->
+    <path d="M1 2 C3 0.5 6 0 8 1" stroke="#4a0eaa" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    <!-- Horn -->
+    <path d="M6 0 C5 -2.5 3 -3 2.5 -1.5 C3 -0.5 5 0 6 0"
+          fill="#9945ff" opacity="0.8"/>
+    <path d="M4 -2 C3.5 -1 4.5 -0.5 5 0" stroke="#c084ff" stroke-width="0.4" fill="none" opacity="0.5"/>
+    <!-- Eye socket -->
+    <ellipse cx="6.5" cy="5.5" rx="2.2" ry="2.5" fill="#1a0533"/>
+    <!-- Eye — fierce, slitted pupil -->
+    <g filter="url(#eyeFire)">
+      <ellipse cx="6.5" cy="5.5" rx="1.6" ry="1.9" fill="#0066cc"/>
+      <ellipse cx="6.5" cy="5.5" rx="1.3" ry="1.6" fill="#47bfff"/>
+      <ellipse cx="6.5" cy="5.5" rx="0.35" ry="1.4" fill="#0a0a0f"/>
+      <ellipse cx="6.2" cy="4.8" rx="0.3" ry="0.5" fill="#ffffff" opacity="0.7"/>
+    </g>
+    <!-- Nostril flare -->
+    <ellipse cx="0.5" cy="3.5" rx="0.6" ry="0.4" fill="#1a0533" transform="rotate(-20 0.5 3.5)"/>
+    <!-- Tongue — forked, flicking -->
+    <path d="M-5 6.5 C-6.5 6 -7.5 5 -8.5 5.5 M-6.5 6 C-7.5 7 -8 7.5 -9 7"
+          stroke="#ff2255" stroke-width="0.7" fill="none" stroke-linecap="round"/>
+    <!-- Cheek scale detail -->
+    <g opacity="0.2" stroke="#ede6ff" stroke-width="0.3" fill="none">
+      <path d="M3 8 Q5 7.5 7 8"/>
+      <path d="M2 9.5 Q4 9 6 9.5"/>
+    </g>
+  </g>
+
+  <!-- === CENTER HEAD — largest, alpha, mouth open wide === -->
+  <g filter="url(#softGlow)">
+    <!-- Skull — broad, powerful -->
+    <path d="M16 2 C17 -2 20 -4 24 -4.5 C28 -4 31 -2 32 2
+             C33 6 32 10 30 12 C28 13.5 26 14 24 14
+             C22 14 20 13.5 18 12 C16 10 15 6 16 2Z"
+          fill="url(#headC)"/>
+    <!-- Upper jaw / snout -->
+    <path d="M18 4 C16 2 14 1 13 2 C12 3 13 4.5 15 5
+             M30 4 C32 2 34 1 35 2 C36 3 35 4.5 33 5"
+          fill="#6b18d4"/>
+    <!-- Lower jaw — wide open -->
+    <path d="M15 5 C14 7.5 13 9 13.5 9.5 C14 10 16 8 18 7
+             M33 5 C34 7.5 35 9 34.5 9.5 C34 10 32 8 30 7"
+          fill="#4a0eaa"/>
+    <!-- Throat visible inside mouth -->
+    <path d="M18 7 C20 9 28 9 30 7 C29 8.5 26 10 24 10 C22 10 19 8.5 18 7Z"
+          fill="#1a0533" opacity="0.7"/>
+    <!-- Teeth — upper row -->
+    <g fill="#ede6ff" opacity="0.9">
+      <path d="M15.5 3 L16 5.5 L17 3.2"/>
+      <path d="M17.5 2.5 L18 5 L19 2.8"/>
+      <path d="M20 2 L20.5 4.8 L21.5 2.3"/>
+      <path d="M26.5 2 L27.5 4.8 L28 2.3"/>
+      <path d="M29 2.5 L30 5 L30.5 2.8"/>
+      <path d="M31 3 L32 5.5 L32.5 3.2"/>
+    </g>
+    <!-- Teeth — lower fangs -->
+    <g fill="#ede6ff" opacity="0.75">
+      <path d="M17 6.5 L17.5 4.5 L18.5 6.3"/>
+      <path d="M20 7.5 L20.5 5 L21.5 7.3"/>
+      <path d="M26.5 7.3 L27.5 5 L28 7.5"/>
+      <path d="M29.5 6.3 L30.5 4.5 L31 6.5"/>
+    </g>
+    <!-- Brow ridges — heavy, furrowed -->
+    <path d="M17 0 C19 -2 21 -2.5 23 -1.5" stroke="#4a0eaa" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <path d="M31 0 C29 -2 27 -2.5 25 -1.5" stroke="#4a0eaa" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    <!-- Center horns — curved, organic -->
+    <path d="M19.5 -2 C18 -5.5 16 -6.5 15.5 -5 C16 -3.5 18 -2.5 19.5 -2"
+          fill="#7e14ff" stroke="#9945ff" stroke-width="0.4"/>
+    <path d="M17 -5 C17.5 -4 18.5 -3 19 -2.5" stroke="#c084ff" stroke-width="0.5" fill="none" opacity="0.4"/>
+    <path d="M28.5 -2 C30 -5.5 32 -6.5 32.5 -5 C32 -3.5 30 -2.5 28.5 -2"
+          fill="#7e14ff" stroke="#9945ff" stroke-width="0.4"/>
+    <path d="M31 -5 C30.5 -4 29.5 -3 29 -2.5" stroke="#c084ff" stroke-width="0.5" fill="none" opacity="0.4"/>
+    <!-- Crown spike -->
+    <path d="M24 -4.5 C23.5 -6 24 -7 24.5 -6 C24.5 -5 24 -4.5 24 -4.5"
+          fill="#b366ff" opacity="0.7"/>
+    <!-- Eye sockets -->
+    <ellipse cx="21" cy="3" rx="2.8" ry="3" fill="#1a0533"/>
+    <ellipse cx="27" cy="3" rx="2.8" ry="3" fill="#1a0533"/>
+    <!-- Left eye -->
+    <g filter="url(#eyeFire)">
+      <ellipse cx="21" cy="3" rx="2" ry="2.3" fill="#0066cc"/>
+      <ellipse cx="21" cy="3" rx="1.6" ry="2" fill="#47bfff"/>
+      <ellipse cx="21" cy="3" rx="0.4" ry="1.7" fill="#0a0a0f"/>
+      <ellipse cx="20.6" cy="2.2" rx="0.35" ry="0.6" fill="#ffffff" opacity="0.75"/>
+    </g>
+    <!-- Right eye -->
+    <g filter="url(#eyeFire)">
+      <ellipse cx="27" cy="3" rx="2" ry="2.3" fill="#0066cc"/>
+      <ellipse cx="27" cy="3" rx="1.6" ry="2" fill="#47bfff"/>
+      <ellipse cx="27" cy="3" rx="0.4" ry="1.7" fill="#0a0a0f"/>
+      <ellipse cx="26.6" cy="2.2" rx="0.35" ry="0.6" fill="#ffffff" opacity="0.75"/>
+    </g>
+    <!-- Nostrils — flared, angry -->
+    <ellipse cx="20.5" cy="-0.5" rx="0.7" ry="0.5" fill="#1a0533" transform="rotate(-10 20.5 -0.5)"/>
+    <ellipse cx="27.5" cy="-0.5" rx="0.7" ry="0.5" fill="#1a0533" transform="rotate(10 27.5 -0.5)"/>
+    <!-- Steam/breath from nostrils -->
+    <path d="M20 -1 C19 -2 18.5 -2.5 19 -3" stroke="#9945ff" stroke-width="0.4" fill="none" opacity="0.25"/>
+    <path d="M28 -1 C29 -2 29.5 -2.5 29 -3" stroke="#9945ff" stroke-width="0.4" fill="none" opacity="0.25"/>
+    <!-- Tongue — long, forked -->
+    <path d="M24 10 C24 12 23 13.5 21.5 14.5 M24 12 C24.5 13 26 14 27 14.5"
+          stroke="#ff2255" stroke-width="0.8" fill="none" stroke-linecap="round"/>
+    <!-- Face scale details -->
+    <g opacity="0.15" stroke="#ede6ff" stroke-width="0.35" fill="none">
+      <path d="M18 7 Q20 6 22 7"/>
+      <path d="M26 7 Q28 6 30 7"/>
+      <path d="M19 9 Q21 8 23 9"/>
+      <path d="M25 9 Q27 8 29 9"/>
+    </g>
+    <!-- Wrinkle lines around snout -->
+    <path d="M16 3 C15.5 2 15 1.5 14.5 2" stroke="#4a0eaa" stroke-width="0.4" fill="none" opacity="0.4"/>
+    <path d="M32 3 C32.5 2 33 1.5 33.5 2" stroke="#4a0eaa" stroke-width="0.4" fill="none" opacity="0.4"/>
+  </g>
+
+  <!-- === RIGHT HEAD — snarling mirror of left === -->
+  <g filter="url(#softGlow)">
+    <path d="M49 4 C48 1 45 -0.5 42 0 C39 0.5 37 3 37 6 C37 9 39 11 41 12
+             C43 12.5 45 11 46 9 C48 7 49 6 49 4Z"
+          fill="url(#headR)"/>
+    <!-- Upper jaw -->
+    <path d="M49 4 C50.5 3.5 52 2.5 52.5 3.5 C52 4.5 50 5 49 5.5"
+          fill="#6b18d4"/>
+    <path d="M52.5 3.5 C53.5 3 54 3.5 53.5 4.2" stroke="#9945ff" stroke-width="0.4" fill="none" opacity="0.5"/>
+    <!-- Lower jaw -->
+    <path d="M49 5.5 C51 7 53 7.5 53 6.5 C53 5.5 51.5 5 49.5 5"
+          fill="#4a0eaa"/>
+    <!-- Teeth -->
+    <g fill="#ede6ff" opacity="0.85">
+      <path d="M51.5 4.2 L51 5.5 L50.5 4.3"/>
+      <path d="M50 4 L49.8 5.2 L49.3 4.1"/>
+      <path d="M49 4.5 L48.7 5.5 L48.2 4.5"/>
+    </g>
+    <!-- Brow ridge -->
+    <path d="M47 2 C45 0.5 42 0 40 1" stroke="#4a0eaa" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    <!-- Horn -->
+    <path d="M42 0 C43 -2.5 45 -3 45.5 -1.5 C45 -0.5 43 0 42 0"
+          fill="#9945ff" opacity="0.8"/>
+    <path d="M44 -2 C44.5 -1 43.5 -0.5 43 0" stroke="#c084ff" stroke-width="0.4" fill="none" opacity="0.5"/>
+    <!-- Eye socket -->
+    <ellipse cx="41.5" cy="5.5" rx="2.2" ry="2.5" fill="#1a0533"/>
+    <!-- Eye -->
+    <g filter="url(#eyeFire)">
+      <ellipse cx="41.5" cy="5.5" rx="1.6" ry="1.9" fill="#0066cc"/>
+      <ellipse cx="41.5" cy="5.5" rx="1.3" ry="1.6" fill="#47bfff"/>
+      <ellipse cx="41.5" cy="5.5" rx="0.35" ry="1.4" fill="#0a0a0f"/>
+      <ellipse cx="41.8" cy="4.8" rx="0.3" ry="0.5" fill="#ffffff" opacity="0.7"/>
+    </g>
+    <!-- Nostril -->
+    <ellipse cx="47.5" cy="3.5" rx="0.6" ry="0.4" fill="#1a0533" transform="rotate(20 47.5 3.5)"/>
+    <!-- Tongue -->
+    <path d="M53 6.5 C54.5 6 55.5 5 56.5 5.5 M54.5 6 C55.5 7 56 7.5 57 7"
+          stroke="#ff2255" stroke-width="0.7" fill="none" stroke-linecap="round"/>
+    <!-- Cheek scales -->
+    <g opacity="0.2" stroke="#ede6ff" stroke-width="0.3" fill="none">
+      <path d="M45 8 Q43 7.5 41 8"/>
+      <path d="M46 9.5 Q44 9 42 9.5"/>
+    </g>
+  </g>
+</svg>
