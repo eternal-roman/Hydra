@@ -72,15 +72,31 @@ python tests/test_engine.py
 - Price formatting: use `fmtPrice()` for prices, `fmtInd()` for indicator values
 - Charts use responsive SVG with `width="100%" viewBox`
 
+## AI Brain (hydra_brain.py)
+
+Two-agent reasoning layer using Claude Sonnet via the Anthropic SDK:
+- **Market Analyst** — evaluates engine signals, produces thesis + conviction
+- **Risk Manager** — approves/adjusts/overrides trades, manages risk exposure
+- Only fires on BUY/SELL signals (HOLD is free, no API call)
+- Falls back to engine-only on API failure, budget exceeded, or missing key
+- Enable by setting `ANTHROPIC_API_KEY` in `.env`
+- Cost: ~$3-5/day at 30s intervals, guarded by `max_daily_cost`
+- Do not change the JSON response format in system prompts — the parser depends on it
+- Do not add tools unless necessary — the agents receive all data they need in the prompt
+
 ## Testing
 
-Run the engine synthetic test:
+Run the full test suite (62 tests):
+```bash
+python tests/test_engine.py
+```
+
+Run the engine synthetic demo (no API keys needed):
 ```bash
 python hydra_engine.py
 ```
-This runs 300 ticks of random-walk data through the full pipeline. Expect a performance report at the end with trades, P&L, and metrics.
 
-See AUDIT.md for the full 49-point verification checklist.
+See AUDIT.md for the full verification checklist.
 
 ## Common Pitfalls
 

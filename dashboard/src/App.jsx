@@ -197,6 +197,7 @@ export default function App() {
   const pairs = state?.pairs || {};
   const pairNames = Object.keys(pairs);
   const balance = state?.balance || {};
+  const aiBrain = state?.ai_brain || null;
   const tick = state?.tick || 0;
   const elapsed = state?.elapsed || 0;
   const remaining = state?.remaining || 0;
@@ -228,8 +229,8 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: `${COLORS.danger}20`, color: COLORS.danger, border: `1px solid ${COLORS.danger}40`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
-            LIVE TRADING
+          <div style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.danger}20`, color: aiBrain ? COLORS.blue : COLORS.danger, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.danger}40`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            {aiBrain ? "AI LIVE" : "LIVE TRADING"}
           </div>
           <ConnectionStatus connected={connected} tick={tick} />
           {elapsed > 0 && (
@@ -333,6 +334,37 @@ export default function App() {
                         <span>MACD <span style={{ color: (ind.macd_histogram || 0) > 0 ? COLORS.buy : COLORS.sell, fontWeight: 600 }}>{fmtInd(ind.macd_histogram)}</span></span>
                         <span>BB <span style={{ color: COLORS.text }}>[{fmtInd(ind.bb_lower)} — {fmtInd(ind.bb_upper)}]</span></span>
                         <span>Width <span style={{ color: (ind.bb_width || 0) > 0.06 ? COLORS.volatile : COLORS.text, fontWeight: 600 }}>{((ind.bb_width || 0) * 100).toFixed(2)}%</span></span>
+                      </div>
+                    )}
+
+                    {/* AI Reasoning */}
+                    {ps.ai_decision && !ps.ai_decision.fallback && (
+                      <div style={{ marginTop: 8, padding: "8px 10px", background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}25`, borderRadius: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                          <span style={{ fontSize: 9, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: "0.08em", padding: "2px 6px", borderRadius: 3,
+                            background: ps.ai_decision.action === "CONFIRM" ? `${COLORS.buy}20` : ps.ai_decision.action === "ADJUST" ? `${COLORS.warn}20` : `${COLORS.sell}20`,
+                            color: ps.ai_decision.action === "CONFIRM" ? COLORS.buy : ps.ai_decision.action === "ADJUST" ? COLORS.warn : COLORS.sell,
+                          }}>AI {ps.ai_decision.action}</span>
+                          {ps.ai_decision.portfolio_health && ps.ai_decision.portfolio_health !== "HEALTHY" && (
+                            <span style={{ fontSize: 8, fontFamily: mono, color: ps.ai_decision.portfolio_health === "DANGER" ? COLORS.sell : COLORS.warn }}>
+                              {ps.ai_decision.portfolio_health}
+                            </span>
+                          )}
+                          {ps.ai_decision.latency_ms > 0 && (
+                            <span style={{ fontSize: 8, fontFamily: mono, color: COLORS.textMuted, marginLeft: "auto" }}>{ps.ai_decision.latency_ms}ms</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 10, fontFamily: mono, color: COLORS.text, lineHeight: 1.4 }}>{ps.ai_decision.analyst_reasoning}</div>
+                        {ps.ai_decision.risk_reasoning && (
+                          <div style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, marginTop: 3, lineHeight: 1.3 }}>{ps.ai_decision.risk_reasoning}</div>
+                        )}
+                        {ps.ai_decision.risk_flags && ps.ai_decision.risk_flags.length > 0 && (
+                          <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+                            {ps.ai_decision.risk_flags.map((flag, fi) => (
+                              <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 5px", borderRadius: 3, background: `${COLORS.warn}15`, color: COLORS.warn }}>{flag}</span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -443,6 +475,28 @@ export default function App() {
                   </div>
                 );
               })}
+
+              {/* AI Brain */}
+              {aiBrain && (
+                <div style={{ background: `${COLORS.blue}08`, border: `1px solid ${COLORS.blue}25`, borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: aiBrain.active ? COLORS.accent : COLORS.danger, boxShadow: `0 0 6px ${aiBrain.active ? COLORS.accent : COLORS.danger}` }} />
+                    <span style={{ fontSize: 10, color: COLORS.blue, textTransform: "uppercase", letterSpacing: "0.08em", fontFamily: mono, fontWeight: 700 }}>AI Brain</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, fontFamily: mono }}>
+                    <span style={{ color: COLORS.textDim }}>Decisions</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>{aiBrain.decisions_today}</span>
+                    <span style={{ color: COLORS.textDim }}>Overrides</span>
+                    <span style={{ color: aiBrain.overrides_today > 0 ? COLORS.warn : COLORS.text, textAlign: "right" }}>{aiBrain.overrides_today}</span>
+                    <span style={{ color: COLORS.textDim }}>Cost Today</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>${aiBrain.cost_today?.toFixed(3)}</span>
+                    <span style={{ color: COLORS.textDim }}>Latency</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>{aiBrain.avg_latency_ms}ms</span>
+                    <span style={{ color: COLORS.textDim }}>Status</span>
+                    <span style={{ color: aiBrain.active ? COLORS.accent : COLORS.danger, textAlign: "right" }}>{aiBrain.active ? "Active" : "Offline"}</span>
+                  </div>
+                </div>
+              )}
 
               {/* Session Info */}
               <div style={{ background: `${COLORS.purple}08`, border: `1px solid ${COLORS.purple}25`, borderRadius: 8, padding: 12 }}>

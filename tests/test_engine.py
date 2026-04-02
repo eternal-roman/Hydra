@@ -489,6 +489,111 @@ class TestCompetitionMode:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 6. BRAIN TESTS (no API key needed — tests fallback behavior)
+# ═══════════════════════════════════════════════════════════════
+
+class TestBrain:
+    def _make_state(self, action="BUY", confidence=0.7):
+        """Build a minimal engine state dict for brain testing."""
+        return {
+            "tick": 1,
+            "timestamp": 0,
+            "asset": "SOL/USDC",
+            "price": 100.0,
+            "regime": "TREND_UP",
+            "strategy": "MOMENTUM",
+            "signal": {"action": action, "confidence": confidence, "reason": "Test signal"},
+            "position": {"size": 0, "avg_entry": 0, "unrealized_pnl": 0},
+            "portfolio": {"balance": 1000, "equity": 1000, "pnl_pct": 0, "max_drawdown_pct": 0, "peak_equity": 1000},
+            "performance": {"total_trades": 5, "win_count": 3, "loss_count": 2, "win_rate_pct": 60, "sharpe_estimate": 1.5},
+            "indicators": {"rsi": 55, "macd_histogram": 0.5, "bb_upper": 105, "bb_middle": 100, "bb_lower": 95, "bb_width": 0.1},
+            "candles": [{"o": 99, "h": 101, "l": 98, "c": 100, "t": i} for i in range(10)],
+        }
+
+    def test_brain_import(self):
+        from hydra_brain import HydraBrain, BrainDecision, HAS_ANTHROPIC
+        assert BrainDecision is not None
+        assert HAS_ANTHROPIC  # anthropic SDK should be installed
+
+    def test_fallback_decision(self):
+        from hydra_brain import HydraBrain
+        # Create brain with dummy key (won't actually call API)
+        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        state = self._make_state("BUY", 0.72)
+        # Force fallback by disabling API
+        brain.api_available = False
+        decision = brain.deliberate(state)
+        assert decision.fallback is True
+        assert decision.final_signal == "BUY"
+        assert decision.confidence_adj == 0.72
+        assert decision.action == "CONFIRM"
+
+    def test_fallback_preserves_hold(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        state = self._make_state("HOLD", 0.3)
+        brain.api_available = False
+        decision = brain.deliberate(state)
+        assert decision.final_signal == "HOLD"
+        assert decision.fallback is True
+
+    def test_budget_guard(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key", max_daily_cost=0.0)
+        state = self._make_state("BUY", 0.8)
+        decision = brain.deliberate(state)
+        assert decision.fallback is True  # budget exceeded immediately
+
+    def test_get_stats(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        stats = brain.get_stats()
+        assert "active" in stats
+        assert "decisions_today" in stats
+        assert "cost_today" in stats
+        assert "model" in stats
+        assert stats["decisions_today"] == 0
+
+    def test_json_parser(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        # Direct JSON
+        assert brain._parse_json('{"a": 1}') == {"a": 1}
+        # Wrapped in markdown
+        assert brain._parse_json('```json\n{"a": 1}\n```') == {"a": 1}
+        # Invalid
+        assert brain._parse_json('not json') is None
+        # Empty
+        assert brain._parse_json('') is None
+
+    def test_prompt_builders(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key")
+        state = self._make_state()
+        prompt = brain._build_analyst_prompt(state)
+        assert "SOL/USDC" in prompt
+        assert "TREND_UP" in prompt
+        assert "RSI=" in prompt
+
+        risk_prompt = brain._build_risk_prompt(state, {"thesis": "test", "conviction": 0.7, "signal_agreement": True, "concern": None})
+        assert "ENGINE SIGNAL" in risk_prompt
+        assert "ANALYST THESIS" in risk_prompt
+
+    def test_call_interval_caching(self):
+        from hydra_brain import HydraBrain
+        brain = HydraBrain(api_key="sk-ant-test-fake-key", call_interval=3)
+        brain.api_available = False  # force fallback
+        state = self._make_state()
+
+        d1 = brain.deliberate(state)  # tick 1: AI tick (1 % 3 == 1, no cache)
+        assert d1.fallback is True
+
+        d2 = brain.deliberate(state)  # tick 2: skip (cached)
+        d3 = brain.deliberate(state)  # tick 3: skip (cached)
+        assert brain.tick_counter == 3
+
+
+# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -501,7 +606,7 @@ def run_tests():
     test_classes = [
         TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
         TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
-        TestHydraEngine, TestCompetitionMode,
+        TestHydraEngine, TestCompetitionMode, TestBrain,
     ]
 
     for cls in test_classes:
