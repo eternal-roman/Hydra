@@ -420,6 +420,15 @@ class HydraAgent:
             dashboard_state = self._build_dashboard_state(tick, all_states, elapsed, remaining)
             self.broadcaster.broadcast(dashboard_state)
 
+            # Rolling save — persist trade log every tick so no data is lost on crash
+            if self.trade_log:
+                rolling_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_trades_live.json")
+                try:
+                    with open(rolling_file, "w") as f:
+                        json.dump(self.trade_log, f, indent=2)
+                except Exception:
+                    pass
+
             # Sleep until next tick
             next_tick_time = self.start_time + tick * self.interval
             sleep_time = next_tick_time - time.time()
