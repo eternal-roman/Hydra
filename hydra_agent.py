@@ -37,7 +37,8 @@ if os.path.exists(_env_path):
                 if _v and _k.strip() not in os.environ:
                     os.environ[_k.strip()] = _v.strip()
 
-from hydra_engine import HydraEngine, SIZING_CONSERVATIVE, SIZING_COMPETITION
+from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
+from hydra_tuner import ParameterTracker
 
 try:
     from hydra_brain import HydraBrain
@@ -139,6 +140,12 @@ class KrakenCLI:
                                 "volume": float(row[6]),
                             })
         return candles
+
+    @staticmethod
+    def depth(pair: str, count: int = 10) -> dict:
+        """Fetch order book depth. Returns bids/asks arrays."""
+        p = KrakenCLI._resolve_pair(pair)
+        return KrakenCLI._run(["depth", p, "--count", str(count)])
 
     # ─── Private Account ───
 
@@ -324,6 +331,7 @@ class HydraAgent:
         mode: str = "conservative",
         paper: bool = False,
         candle_interval: int = 5,
+        reset_params: bool = False,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
@@ -336,11 +344,22 @@ class HydraAgent:
         self.start_time = None
         self.trade_log = []
         self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
+        self._completed_trades_since_update = 0  # Counter for tuner update cadence
 
         # Sizing config based on mode
         sizing = SIZING_COMPETITION if mode == "competition" else SIZING_CONSERVATIVE
 
-        # One engine per pair
+        # Self-tuning parameter trackers (one per pair)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.trackers: Dict[str, ParameterTracker] = {}
+        for pair in pairs:
+            tracker = ParameterTracker(pair=pair, save_dir=base_dir)
+            if reset_params:
+                tracker.reset()
+                print(f"  [TUNER] Reset learned params for {pair}")
+            self.trackers[pair] = tracker
+
+        # One engine per pair — apply tuned params if available
         self.engines: Dict[str, HydraEngine] = {}
         for pair in pairs:
             # Scale regime thresholds for candle interval (tuned for 5-min)
@@ -354,6 +373,11 @@ class HydraAgent:
                 volatile_atr_pct=vol_atr,
                 volatile_bb_width=vol_bb,
             )
+            # Apply any previously learned tuned params
+            tuned = self.trackers[pair].get_tunable_params()
+            self.engines[pair].apply_tuned_params(tuned)
+            if self.trackers[pair].update_count > 0:
+                print(f"  [TUNER] {pair}: loaded tuned params (update #{self.trackers[pair].update_count})")
 
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
@@ -372,6 +396,10 @@ class HydraAgent:
                     )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
+
+        # Cross-pair regime coordinator
+        self.coordinator = CrossPairCoordinator(pairs)
+        self._swap_counter = 0  # Monotonic swap ID generator
 
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
@@ -450,6 +478,52 @@ class HydraAgent:
                 engine_states[pair] = self._fetch_and_tick(pair)
                 time.sleep(2)  # Rate limit after OHLC fetch
 
+            # Phase 1.5: Cross-pair regime coordination
+            # Update coordinator with latest regimes, then apply overrides
+            for pair, state in engine_states.items():
+                if state:
+                    self.coordinator.update(pair, state.get("regime", "RANGING"))
+
+            cross_overrides = self.coordinator.get_overrides(engine_states)
+            pending_swaps = []
+            for pair, override in cross_overrides.items():
+                state = engine_states.get(pair)
+                if not state:
+                    continue
+                print(f"  [CROSS] {pair}: {override['action']} → {override['signal']} "
+                      f"(conf {override['confidence_adj']:.2f}) — {override['reason']}")
+                state["signal"]["action"] = override["signal"]
+                state["signal"]["confidence"] = override["confidence_adj"]
+                state["signal"]["reason"] = f"[CROSS-PAIR] {override['reason']}"
+                state["cross_pair_override"] = override
+                # Collect swap opportunities for execution after trades
+                if override.get("swap"):
+                    pending_swaps.append(override["swap"])
+
+            # Phase 1.75: Order book intelligence
+            # Fetch depth data and apply confidence modifiers before brain runs
+            for pair in self.pairs:
+                state = engine_states.get(pair)
+                if not state:
+                    continue
+                time.sleep(2)  # Rate limit
+                depth = KrakenCLI.depth(pair, count=10)
+                if isinstance(depth, dict) and "error" not in depth:
+                    signal_action = state["signal"].get("action", "HOLD")
+                    book_analysis = OrderBookAnalyzer.analyze(depth, signal_action)
+                    state["order_book"] = book_analysis
+                    # Apply modifier to signal confidence
+                    old_conf = state["signal"]["confidence"]
+                    new_conf = max(0.0, min(1.0, old_conf + book_analysis["confidence_modifier"]))
+                    if book_analysis["confidence_modifier"] != 0:
+                        state["signal"]["confidence"] = new_conf
+                        print(f"  [BOOK] {pair}: imbalance {book_analysis['imbalance_ratio']:.2f}, "
+                              f"spread {book_analysis['spread_bps']:.1f}bps, "
+                              f"conf {old_conf:.2f} → {new_conf:.2f} "
+                              f"(mod {book_analysis['confidence_modifier']:+.2f})"
+                              f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
+                              f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
+
             # Phase 2: Run brain with full cross-pair context (parallel across pairs)
             all_states = {}
             brain_pairs = []
@@ -483,8 +557,30 @@ class HydraAgent:
                     if state.get("last_trade"):
                         self._execute_trade(pair, state["last_trade"])
 
-            # Phase 3: Check for regime-driven cross-pair swaps
-            self._check_cross_pair_swaps(all_states)
+            # Phase 3: Execute coordinated swaps, then check regime transitions
+            if pending_swaps:
+                for swap in pending_swaps:
+                    self._execute_coordinated_swap(swap, all_states)
+            self._log_regime_transitions(all_states)
+
+            # Phase 4: Record trade outcomes for self-tuning
+            for pair in self.pairs:
+                state = all_states.get(pair)
+                if not state or not state.get("last_trade"):
+                    continue
+                trade = state["last_trade"]
+                if trade["action"] == "SELL" and trade.get("profit") is not None:
+                    engine = self.engines[pair]
+                    params_at_entry = engine.position.params_at_entry or engine.snapshot_params()
+                    outcome = "win" if trade["profit"] > 0 else "loss"
+                    self.trackers[pair].record_trade(
+                        params_at_entry, "SELL", outcome, trade["profit"],
+                    )
+                    self._completed_trades_since_update += 1
+
+            # Run tuner updates every 50 completed trades
+            if self._completed_trades_since_update >= 50:
+                self._run_tuner_update()
 
             # Broadcast state to dashboard (uses cached balance, no extra API call)
             dashboard_state = self._build_dashboard_state(tick, all_states, elapsed, remaining)
@@ -504,6 +600,9 @@ class HydraAgent:
             sleep_time = next_tick_time - time.time()
             if sleep_time > 0 and self.running:
                 time.sleep(sleep_time)
+
+        # Final tuner update on shutdown
+        self._run_tuner_update()
 
         # Final report
         self._print_final_report()
@@ -732,11 +831,111 @@ class HydraAgent:
             "error": result.get("error"),
         })
 
-    def _check_cross_pair_swaps(self, all_states: Dict[str, dict]):
+    def _run_tuner_update(self):
+        """Run Bayesian parameter update across all pair trackers."""
+        for pair in self.pairs:
+            tracker = self.trackers[pair]
+            if len(tracker.observations) < 20:
+                continue
+            old_params = tracker.get_tunable_params()
+            new_params = tracker.update()
+            changes = tracker.get_changes_log(old_params)
+            if changes:
+                print(f"  [TUNER] {pair}: parameter update #{tracker.update_count}")
+                for line in changes:
+                    print(f"  [TUNER] {line}")
+                # Apply to engine
+                self.engines[pair].apply_tuned_params(new_params)
+        self._completed_trades_since_update = 0
+
+    def _execute_coordinated_swap(self, swap: dict, all_states: dict):
+        """Execute a coordinated cross-pair swap (sell one pair, buy another).
+
+        Generates two trades as an atomic unit with a shared swap_id.
+        Executes the sell leg first, then the buy leg.
         """
-        Check if a regime change warrants a cross-pair swap.
-        When SOL/USDC regime shifts to TREND_DOWN and SOL/XBT regime is
-        TREND_UP or RANGING, consider swapping SOL for BTC via SOL/XBT.
+        sell_pair = swap["sell_pair"]
+        buy_pair = swap["buy_pair"]
+        reason = swap["reason"]
+
+        sell_state = all_states.get(sell_pair)
+        buy_state = all_states.get(buy_pair)
+        if not sell_state or not buy_state:
+            print(f"  [SWAP] Cannot execute swap: missing state for {sell_pair} or {buy_pair}")
+            return
+
+        sell_engine = self.engines.get(sell_pair)
+        if not sell_engine or sell_engine.position.size <= 0:
+            print(f"  [SWAP] No position to sell on {sell_pair}, skipping swap")
+            return
+
+        self._swap_counter += 1
+        swap_id = f"swap_{self._swap_counter}_{int(time.time())}"
+        sell_amount = sell_engine.position.size
+        sell_price = sell_state.get("price", 0)
+
+        print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} → BUY {buy_pair}")
+        print(f"  [SWAP] Reason: {reason}")
+
+        # Leg 1: Sell
+        sell_trade = {
+            "action": "SELL",
+            "amount": sell_amount,
+            "price": sell_price,
+            "reason": f"[SWAP {swap_id}] Sell leg: {reason}",
+            "confidence": 0.85,
+        }
+        self._execute_trade(sell_pair, sell_trade)
+
+        # Leg 2: Buy on the target pair
+        # Use the proceeds to size the buy
+        buy_price = buy_state.get("price", 0)
+        if buy_price <= 0:
+            print(f"  [SWAP] Cannot execute buy leg: no price for {buy_pair}")
+            return
+
+        buy_engine = self.engines.get(buy_pair)
+        if not buy_engine:
+            print(f"  [SWAP] No engine for {buy_pair}, skipping buy leg")
+            return
+
+        # Size buy based on the sell proceeds (conservative: use 80% of sell value)
+        sell_value = sell_amount * sell_price
+        buy_value = sell_value * 0.8
+        buy_amount = buy_value / buy_price
+
+        # Enforce Kraken minimum order size
+        base_asset = buy_pair.split("/")[0] if "/" in buy_pair else buy_pair
+        min_size = PositionSizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
+        if buy_amount < min_size:
+            print(f"  [SWAP] Buy amount {buy_amount:.8f} below minimum {min_size} for {buy_pair}, skipping buy leg")
+            return
+
+        buy_trade = {
+            "action": "BUY",
+            "amount": buy_amount,
+            "price": buy_price,
+            "reason": f"[SWAP {swap_id}] Buy leg: {reason}",
+            "confidence": 0.85,
+        }
+        self._execute_trade(buy_pair, buy_trade)
+
+        # Log the coordinated swap
+        self.trade_log.append({
+            "time": datetime.now(timezone.utc).isoformat(),
+            "type": "COORDINATED_SWAP",
+            "swap_id": swap_id,
+            "sell_pair": sell_pair,
+            "buy_pair": buy_pair,
+            "sell_amount": sell_amount,
+            "buy_amount": buy_amount,
+            "reason": reason,
+        })
+        print(f"  [SWAP] Swap {swap_id} complete")
+
+    def _log_regime_transitions(self, all_states: Dict[str, dict]):
+        """Log regime transitions across pairs for observability.
+        Actionable cross-pair overrides are handled by CrossPairCoordinator in Phase 1.5.
         """
         for pair, state in all_states.items():
             current_regime = state.get("regime", "RANGING")
@@ -959,6 +1158,8 @@ def main():
                         help="Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)")
     parser.add_argument("--paper", action="store_true",
                         help="Use paper trading (no API keys needed, no real money)")
+    parser.add_argument("--reset-params", action="store_true",
+                        help="Reset learned tuning parameters to defaults")
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
@@ -996,6 +1197,7 @@ def main():
         mode=args.mode,
         paper=args.paper,
         candle_interval=candle_interval,
+        reset_params=args.reset_params,
     )
     agent.run()
 
