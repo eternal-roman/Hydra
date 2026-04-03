@@ -179,8 +179,9 @@ export default function App() {
         const data = JSON.parse(event.data);
         setState(data);
         if (data.pairs) {
-          const totalEquity = Object.values(data.pairs).reduce((sum, p) => sum + (p.portfolio?.equity || 0), 0);
-          setHistory((prev) => [...prev, totalEquity].slice(-500));
+          const liveTotal = data.balance_usd?.total_usd;
+          const engineEquity = Object.values(data.pairs).reduce((sum, p) => sum + (p.portfolio?.equity || 0), 0);
+          setHistory((prev) => [...prev, liveTotal != null ? liveTotal : engineEquity].slice(-500));
         }
         if (data.trade_log) setTradeLog(data.trade_log);
       } catch (e) { console.error("[HYDRA] Parse error:", e); }
@@ -197,18 +198,22 @@ export default function App() {
   const pairs = state?.pairs || {};
   const pairNames = Object.keys(pairs);
   const balance = state?.balance || {};
+  const balanceUsd = state?.balance_usd || null;
   const aiBrain = state?.ai_brain || null;
   const tick = state?.tick || 0;
   const elapsed = state?.elapsed || 0;
   const remaining = state?.remaining || 0;
 
-  const totalEquity = Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
+  // Total Balance: use real exchange balance when available, fall back to engine equity
+  const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
+  // P&L: always from engine tracking (reflects session trading performance)
+  const engineEquity = Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
   const totalInitial = Object.values(pairs).reduce((s, p) => {
     const eq = p.portfolio?.equity || 0;
     const pnl = p.portfolio?.pnl_pct || 0;
     return s + (pnl !== 0 ? eq / (1 + pnl / 100) : eq);
   }, 0) || 100;
-  const totalPnl = ((totalEquity - totalInitial) / totalInitial * 100) || 0;
+  const totalPnl = ((engineEquity - totalInitial) / totalInitial * 100) || 0;
   const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
@@ -414,15 +419,35 @@ export default function App() {
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {/* Kraken Account */}
               <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 12 }}>
-                <div style={{ fontSize: 10, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontFamily: mono }}>Kraken Account</div>
-                {Object.entries(balance).map(([asset, amount]) => (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: "0.08em", fontFamily: mono }}>Kraken Account</div>
+                  {balanceUsd && (
+                    <div style={{ fontSize: 11, color: COLORS.text, fontWeight: 700, fontFamily: mono }}>${balanceUsd.total_usd?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  )}
+                </div>
+                {balanceUsd?.assets?.length > 0 ? balanceUsd.assets.map((a) => (
+                  <div key={a.asset} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: mono, fontSize: 11, padding: "2px 0", opacity: a.staked ? 0.5 : 1 }}>
+                    <span style={{ color: COLORS.textDim }}>
+                      {a.asset}{a.staked && <span style={{ fontSize: 8, color: COLORS.warn, marginLeft: 4, textTransform: "uppercase" }}>staked</span>}
+                    </span>
+                    <span style={{ display: "flex", gap: 8 }}>
+                      <span style={{ color: COLORS.textMuted }}>{a.amount.toFixed(6)}</span>
+                      {a.usd_value > 0 && <span style={{ color: COLORS.text, fontWeight: 600 }}>${a.usd_value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
+                    </span>
+                  </div>
+                )) : Object.entries(balance).length > 0 ? Object.entries(balance).map(([asset, amount]) => (
                   <div key={asset} style={{ display: "flex", justifyContent: "space-between", fontFamily: mono, fontSize: 11, padding: "2px 0" }}>
                     <span style={{ color: COLORS.textDim }}>{asset}</span>
                     <span style={{ color: COLORS.text, fontWeight: 600 }}>{typeof amount === "number" ? amount.toFixed(6) : amount}</span>
                   </div>
-                ))}
-                {Object.keys(balance).length === 0 && (
+                )) : (
                   <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono }}>Loading...</div>
+                )}
+                {balanceUsd && balanceUsd.staked_usd > 0 && (
+                  <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", fontFamily: mono, fontSize: 10 }}>
+                    <span style={{ color: COLORS.textMuted }}>Tradable</span>
+                    <span style={{ color: COLORS.accent, fontWeight: 600 }}>${balanceUsd.tradable_usd?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
                 )}
               </div>
 
