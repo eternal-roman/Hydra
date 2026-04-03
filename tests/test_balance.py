@@ -1,0 +1,370 @@
+"""
+HYDRA Balance & Asset Conversion Test Suite
+Validates staked asset detection, asset name normalization,
+USD conversion, and engine balance initialization from exchange data.
+"""
+
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hydra_agent import KrakenCLI, HydraAgent
+from hydra_engine import HydraEngine
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: Staked asset detection
+# ═══════════════════════════════════════════════════════════════
+
+class TestStakedAssets:
+    def test_bonded_suffix_detected(self):
+        assert KrakenCLI._is_staked("XBT.B") is True
+
+    def test_staked_suffix_detected(self):
+        assert KrakenCLI._is_staked("SOL.S") is True
+
+    def test_margin_suffix_detected(self):
+        assert KrakenCLI._is_staked("ETH.M") is True
+
+    def test_plain_asset_not_staked(self):
+        assert KrakenCLI._is_staked("XBT") is False
+
+    def test_usdc_not_staked(self):
+        assert KrakenCLI._is_staked("USDC") is False
+
+    def test_asset_with_dot_in_middle_not_staked(self):
+        """Only trailing suffixes count — 'B.XBT' should not match."""
+        assert KrakenCLI._is_staked("B.XBT") is False
+
+    def test_single_letter_asset_not_false_positive(self):
+        """Asset name 'B' alone should not be considered staked."""
+        assert KrakenCLI._is_staked("B") is False
+
+    def test_empty_string_not_staked(self):
+        assert KrakenCLI._is_staked("") is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: Asset name normalization
+# ═══════════════════════════════════════════════════════════════
+
+class TestNormalizeAsset:
+    def test_xxbt_normalizes_to_xbt(self):
+        assert KrakenCLI._normalize_asset("XXBT") == "XBT"
+
+    def test_xbt_passes_through(self):
+        assert KrakenCLI._normalize_asset("XBT") == "XBT"
+
+    def test_usdc_passes_through(self):
+        assert KrakenCLI._normalize_asset("USDC") == "USDC"
+
+    def test_zusdc_normalizes(self):
+        assert KrakenCLI._normalize_asset("ZUSDC") == "USDC"
+
+    def test_zusd_normalizes(self):
+        assert KrakenCLI._normalize_asset("ZUSD") == "USD"
+
+    def test_sol_passes_through(self):
+        assert KrakenCLI._normalize_asset("SOL") == "SOL"
+
+    def test_xsol_normalizes(self):
+        assert KrakenCLI._normalize_asset("XSOL") == "SOL"
+
+    def test_staked_suffix_stripped_then_normalized(self):
+        """XBT.B → strip .B → XBT → passthrough."""
+        assert KrakenCLI._normalize_asset("XBT.B") == "XBT"
+
+    def test_staked_xxbt_suffix_stripped_then_normalized(self):
+        """XXBT.B → strip .B → XXBT → normalize to XBT."""
+        assert KrakenCLI._normalize_asset("XXBT.B") == "XBT"
+
+    def test_sol_staked_normalizes(self):
+        assert KrakenCLI._normalize_asset("SOL.S") == "SOL"
+
+    def test_unknown_asset_passes_through(self):
+        assert KrakenCLI._normalize_asset("DOGE") == "DOGE"
+
+    def test_btc_alias_normalizes_to_xbt(self):
+        assert KrakenCLI._normalize_asset("BTC") == "XBT"
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: USD balance computation
+# ═══════════════════════════════════════════════════════════════
+
+class TestComputeBalanceUsd:
+    """Tests _compute_balance_usd using a minimal HydraAgent with mocked engines."""
+
+    def _make_agent(self):
+        """Create a HydraAgent-like object with engines that have known prices."""
+        agent = object.__new__(HydraAgent)
+        agent.engines = {}
+
+        # Create engines with known prices (no full init, just set prices)
+        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 84000.0), ("SOL/XBT", 0.001547)]:
+            engine = object.__new__(HydraEngine)
+            engine.prices = [price]
+            agent.engines[pair] = engine
+
+        return agent
+
+    def test_usdc_valued_at_one_dollar(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"USDC": 500.0})
+        assert result["total_usd"] == 500.0
+        assert result["tradable_usd"] == 500.0
+        assert result["staked_usd"] == 0
+
+    def test_sol_converted_using_engine_price(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"SOL": 10.0})
+        assert result["total_usd"] == 1300.0  # 10 * 130
+
+    def test_xbt_converted_using_engine_price(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"XBT": 1.0})
+        assert result["total_usd"] == 84000.0
+
+    def test_staked_excluded_from_tradable(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({
+            "XBT": 1.0,
+            "XBT.B": 0.5,
+            "USDC": 100.0,
+        })
+        # Total includes staked: 84000 + 42000 + 100 = 126100
+        assert result["total_usd"] == 126100.0
+        # Tradable excludes staked: 84000 + 100 = 84100
+        assert result["tradable_usd"] == 84100.0
+        # Staked: 0.5 * 84000 = 42000
+        assert result["staked_usd"] == 42000.0
+
+    def test_multiple_staked_assets(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({
+            "XBT.B": 0.5,
+            "SOL.S": 5.0,
+        })
+        expected_staked = 0.5 * 84000.0 + 5.0 * 130.0  # 42650
+        assert result["staked_usd"] == expected_staked
+        assert result["tradable_usd"] == 0
+
+    def test_unknown_asset_valued_at_zero(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"DOGE": 1000.0})
+        assert result["total_usd"] == 0
+        # Asset still appears in breakdown
+        assert len(result["assets"]) == 1
+        assert result["assets"][0]["usd_value"] == 0
+
+    def test_empty_balance_returns_zeros(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({})
+        assert result["total_usd"] == 0
+        assert result["tradable_usd"] == 0
+        assert result["staked_usd"] == 0
+        assert result["assets"] == []
+
+    def test_assets_sorted_tradable_first(self):
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({
+            "XBT.B": 0.5,
+            "USDC": 100.0,
+            "SOL": 10.0,
+        })
+        assets = result["assets"]
+        # Tradable assets first (SOL, USDC alphabetical), then staked (XBT.B)
+        assert assets[0]["asset"] == "SOL"
+        assert assets[0]["staked"] is False
+        assert assets[1]["asset"] == "USDC"
+        assert assets[1]["staked"] is False
+        assert assets[2]["asset"] == "XBT.B"
+        assert assets[2]["staked"] is True
+
+    def test_xxbt_normalized_for_price_lookup(self):
+        """Kraken returns 'XXBT' — should normalize and find XBT price."""
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"XXBT": 1.0})
+        assert result["total_usd"] == 84000.0
+
+    def test_staked_xxbt_normalized_for_price_lookup(self):
+        """XXBT.B should strip .B, normalize XXBT→XBT, use XBT price."""
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"XXBT.B": 1.0})
+        assert result["total_usd"] == 84000.0
+        assert result["staked_usd"] == 84000.0
+        assert result["tradable_usd"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: Asset price derivation
+# ═══════════════════════════════════════════════════════════════
+
+class TestGetAssetPrices:
+    def test_usdc_always_one(self):
+        agent = object.__new__(HydraAgent)
+        agent.engines = {}
+        prices = agent._get_asset_prices()
+        assert prices["USDC"] == 1.0
+        assert prices["USD"] == 1.0
+
+    def test_prices_from_usdc_pairs(self):
+        agent = object.__new__(HydraAgent)
+        agent.engines = {}
+        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 84000.0)]:
+            engine = object.__new__(HydraEngine)
+            engine.prices = [price]
+            agent.engines[pair] = engine
+        prices = agent._get_asset_prices()
+        assert prices["SOL"] == 130.0
+        assert prices["XBT"] == 84000.0
+
+    def test_xbt_derived_from_sol_xbt_when_no_direct_pair(self):
+        """If XBT/USDC engine has no prices, derive XBT from SOL/USDC and SOL/XBT."""
+        agent = object.__new__(HydraAgent)
+        agent.engines = {}
+
+        sol_usdc = object.__new__(HydraEngine)
+        sol_usdc.prices = [130.0]
+        agent.engines["SOL/USDC"] = sol_usdc
+
+        sol_xbt = object.__new__(HydraEngine)
+        sol_xbt.prices = [0.001547]  # 1 SOL = 0.001547 XBT
+        agent.engines["SOL/XBT"] = sol_xbt
+
+        xbt_usdc = object.__new__(HydraEngine)
+        xbt_usdc.prices = []  # No data yet
+        agent.engines["XBT/USDC"] = xbt_usdc
+
+        prices = agent._get_asset_prices()
+        # XBT = SOL_USD / SOL_XBT = 130 / 0.001547 ≈ 84034
+        assert abs(prices["XBT"] - 130.0 / 0.001547) < 1.0
+
+    def test_empty_engine_prices_skipped(self):
+        agent = object.__new__(HydraAgent)
+        engine = object.__new__(HydraEngine)
+        engine.prices = []
+        agent.engines = {"SOL/USDC": engine}
+        prices = agent._get_asset_prices()
+        assert "SOL" not in prices
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: Engine balance initialization from exchange
+# ═══════════════════════════════════════════════════════════════
+
+class TestEngineBalanceInit:
+    def test_engine_balance_overwritten_by_tradable_balance(self):
+        """Simulates the startup flow: engines start with CLI default,
+        then get overwritten with real exchange balance."""
+        # Create engines with default $100 balance (as CLI arg would)
+        engines = {}
+        pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        for pair in pairs:
+            engine = HydraEngine(initial_balance=33.33, asset=pair)
+            engines[pair] = engine
+
+        # Simulate what run() does: overwrite with real balance
+        tradable_usd = 1500.0
+        per_pair = tradable_usd / len(pairs)
+        for pair in pairs:
+            engine = engines[pair]
+            engine.initial_balance = per_pair
+            engine.balance = per_pair
+            engine.peak_equity = per_pair
+
+        # Verify all engines updated
+        for pair in pairs:
+            assert engines[pair].balance == 500.0
+            assert engines[pair].initial_balance == 500.0
+            assert engines[pair].peak_equity == 500.0
+
+    def test_engine_position_sizing_uses_real_balance(self):
+        """With real balance ($500), position sizer should produce tradeable sizes."""
+        engine = HydraEngine(initial_balance=500.0, asset="SOL/USDC")
+        # At confidence 0.6, Kelly edge = 0.2, quarter-Kelly = 0.05
+        # Position value = 0.05 * 500 = $25, size = 25/130 ≈ 0.19 SOL
+        size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
+        assert size > 0, "Real balance should produce tradeable position size"
+        assert size >= 0.1, "Position should meet SOL minimum order size (0.1)"
+
+    def test_tiny_balance_produces_zero_size(self):
+        """With the old default ($33.33), position sizer often can't meet minimums."""
+        engine = HydraEngine(initial_balance=33.33, asset="SOL/USDC")
+        # At confidence 0.6: value = 0.05 * 33.33 = $1.67, size = 1.67/130 ≈ 0.013
+        # SOL minimum is 0.1, so this should return 0
+        size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
+        assert size == 0, "Tiny balance should fail to meet minimum order size"
+
+    def test_equity_history_clean_after_balance_reset(self):
+        """Engine that only had candles ingested (no ticks) should have empty equity history."""
+        engine = HydraEngine(initial_balance=33.33, asset="SOL/USDC")
+        # Simulate warmup: ingest candles without ticking
+        for i in range(50):
+            engine.ingest_candle({
+                "open": 130 + i * 0.1, "high": 131 + i * 0.1,
+                "low": 129 + i * 0.1, "close": 130.5 + i * 0.1,
+                "volume": 1000, "time": 1000 + i * 300,
+            })
+        # Equity history should be empty (ingest_candle doesn't call tick)
+        assert len(engine.equity_history) == 0
+        # Now reset balance like startup does
+        engine.initial_balance = 500.0
+        engine.balance = 500.0
+        engine.peak_equity = 500.0
+        # First tick should use new balance
+        state = engine.tick()
+        assert state["portfolio"]["equity"] == 500.0 or state["portfolio"]["equity"] > 490
+
+
+# ═══════════════════════════════════════════════════════════════
+# RUNNER
+# ═══════════════════════════════════════════════════════════════
+
+def run_tests():
+    """Simple test runner — no pytest dependency needed."""
+    passed = 0
+    failed = 0
+    errors = []
+
+    test_classes = [
+        TestStakedAssets,
+        TestNormalizeAsset,
+        TestComputeBalanceUsd,
+        TestGetAssetPrices,
+        TestEngineBalanceInit,
+    ]
+
+    for cls in test_classes:
+        instance = cls()
+        methods = [m for m in dir(instance) if m.startswith("test_")]
+        for method_name in sorted(methods):
+            test_name = f"{cls.__name__}.{method_name}"
+            try:
+                getattr(instance, method_name)()
+                passed += 1
+                print(f"  PASS  {test_name}")
+            except AssertionError as e:
+                failed += 1
+                errors.append((test_name, str(e)))
+                print(f"  FAIL  {test_name}: {e}")
+            except Exception as e:
+                failed += 1
+                errors.append((test_name, str(e)))
+                print(f"  FAIL  {test_name} (error): {e}")
+
+    print(f"\n  {'='*60}")
+    print(f"  Balance Tests: {passed}/{passed+failed} passed, {failed} failed")
+    print(f"  {'='*60}")
+
+    if errors:
+        print("\n  Failures:")
+        for name, err in errors:
+            print(f"    {name}: {err}")
+
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = run_tests()
+    sys.exit(0 if success else 1)

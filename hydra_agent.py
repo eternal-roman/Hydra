@@ -65,6 +65,32 @@ class KrakenCLI:
         "BTC/USD": "XBT/USD",
     }
 
+    # Suffixes Kraken uses for non-tradable (staked/bonded/locked) assets
+    STAKED_SUFFIXES = ('.B', '.S', '.M')
+
+    # Kraken sometimes returns extended asset names — normalize to canonical form
+    ASSET_NORMALIZE = {
+        'XXBT': 'XBT', 'XBTC': 'XBT', 'BTC': 'XBT',
+        'XETH': 'ETH', 'XSOL': 'SOL',
+        'ZUSD': 'USD', 'ZUSDC': 'USDC',
+    }
+
+    @staticmethod
+    def _is_staked(asset: str) -> bool:
+        """Check if an asset name represents a staked/bonded/locked position."""
+        return any(asset.endswith(s) for s in KrakenCLI.STAKED_SUFFIXES)
+
+    @staticmethod
+    def _normalize_asset(asset: str) -> str:
+        """Normalize Kraken asset name to canonical form (e.g. XXBT → XBT).
+        Strips staked suffixes first, then applies name mapping."""
+        name = asset
+        for suffix in KrakenCLI.STAKED_SUFFIXES:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        return KrakenCLI.ASSET_NORMALIZE.get(name, name)
+
     @staticmethod
     def _run(args: list, timeout: int = 20) -> dict:
         """Execute a kraken CLI command via WSL and return parsed JSON."""
@@ -431,16 +457,7 @@ class HydraAgent:
             else:
                 print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
 
-        # Check account balance
-        print("  [HYDRA] Checking account balance...")
-        bal = KrakenCLI.balance()
-        if "error" not in bal:
-            for asset, amount in bal.items():
-                print(f"  [HYDRA]   {asset}: {amount}")
-        else:
-            print(f"  [WARN] Balance check failed: {bal}")
-
-        # Warmup: fetch historical candles for each pair
+        # Warmup: fetch historical candles for each pair (needed before balance conversion)
         print("\n  [HYDRA] Warming up with historical candles...")
         for pair in self.pairs:
             candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
@@ -452,6 +469,36 @@ class HydraAgent:
             else:
                 print(f"  [WARN] {pair}: no historical data")
             time.sleep(2)  # Respect rate limits
+
+        # Fetch live account balance and initialize engines from real funds
+        print("\n  [HYDRA] Checking account balance...")
+        bal = KrakenCLI.balance()
+        if "error" not in bal:
+            for asset, amount in bal.items():
+                print(f"  [HYDRA]   {asset}: {amount}")
+
+            if not self.paper:
+                # Compute tradable USD balance (excludes staked/bonded assets)
+                breakdown = self._compute_balance_usd(bal)
+                tradable = breakdown["tradable_usd"]
+                staked = breakdown["staked_usd"]
+                total = breakdown["total_usd"]
+                print(f"  [HYDRA] Portfolio: ${total:,.2f} total | ${tradable:,.2f} tradable | ${staked:,.2f} staked")
+
+                if tradable > 0:
+                    per_pair = tradable / len(self.pairs)
+                    for pair in self.pairs:
+                        engine = self.engines[pair]
+                        engine.initial_balance = per_pair
+                        engine.balance = per_pair
+                        engine.peak_equity = per_pair
+                    self.initial_balance = tradable
+                    print(f"  [HYDRA] Engine balance set from exchange: ${per_pair:,.2f} per pair")
+                else:
+                    print(f"  [WARN] No tradable balance — using --balance fallback: ${self.initial_balance:,.2f}")
+            self._cached_balance = bal
+        else:
+            print(f"  [WARN] Balance check failed: {bal} — using --balance fallback: ${self.initial_balance:,.2f}")
 
         print(f"\n  [HYDRA] Starting LIVE trading loop")
         print(f"  [HYDRA] Pairs: {', '.join(self.pairs)}")
@@ -992,15 +1039,83 @@ class HydraAgent:
 
             self.prev_regimes[pair] = current_regime
 
+    def _get_asset_prices(self) -> dict:
+        """Get current USD prices for known assets from engine state.
+        Returns {canonical_asset: usd_price}."""
+        prices = {"USDC": 1.0, "USD": 1.0}
+        for pair, engine in self.engines.items():
+            if engine.prices:
+                base, quote = pair.split("/")
+                if quote in ("USDC", "USD"):
+                    prices[base] = engine.prices[-1]
+        # Derive XBT price from SOL/XBT if XBT/USDC not available
+        if "XBT" not in prices and "SOL" in prices:
+            sol_xbt_engine = self.engines.get("SOL/XBT")
+            if sol_xbt_engine and sol_xbt_engine.prices:
+                sol_per_xbt = sol_xbt_engine.prices[-1]
+                if sol_per_xbt > 0:
+                    prices["XBT"] = prices["SOL"] / sol_per_xbt
+        return prices
+
+    def _compute_balance_usd(self, balance: dict) -> dict:
+        """Convert raw Kraken balance to USD breakdown with staked asset handling.
+
+        Returns {
+            "total_usd": float,      # All assets in USD
+            "tradable_usd": float,   # Only tradable (non-staked) assets
+            "staked_usd": float,     # Staked/bonded/locked assets
+            "assets": [{"asset": str, "amount": float, "usd_value": float, "staked": bool}, ...]
+        }
+        """
+        prices = self._get_asset_prices()
+        assets = []
+        total_usd = 0.0
+        tradable_usd = 0.0
+        staked_usd = 0.0
+
+        for asset, amount in balance.items():
+            staked = KrakenCLI._is_staked(asset)
+            canonical = KrakenCLI._normalize_asset(asset)
+            usd_price = prices.get(canonical, 0.0)
+            usd_value = amount * usd_price
+
+            assets.append({
+                "asset": asset,
+                "canonical": canonical,
+                "amount": round(amount, 8),
+                "usd_value": round(usd_value, 2),
+                "staked": staked,
+            })
+            total_usd += usd_value
+            if staked:
+                staked_usd += usd_value
+            else:
+                tradable_usd += usd_value
+
+        # Sort: tradable first, then staked; within each group alphabetical
+        assets.sort(key=lambda a: (a["staked"], a["asset"]))
+
+        return {
+            "total_usd": round(total_usd, 2),
+            "tradable_usd": round(tradable_usd, 2),
+            "staked_usd": round(staked_usd, 2),
+            "assets": assets,
+        }
+
     def _build_dashboard_state(self, tick: int, all_states: dict,
                                 elapsed: float, remaining: float) -> dict:
         """Build the full state dict for the dashboard WebSocket."""
         # Fetch balance every 5th tick to reduce API calls
         if tick % 5 == 1 or not hasattr(self, '_cached_balance'):
-            bal = KrakenCLI.balance()
+            bal = KrakenCLI.paper_balance() if self.paper else KrakenCLI.balance()
             self._cached_balance = bal if "error" not in bal else getattr(self, '_cached_balance', {})
             time.sleep(2)  # Rate limit
         bal = getattr(self, '_cached_balance', {})
+
+        # Compute USD-equivalent balance breakdown
+        balance_usd = self._compute_balance_usd(bal) if bal else {
+            "total_usd": 0, "tradable_usd": 0, "staked_usd": 0, "assets": []
+        }
 
         pairs_data = {}
         for pair, state in all_states.items():
@@ -1013,6 +1128,7 @@ class HydraAgent:
             "elapsed": round(elapsed, 1),
             "remaining": 0 if self.duration == 0 else round(self.duration - elapsed, 1),
             "balance": bal if "error" not in bal else {},
+            "balance_usd": balance_usd,
             "pairs": pairs_data,
             "trade_log": self.trade_log[-20:],
             "running": self.running,
