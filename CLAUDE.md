@@ -12,6 +12,7 @@ HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market co
 hydra_engine.py     — Pure Python trading engine (indicators, regime detection, signals, position sizing)
 hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution)
 hydra_brain.py      — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
+hydra_tuner.py      — Self-tuning parameters via Bayesian updating of regime/signal thresholds
 dashboard/src/App.jsx — React dashboard (single-file, all inline styles)
 SKILL.md            — Full trading specification (agent-readable)
 AUDIT.md            — Technical audit with test results
@@ -47,8 +48,11 @@ python hydra_agent.py --mode competition --paper
 # Engine test (no API keys needed)
 python hydra_engine.py
 
-# Run test suite (67 tests)
-python tests/test_engine.py
+# Run test suites (146 tests)
+python tests/test_engine.py        # 67 engine tests
+python tests/test_cross_pair.py    # 22 cross-pair coordinator tests
+python tests/test_order_book.py    # 31 order book analyzer tests
+python tests/test_tuner.py         # 26 self-tuning parameter tests
 ```
 
 ## Working with the Code
@@ -92,9 +96,12 @@ python tests/test_engine.py
 
 ## Testing
 
-Run the full test suite (67 tests):
+Run the full test suite (146 tests):
 ```bash
-python tests/test_engine.py
+python tests/test_engine.py        # Core engine (67 tests)
+python tests/test_cross_pair.py    # Cross-pair coordinator (22 tests)
+python tests/test_order_book.py    # Order book analyzer (31 tests)
+python tests/test_tuner.py         # Self-tuning parameters (26 tests)
 ```
 
 Run the engine synthetic demo (no API keys needed):
@@ -112,3 +119,4 @@ See AUDIT.md for the full verification checklist.
 - Don't merge engine instances across pairs — they must remain independent
 - The `.env` file contains Kraken API keys — never commit it
 - `hydra_trades_*.json` files are runtime trade logs — they're gitignored
+- `hydra_params_*.json` files are learned tuning parameters — they're gitignored

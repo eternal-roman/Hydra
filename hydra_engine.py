@@ -82,6 +82,7 @@ class Position:
     size: float = 0.0
     avg_entry: float = 0.0
     unrealized_pnl: float = 0.0
+    params_at_entry: Optional[Dict[str, float]] = None
 
     def update_pnl(self, current_price: float):
         if self.size > 0:
@@ -235,7 +236,8 @@ class RegimeDetector:
 
     @staticmethod
     def detect(candles: List[Candle], prices: List[float],
-               volatile_atr_pct: float = 4.0, volatile_bb_width: float = 0.08) -> Regime:
+               volatile_atr_pct: float = 4.0, volatile_bb_width: float = 0.08,
+               trend_ema_ratio: float = 1.005) -> Regime:
         if len(prices) < 50:
             return Regime.RANGING
 
@@ -250,10 +252,11 @@ class RegimeDetector:
         if atr_pct > volatile_atr_pct or bb["width"] > volatile_bb_width:
             return Regime.VOLATILE
 
-        # Trend detection with threshold
-        if ema20 > ema50 * 1.005 and current > ema20:
+        # Trend detection with tunable threshold
+        down_ratio = 2.0 - trend_ema_ratio  # mirror: 1.005 → 0.995
+        if ema20 > ema50 * trend_ema_ratio and current > ema20:
             return Regime.TREND_UP
-        if ema20 < ema50 * 0.995 and current < ema20:
+        if ema20 < ema50 * down_ratio and current < ema20:
             return Regime.TREND_DOWN
 
         return Regime.RANGING
@@ -280,7 +283,9 @@ class SignalGenerator:
 
     @staticmethod
     def generate(
-        strategy: Strategy, prices: List[float], candles: List[Candle]
+        strategy: Strategy, prices: List[float], candles: List[Candle],
+        momentum_rsi_lower: float = 30.0, momentum_rsi_upper: float = 70.0,
+        mean_reversion_rsi_buy: float = 35.0, mean_reversion_rsi_sell: float = 65.0,
     ) -> Signal:
         if len(prices) < 26:
             return Signal(
@@ -309,9 +314,13 @@ class SignalGenerator:
         }
 
         if strategy == Strategy.MOMENTUM:
-            return SignalGenerator._momentum(rsi, macd, bb, current, indicators)
+            return SignalGenerator._momentum(rsi, macd, bb, current, indicators,
+                                             rsi_lower=momentum_rsi_lower,
+                                             rsi_upper=momentum_rsi_upper)
         elif strategy == Strategy.MEAN_REVERSION:
-            return SignalGenerator._mean_reversion(rsi, bb, current, indicators)
+            return SignalGenerator._mean_reversion(rsi, bb, current, indicators,
+                                                   rsi_buy=mean_reversion_rsi_buy,
+                                                   rsi_sell=mean_reversion_rsi_sell)
         elif strategy == Strategy.GRID:
             return SignalGenerator._grid(bb, current, indicators)
         elif strategy == Strategy.DEFENSIVE:
@@ -326,8 +335,9 @@ class SignalGenerator:
             )
 
     @staticmethod
-    def _momentum(rsi, macd, bb, price, indicators) -> Signal:
-        if 30 < rsi < 70 and macd["histogram"] > 0 and price > bb["middle"]:
+    def _momentum(rsi, macd, bb, price, indicators,
+                  rsi_lower: float = 30.0, rsi_upper: float = 70.0) -> Signal:
+        if rsi_lower < rsi < rsi_upper and macd["histogram"] > 0 and price > bb["middle"]:
             conf = min(0.95, 0.5 + abs(macd["histogram"]) / price * 1000)
             return Signal(
                 action=SignalAction.BUY,
@@ -337,7 +347,7 @@ class SignalGenerator:
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
-        if rsi > 75 or macd["histogram"] < 0:
+        if rsi > rsi_upper + 5 or macd["histogram"] < 0:
             return Signal(
                 action=SignalAction.SELL,
                 confidence=0.6,
@@ -355,8 +365,9 @@ class SignalGenerator:
         )
 
     @staticmethod
-    def _mean_reversion(rsi, bb, price, indicators) -> Signal:
-        if price <= bb["lower"] and rsi < 35:
+    def _mean_reversion(rsi, bb, price, indicators,
+                        rsi_buy: float = 35.0, rsi_sell: float = 65.0) -> Signal:
+        if price <= bb["lower"] and rsi < rsi_buy:
             conf = min(0.9, 0.5 + (bb["middle"] - price) / bb["middle"] * 10)
             return Signal(
                 action=SignalAction.BUY,
@@ -365,7 +376,7 @@ class SignalGenerator:
                 strategy=Strategy.MEAN_REVERSION,
                 indicators=indicators,
             )
-        if price >= bb["upper"] and rsi > 65:
+        if price >= bb["upper"] and rsi > rsi_sell:
             conf = min(0.9, 0.5 + (price - bb["middle"]) / bb["middle"] * 10)
             return Signal(
                 action=SignalAction.SELL,
@@ -506,6 +517,227 @@ class PositionSizer:
 
 
 # ═══════════════════════════════════════════════════════════════
+# ORDER BOOK ANALYZER
+# ═══════════════════════════════════════════════════════════════
+
+class OrderBookAnalyzer:
+    """Analyzes order book depth to generate confidence modifiers.
+
+    Parses Kraken depth data (bids/asks arrays), computes volume imbalance,
+    spread, wall detection, and a signal-aware confidence modifier.
+    """
+
+    # Imbalance thresholds
+    BULLISH_THRESHOLD = 1.5   # bid/ask ratio above this = bullish pressure
+    BEARISH_THRESHOLD = 0.67  # bid/ask ratio below this = bearish pressure
+    WALL_MULTIPLIER = 3.0     # single level > 3x average = wall detected
+
+    @staticmethod
+    def analyze(depth_data: dict, signal_action: str = "HOLD") -> dict:
+        """Analyze order book depth and return metrics with confidence modifier.
+
+        Args:
+            depth_data: Raw Kraken depth JSON with 'bids' and 'asks' arrays.
+                        Each entry: [price_str, volume_str, timestamp].
+            signal_action: Current signal ("BUY", "SELL", or "HOLD") to
+                           determine directional modifier.
+
+        Returns:
+            dict with bid_volume, ask_volume, imbalance_ratio, spread_bps,
+            bid_wall, ask_wall, confidence_modifier.
+        """
+        result = {
+            "bid_volume": 0.0,
+            "ask_volume": 0.0,
+            "imbalance_ratio": 1.0,
+            "spread_bps": 0.0,
+            "bid_wall": False,
+            "ask_wall": False,
+            "confidence_modifier": 0.0,
+        }
+
+        # Extract bids and asks from Kraken depth format
+        # Kraken returns: {"PAIR": {"bids": [...], "asks": [...]}}
+        bids_raw = []
+        asks_raw = []
+
+        if isinstance(depth_data, dict):
+            # Direct format: {"bids": [...], "asks": [...]}
+            if "bids" in depth_data and "asks" in depth_data:
+                bids_raw = depth_data["bids"]
+                asks_raw = depth_data["asks"]
+            else:
+                # Nested format: {"XBTUSDC": {"bids": [...], "asks": [...]}}
+                for key, val in depth_data.items():
+                    if isinstance(val, dict) and "bids" in val and "asks" in val:
+                        bids_raw = val["bids"]
+                        asks_raw = val["asks"]
+                        break
+
+        if not bids_raw or not asks_raw:
+            return result
+
+        # Parse top 10 levels: [[price, volume, timestamp], ...]
+        bid_levels = []
+        for entry in bids_raw[:10]:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                bid_levels.append((float(entry[0]), float(entry[1])))
+
+        ask_levels = []
+        for entry in asks_raw[:10]:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                ask_levels.append((float(entry[0]), float(entry[1])))
+
+        if not bid_levels or not ask_levels:
+            return result
+
+        # Volume totals
+        bid_volumes = [v for _, v in bid_levels]
+        ask_volumes = [v for _, v in ask_levels]
+        bid_volume = sum(bid_volumes)
+        ask_volume = sum(ask_volumes)
+
+        result["bid_volume"] = round(bid_volume, 6)
+        result["ask_volume"] = round(ask_volume, 6)
+
+        # Imbalance ratio
+        if ask_volume > 0:
+            result["imbalance_ratio"] = round(bid_volume / ask_volume, 4)
+
+        # Spread in basis points
+        best_bid = bid_levels[0][0]
+        best_ask = ask_levels[0][0]
+        mid = (best_bid + best_ask) / 2
+        if mid > 0:
+            result["spread_bps"] = round((best_ask - best_bid) / mid * 10000, 1)
+
+        # Wall detection: any single level > 3x the average
+        avg_bid = bid_volume / len(bid_volumes) if bid_volumes else 0
+        avg_ask = ask_volume / len(ask_volumes) if ask_volumes else 0
+        result["bid_wall"] = any(v > avg_bid * OrderBookAnalyzer.WALL_MULTIPLIER for v in bid_volumes) if avg_bid > 0 else False
+        result["ask_wall"] = any(v > avg_ask * OrderBookAnalyzer.WALL_MULTIPLIER for v in ask_volumes) if avg_ask > 0 else False
+
+        # Confidence modifier based on imbalance and signal direction
+        ratio = result["imbalance_ratio"]
+        modifier = 0.0
+
+        if signal_action == "BUY":
+            if ratio > OrderBookAnalyzer.BULLISH_THRESHOLD:
+                # Strong bid support confirms buy — scale modifier 0.1 to 0.2
+                modifier = min(0.2, 0.1 + (ratio - OrderBookAnalyzer.BULLISH_THRESHOLD) * 0.1)
+            elif ratio < OrderBookAnalyzer.BEARISH_THRESHOLD:
+                # Weak bids contradict buy — scale modifier -0.1 to -0.2
+                modifier = max(-0.2, -0.1 - (OrderBookAnalyzer.BEARISH_THRESHOLD - ratio) * 0.1)
+        elif signal_action == "SELL":
+            if ratio > OrderBookAnalyzer.BULLISH_THRESHOLD:
+                # Strong bids — don't sell into strength
+                modifier = -0.1
+            elif ratio < OrderBookAnalyzer.BEARISH_THRESHOLD:
+                # Weak bids confirm sell
+                modifier = min(0.2, 0.1 + (OrderBookAnalyzer.BEARISH_THRESHOLD - ratio) * 0.1)
+        # HOLD: no modifier
+
+        result["confidence_modifier"] = round(modifier, 4)
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# CROSS-PAIR REGIME COORDINATOR
+# ═══════════════════════════════════════════════════════════════
+
+class CrossPairCoordinator:
+    """Detects cross-pair regime divergences and generates coordinated signals.
+
+    Monitors regime states across all trading pairs and produces override
+    signals when cross-pair evidence contradicts a single pair's signal.
+    Designed for the SOL/USDC + SOL/XBT + XBT/USDC triangle.
+    """
+
+    HISTORY_SIZE = 10
+
+    def __init__(self, pairs: List[str]):
+        self.pairs = pairs
+        self.regime_history: Dict[str, List[str]] = {p: [] for p in pairs}
+
+    def update(self, pair: str, regime: str):
+        """Record regime state for a pair. Keeps last HISTORY_SIZE entries."""
+        history = self.regime_history.setdefault(pair, [])
+        history.append(regime)
+        if len(history) > self.HISTORY_SIZE:
+            self.regime_history[pair] = history[-self.HISTORY_SIZE:]
+
+    def get_overrides(self, all_states: Dict[str, dict]) -> Dict[str, dict]:
+        """Return signal overrides where cross-pair evidence contradicts single-pair signals.
+
+        Rules:
+        1. BTC leads SOL down: If XBT/USDC is TREND_DOWN and SOL/USDC is
+           still TREND_UP or RANGING → override SOL/USDC to DEFENSIVE.
+        2. BTC recovery boost: If XBT/USDC is TREND_UP and SOL/USDC is
+           TREND_DOWN → boost SOL/USDC confidence (recovery likely).
+        3. Coordinated swap: If SOL/USDC is TREND_DOWN and SOL/XBT is
+           TREND_UP → suggest selling SOL/USDC and buying SOL/XBT.
+
+        Returns:
+            {pair: {"action": str, "signal": str, "confidence_adj": float,
+                    "reason": str, "swap": optional dict}}
+        """
+        overrides: Dict[str, dict] = {}
+
+        xbt_usdc = all_states.get("XBT/USDC") or all_states.get("BTC/USDC")
+        sol_usdc = all_states.get("SOL/USDC")
+        sol_xbt = all_states.get("SOL/XBT") or all_states.get("SOL/BTC")
+
+        xbt_regime = xbt_usdc.get("regime") if xbt_usdc else None
+        sol_regime = sol_usdc.get("regime") if sol_usdc else None
+        sol_xbt_regime = sol_xbt.get("regime") if sol_xbt else None
+
+        # Rule 1: BTC leads SOL down
+        # XBT/USDC trending down while SOL/USDC hasn't reacted yet
+        if xbt_regime == "TREND_DOWN" and sol_regime in ("TREND_UP", "RANGING"):
+            overrides["SOL/USDC"] = {
+                "action": "OVERRIDE",
+                "signal": "SELL",
+                "confidence_adj": 0.8,
+                "reason": "Cross-pair: BTC trending down — SOL likely to follow",
+            }
+
+        # Rule 2: BTC recovery boost
+        # XBT/USDC trending up while SOL/USDC is still down — recovery likely
+        if xbt_regime == "TREND_UP" and sol_regime == "TREND_DOWN":
+            sol_conf = 0.5
+            if sol_usdc and sol_usdc.get("signal"):
+                sol_conf = sol_usdc["signal"].get("confidence", 0.5)
+            overrides["SOL/USDC"] = {
+                "action": "ADJUST",
+                "signal": "BUY",
+                "confidence_adj": min(0.95, sol_conf + 0.15),
+                "reason": "Cross-pair: BTC recovering — SOL recovery likely, boosting confidence",
+            }
+
+        # Rule 3: Coordinated swap
+        # SOL weakening vs USDC but strengthening vs XBT — rotate into BTC
+        if sol_regime == "TREND_DOWN" and sol_xbt_regime == "TREND_UP":
+            sol_pos = 0.0
+            if sol_usdc and sol_usdc.get("position"):
+                sol_pos = sol_usdc["position"].get("size", 0.0)
+            # Only suggest swap if we actually hold SOL via SOL/USDC
+            if sol_pos > 0:
+                overrides["SOL/USDC"] = {
+                    "action": "OVERRIDE",
+                    "signal": "SELL",
+                    "confidence_adj": 0.85,
+                    "reason": "Cross-pair swap: SOL weakening vs USDC but strong vs XBT — rotate to BTC",
+                    "swap": {
+                        "sell_pair": "SOL/USDC",
+                        "buy_pair": "SOL/XBT",
+                        "reason": "SOL/USDC TREND_DOWN + SOL/XBT TREND_UP — coordinated rotation",
+                    },
+                }
+
+        return overrides
+
+
+# ═══════════════════════════════════════════════════════════════
 # HYDRA ENGINE (Main orchestrator)
 # ═══════════════════════════════════════════════════════════════
 
@@ -526,7 +758,12 @@ class HydraEngine:
                  sizing: Optional[Dict[str, float]] = None,
                  candle_interval: int = 5,
                  volatile_atr_pct: float = 4.0,
-                 volatile_bb_width: float = 0.08):
+                 volatile_bb_width: float = 0.08,
+                 trend_ema_ratio: float = 1.005,
+                 momentum_rsi_lower: float = 30.0,
+                 momentum_rsi_upper: float = 70.0,
+                 mean_reversion_rsi_buy: float = 35.0,
+                 mean_reversion_rsi_sell: float = 65.0):
         self.asset = asset
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -536,6 +773,11 @@ class HydraEngine:
         self.candle_interval = candle_interval
         self.volatile_atr_pct = volatile_atr_pct
         self.volatile_bb_width = volatile_bb_width
+        self.trend_ema_ratio = trend_ema_ratio
+        self.momentum_rsi_lower = momentum_rsi_lower
+        self.momentum_rsi_upper = momentum_rsi_upper
+        self.mean_reversion_rsi_buy = mean_reversion_rsi_buy
+        self.mean_reversion_rsi_sell = mean_reversion_rsi_sell
         self.candles: List[Candle] = []
         self.prices: List[float] = []
         self.trades: List[Trade] = []
@@ -584,11 +826,20 @@ class HydraEngine:
             )
 
         # Detect regime
-        regime = RegimeDetector.detect(self.candles, self.prices, self.volatile_atr_pct, self.volatile_bb_width)
+        regime = RegimeDetector.detect(
+            self.candles, self.prices,
+            self.volatile_atr_pct, self.volatile_bb_width, self.trend_ema_ratio,
+        )
         strategy = REGIME_STRATEGY_MAP[regime]
 
         # Generate signal
-        signal = SignalGenerator.generate(strategy, self.prices, self.candles)
+        signal = SignalGenerator.generate(
+            strategy, self.prices, self.candles,
+            momentum_rsi_lower=self.momentum_rsi_lower,
+            momentum_rsi_upper=self.momentum_rsi_upper,
+            mean_reversion_rsi_buy=self.mean_reversion_rsi_buy,
+            mean_reversion_rsi_sell=self.mean_reversion_rsi_sell,
+        )
 
         # Execute if actionable
         trade = self._maybe_execute(signal)
@@ -634,6 +885,8 @@ class HydraEngine:
                 else:
                     self.position.size = size
                     self.position.avg_entry = current_price
+                    # Snapshot tunable params at entry for self-tuning
+                    self.position.params_at_entry = self.snapshot_params()
 
                 self.balance -= cost
                 self.total_trades += 1
@@ -662,6 +915,7 @@ class HydraEngine:
             if self.position.size < 0.00001:
                 self.position.size = 0.0
                 self.position.avg_entry = 0.0
+                self.position.params_at_entry = None
 
             # Only count as a completed trade when position is fully closed
             if self.position.size == 0.0:
@@ -687,6 +941,38 @@ class HydraEngine:
             return trade
 
         return None
+
+    def snapshot_params(self) -> Dict[str, float]:
+        """Return a snapshot of the current tunable parameters."""
+        return {
+            "volatile_atr_pct": self.volatile_atr_pct,
+            "volatile_bb_width": self.volatile_bb_width,
+            "trend_ema_ratio": self.trend_ema_ratio,
+            "momentum_rsi_lower": self.momentum_rsi_lower,
+            "momentum_rsi_upper": self.momentum_rsi_upper,
+            "mean_reversion_rsi_buy": self.mean_reversion_rsi_buy,
+            "mean_reversion_rsi_sell": self.mean_reversion_rsi_sell,
+            "min_confidence_threshold": self.sizer.min_confidence,
+        }
+
+    def apply_tuned_params(self, params: Dict[str, float]):
+        """Apply tuned parameters from ParameterTracker."""
+        if "volatile_atr_pct" in params:
+            self.volatile_atr_pct = params["volatile_atr_pct"]
+        if "volatile_bb_width" in params:
+            self.volatile_bb_width = params["volatile_bb_width"]
+        if "trend_ema_ratio" in params:
+            self.trend_ema_ratio = params["trend_ema_ratio"]
+        if "momentum_rsi_lower" in params:
+            self.momentum_rsi_lower = params["momentum_rsi_lower"]
+        if "momentum_rsi_upper" in params:
+            self.momentum_rsi_upper = params["momentum_rsi_upper"]
+        if "mean_reversion_rsi_buy" in params:
+            self.mean_reversion_rsi_buy = params["mean_reversion_rsi_buy"]
+        if "mean_reversion_rsi_sell" in params:
+            self.mean_reversion_rsi_sell = params["mean_reversion_rsi_sell"]
+        if "min_confidence_threshold" in params:
+            self.sizer.min_confidence = params["min_confidence_threshold"]
 
     def _candle_status(self) -> str:
         """Check if the latest candle is still forming or closed."""
@@ -805,8 +1091,9 @@ class HydraEngine:
         avg = sum(returns) / len(returns)
         var = sum((r - avg) ** 2 for r in returns) / (len(returns) - 1)
         std = math.sqrt(var) if var > 0 else 1.0
-        # Annualize (assuming ~1-minute candles, 525600 mins/year)
-        return (avg / std) * math.sqrt(525600) if std > 0 else 0.0
+        # Annualize: 525600 minutes/year, adjusted for candle interval
+        periods_per_year = 525600 / self.candle_interval
+        return (avg / std) * math.sqrt(periods_per_year) if std > 0 else 0.0
 
     def get_performance_report(self) -> str:
         """Generate a formatted performance report."""
