@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.3.1] — 2026-04-02
+
+### Changed
+- Order book confidence modifier range reduced from ±0.20 to ±0.07 based on Monte Carlo
+  analysis (50k paths) showing Sharpe peak at ±0.07 with rapid degradation above ±0.15.
+- Added total external modifier cap of +0.15 — cross-pair coordinator + order book
+  combined cannot boost confidence more than +0.15 above the engine's original signal.
+  Downward modifiers remain uncapped (weak signals should be killable by external data).
+- When cross-pair coordinator changes signal direction (e.g., BUY→SELL override),
+  the cap baseline resets to the coordinator's confidence, not the engine's original.
+
+### Fixed
+- Stacking vulnerability where cross-pair (+0.15) and order book (+0.20) could inflate
+  a 0.55 engine signal to 0.90, causing Kelly criterion to oversize speculative positions.
+
+---
+
 ## [2.3.0] — 2026-04-02
 
 ### Added
@@ -29,7 +46,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Order Book Intelligence** (`OrderBookAnalyzer` in `hydra_engine.py`) — analyzes Kraken order book depth to generate signal-aware confidence modifiers.
   - Computes bid/ask volume totals, imbalance ratio, spread in basis points.
   - **Wall detection** — flags bid or ask walls when a single level exceeds 3x the average level volume.
-  - **Confidence modifier** (−0.2 to +0.2) based on imbalance vs signal direction: bullish book boosts BUY / penalizes SELL, bearish book boosts SELL / penalizes BUY, HOLD unchanged.
+  - **Confidence modifier** (−0.07 to +0.07) based on imbalance vs signal direction: bullish book boosts BUY / penalizes SELL, bearish book boosts SELL / penalizes BUY, HOLD unchanged.
 - `KrakenCLI.depth()` — fetches order book depth (top 10 levels per side) via `kraken depth` command.
 - Order book data injected into engine state as `order_book` key, visible to AI brain for reasoning.
 - Agent Phase 1.75: fetches depth for each pair between cross-pair coordination and brain deliberation, applies confidence modifier, logs imbalance/spread/wall status.

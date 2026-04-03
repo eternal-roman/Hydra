@@ -478,6 +478,15 @@ class HydraAgent:
                 engine_states[pair] = self._fetch_and_tick(pair)
                 time.sleep(2)  # Rate limit after OHLC fetch
 
+            # Capture engine's original signal before any external modifiers
+            original_signals = {}
+            for pair, state in engine_states.items():
+                if state:
+                    original_signals[pair] = {
+                        "action": state["signal"]["action"],
+                        "confidence": state["signal"]["confidence"],
+                    }
+
             # Phase 1.5: Cross-pair regime coordination
             # Update coordinator with latest regimes, then apply overrides
             for pair, state in engine_states.items():
@@ -499,6 +508,13 @@ class HydraAgent:
                 # Collect swap opportunities for execution after trades
                 if override.get("swap"):
                     pending_swaps.append(override["swap"])
+
+            # If coordinator changed signal direction, reset baseline for cap
+            for pair in self.pairs:
+                orig = original_signals.get(pair)
+                state = engine_states.get(pair)
+                if orig and state and state["signal"]["action"] != orig["action"]:
+                    original_signals[pair]["confidence"] = state["signal"]["confidence"]
 
             # Phase 1.75: Order book intelligence
             # Fetch depth data and apply confidence modifiers before brain runs
@@ -523,6 +539,23 @@ class HydraAgent:
                               f"(mod {book_analysis['confidence_modifier']:+.2f})"
                               f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
                               f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
+
+            # ── Total modifier cap ──────────────────────────────────
+            # External modifiers (cross-pair + order book) can reduce confidence without limit
+            # but cannot boost it more than +0.15 above the engine's original signal.
+            # This prevents stacking modifiers from inflating weak signals into high-conviction
+            # trades that get oversized via Kelly criterion.
+            MAX_TOTAL_MODIFIER_BOOST = 0.15
+            for pair in self.pairs:
+                state = engine_states.get(pair)
+                orig = original_signals.get(pair)
+                if not state or not orig:
+                    continue
+                orig_conf = orig["confidence"]
+                if state["signal"]["confidence"] > orig_conf + MAX_TOTAL_MODIFIER_BOOST:
+                    state["signal"]["confidence"] = orig_conf + MAX_TOTAL_MODIFIER_BOOST
+                if state["signal"]["confidence"] < 0.0:
+                    state["signal"]["confidence"] = 0.0
 
             # Phase 2: Run brain with full cross-pair context (parallel across pairs)
             all_states = {}

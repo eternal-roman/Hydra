@@ -531,6 +531,7 @@ class OrderBookAnalyzer:
     BULLISH_THRESHOLD = 1.5   # bid/ask ratio above this = bullish pressure
     BEARISH_THRESHOLD = 0.67  # bid/ask ratio below this = bearish pressure
     WALL_MULTIPLIER = 3.0     # single level > 3x average = wall detected
+    MAX_BOOK_MODIFIER = 0.07  # max confidence adjustment from order book
 
     @staticmethod
     def analyze(depth_data: dict, signal_action: str = "HOLD") -> dict:
@@ -618,23 +619,31 @@ class OrderBookAnalyzer:
         result["ask_wall"] = any(v > avg_ask * OrderBookAnalyzer.WALL_MULTIPLIER for v in ask_volumes) if avg_ask > 0 else False
 
         # Confidence modifier based on imbalance and signal direction
+        # Scales linearly: half of MAX at threshold, full MAX at extreme (ratio 3.0+ / 0.33-)
         ratio = result["imbalance_ratio"]
         modifier = 0.0
+        cap = OrderBookAnalyzer.MAX_BOOK_MODIFIER
+        half = cap / 2.0
+        bull_range = 3.0 - OrderBookAnalyzer.BULLISH_THRESHOLD   # 1.5
+        bear_range = OrderBookAnalyzer.BEARISH_THRESHOLD - 0.33  # 0.34
 
         if signal_action == "BUY":
             if ratio > OrderBookAnalyzer.BULLISH_THRESHOLD:
-                # Strong bid support confirms buy — scale modifier 0.1 to 0.2
-                modifier = min(0.2, 0.1 + (ratio - OrderBookAnalyzer.BULLISH_THRESHOLD) * 0.1)
+                # Strong bid support confirms buy
+                excess = min(ratio - OrderBookAnalyzer.BULLISH_THRESHOLD, bull_range)
+                modifier = min(cap, half + excess / bull_range * half)
             elif ratio < OrderBookAnalyzer.BEARISH_THRESHOLD:
-                # Weak bids contradict buy — scale modifier -0.1 to -0.2
-                modifier = max(-0.2, -0.1 - (OrderBookAnalyzer.BEARISH_THRESHOLD - ratio) * 0.1)
+                # Weak bids contradict buy
+                excess = min(OrderBookAnalyzer.BEARISH_THRESHOLD - ratio, bear_range)
+                modifier = max(-cap, -(half + excess / bear_range * half))
         elif signal_action == "SELL":
             if ratio > OrderBookAnalyzer.BULLISH_THRESHOLD:
-                # Strong bids — don't sell into strength
-                modifier = -0.1
+                # Strong bids — don't sell into strength (half modifier)
+                modifier = -half
             elif ratio < OrderBookAnalyzer.BEARISH_THRESHOLD:
                 # Weak bids confirm sell
-                modifier = min(0.2, 0.1 + (OrderBookAnalyzer.BEARISH_THRESHOLD - ratio) * 0.1)
+                excess = min(OrderBookAnalyzer.BEARISH_THRESHOLD - ratio, bear_range)
+                modifier = min(cap, half + excess / bear_range * half)
         # HOLD: no modifier
 
         result["confidence_modifier"] = round(modifier, 4)
