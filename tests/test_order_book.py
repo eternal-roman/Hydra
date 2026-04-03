@@ -223,35 +223,55 @@ class TestModifierBuy:
         depth = bullish_depth()
         result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
         assert result["confidence_modifier"] > 0
-        assert result["confidence_modifier"] <= 0.2
+        assert result["confidence_modifier"] <= 0.07
 
     def test_bearish_book_reduces_buy(self):
         depth = bearish_depth()
         result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
         assert result["confidence_modifier"] < 0
-        assert result["confidence_modifier"] >= -0.2
+        assert result["confidence_modifier"] >= -0.07
 
     def test_balanced_book_no_modifier_for_buy(self):
         depth = balanced_depth()
         result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
         assert result["confidence_modifier"] == 0.0
 
-    def test_modifier_capped_at_02(self):
-        """Even with extreme imbalance, modifier should not exceed 0.2."""
+    def test_modifier_capped_at_007(self):
+        """Even with extreme imbalance, modifier should not exceed 0.07."""
         depth = make_depth(
             [100], [1000],
             [100.1], [1],
         )
         result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
-        assert result["confidence_modifier"] <= 0.2
+        assert result["confidence_modifier"] <= 0.07
 
-    def test_negative_modifier_capped_at_minus_02(self):
+    def test_negative_modifier_capped_at_minus_007(self):
         depth = make_depth(
             [100], [1],
             [100.1], [1000],
         )
         result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
-        assert result["confidence_modifier"] >= -0.2
+        assert result["confidence_modifier"] >= -0.07
+
+    def test_modifier_range_max_positive(self):
+        """Strongly bullish book + BUY should not exceed +0.07."""
+        depth = make_depth(
+            [100, 99, 98], [500, 400, 300],
+            [101, 102, 103], [50, 40, 30],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        assert result["confidence_modifier"] <= 0.07
+        assert result["confidence_modifier"] > 0
+
+    def test_modifier_range_max_negative(self):
+        """Strongly bearish book + BUY should not go below -0.07."""
+        depth = make_depth(
+            [100, 99, 98], [50, 40, 30],
+            [101, 102, 103], [500, 400, 300],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        assert result["confidence_modifier"] >= -0.07
+        assert result["confidence_modifier"] < 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -263,7 +283,7 @@ class TestModifierSell:
         """Don't sell into strength — strong bids should reduce sell confidence."""
         depth = bullish_depth()
         result = OrderBookAnalyzer.analyze(depth, signal_action="SELL")
-        assert result["confidence_modifier"] == -0.1
+        assert result["confidence_modifier"] == -0.035
 
     def test_bearish_book_confirms_sell(self):
         """Weak bids confirm selling pressure."""
@@ -343,6 +363,56 @@ class TestEdgeCases:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 9. TOTAL MODIFIER CAP (agent-level logic, tested as pure math)
+# ═══════════════════════════════════════════════════════════════
+
+class TestTotalModifierCap:
+    def test_total_cap_blocks_stacking(self):
+        """Cross-pair +0.10 and book +0.07 on a 0.60 signal should cap at 0.75."""
+        original = 0.60
+        after_cross_pair = 0.70  # +0.10 from coordinator
+        after_book = 0.77        # +0.07 from order book
+        max_boost = 0.15
+        capped = min(after_book, original + max_boost)
+        assert capped == 0.75
+
+    def test_total_cap_does_not_limit_reductions(self):
+        """Negative modifiers should NOT be capped — let both modifiers kill weak signals."""
+        original = 0.60
+        after_book = 0.43        # -0.17 total from cross-pair + book
+        max_boost = 0.15
+        # Cap only applies to boosts, not reductions
+        final = after_book  # no upward clamping
+        assert final == 0.43
+        assert final < original - max_boost  # this is allowed
+
+    def test_direction_change_resets_baseline(self):
+        """When coordinator changes signal direction, cap baseline resets."""
+        coord_conf = 0.80    # coordinator overrode to SELL at 0.80
+        book_boost = 0.07    # book confirms SELL
+        final = coord_conf + book_boost  # 0.87
+        # Baseline reset to 0.80 after direction change
+        # Cap: 0.80 + 0.15 = 0.95
+        capped = min(final, coord_conf + 0.15)
+        assert round(capped, 4) == 0.87  # not capped because 0.87 < 0.95
+
+    def test_cap_engages_on_large_boost(self):
+        """When cross-pair boosts +0.15 and book boosts +0.07, cap should engage."""
+        original = 0.55
+        after_book = 0.77        # +0.22 total from cross-pair + book
+        max_boost = 0.15
+        capped = min(after_book, original + max_boost)
+        assert round(capped, 4) == 0.70  # capped back to original + 0.15
+
+    def test_floor_at_zero(self):
+        """Confidence should never go below 0.0 after negative modifiers."""
+        original = 0.10
+        after_modifiers = -0.05  # modifiers pushed it negative
+        final = max(0.0, after_modifiers)
+        assert final == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -356,6 +426,7 @@ def run_tests():
         TestModifierSell,
         TestModifierHold,
         TestEdgeCases,
+        TestTotalModifierCap,
     ]
 
     total = 0

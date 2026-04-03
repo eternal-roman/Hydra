@@ -48,10 +48,10 @@ python hydra_agent.py --mode competition --paper
 # Engine test (no API keys needed)
 python hydra_engine.py
 
-# Run test suites (146 tests)
+# Run test suites (153 tests)
 python tests/test_engine.py        # 67 engine tests
 python tests/test_cross_pair.py    # 22 cross-pair coordinator tests
-python tests/test_order_book.py    # 31 order book analyzer tests
+python tests/test_order_book.py    # 38 order book analyzer tests
 python tests/test_tuner.py         # 26 self-tuning parameter tests
 ```
 
@@ -96,11 +96,11 @@ python tests/test_tuner.py         # 26 self-tuning parameter tests
 
 ## Testing
 
-Run the full test suite (146 tests):
+Run the full test suite (153 tests):
 ```bash
 python tests/test_engine.py        # Core engine (67 tests)
 python tests/test_cross_pair.py    # Cross-pair coordinator (22 tests)
-python tests/test_order_book.py    # Order book analyzer (31 tests)
+python tests/test_order_book.py    # Order book analyzer (38 tests)
 python tests/test_tuner.py         # Self-tuning parameters (26 tests)
 ```
 
