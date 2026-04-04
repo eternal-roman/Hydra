@@ -278,8 +278,8 @@ class TestSignalGeneration:
         candles = make_candles(prices)
         signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
         sizer = PositionSizer(**SIZING_CONSERVATIVE)
-        if signal.action == SignalAction.BUY:
-            assert signal.confidence < sizer.min_confidence
+        assert signal.action == SignalAction.BUY
+        assert signal.confidence < sizer.min_confidence
 
 
 # ═══════════════════════════════════════════════════════════════

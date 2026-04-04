@@ -83,6 +83,7 @@ class Position:
     avg_entry: float = 0.0
     unrealized_pnl: float = 0.0
     params_at_entry: Optional[Dict[str, float]] = None
+    realized_pnl: float = 0.0  # Accumulated profit across partial sells of this position
 
     def update_pnl(self, current_price: float):
         if self.size > 0:
@@ -938,19 +939,23 @@ class HydraEngine:
 
             self.balance += revenue
             self.position.size -= sell_amount
+            self.position.realized_pnl += profit
             if self.position.size < 0.00001:
                 self.position.size = 0.0
                 self.position.avg_entry = 0.0
-                self.position.params_at_entry = None
-
-            # Only count as a completed trade when position is fully closed
-            if self.position.size == 0.0:
+                # Only count as a completed trade when position is fully closed.
+                # Use accumulated realized PnL so partial sells at different
+                # confidence levels are tallied correctly (previously only the
+                # final leg's profit was used to decide win vs loss).
+                total_profit = self.position.realized_pnl
                 self.total_trades += 1
-                if profit > 0:
+                if total_profit > 0:
                     self.win_count += 1
-                elif profit < 0:
+                elif total_profit < 0:
                     self.loss_count += 1
-                # profit == 0 is break-even, don't count as win or loss
+                # total_profit == 0 is break-even, don't count as win or loss
+                self.position.params_at_entry = None
+                self.position.realized_pnl = 0.0
 
             trade = Trade(
                 action="SELL",
