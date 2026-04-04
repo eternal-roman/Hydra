@@ -278,6 +278,16 @@ REGIME_STRATEGY_MAP = {
 # SIGNAL GENERATOR
 # ═══════════════════════════════════════════════════════════════
 
+def _fmt_price(p: float) -> str:
+    """Format a price for human-readable signal reasons.
+    Uses full precision for small prices (e.g. SOL/XBT at 0.0012)."""
+    if p < 0.01:
+        return f"{p:.6f}"
+    if p < 1:
+        return f"{p:.4f}"
+    return f"{p:.0f}"
+
+
 class SignalGenerator:
     """Generates BUY/SELL/HOLD signals based on active strategy."""
 
@@ -343,7 +353,7 @@ class SignalGenerator:
                 action=SignalAction.BUY,
                 confidence=conf,
                 reason=f"Momentum confirmed: MACD hist {macd['histogram']:.2f} > 0, "
-                       f"price {price:.0f} > BB mid {bb['middle']:.0f}, RSI {rsi:.1f}",
+                       f"price {_fmt_price(price)} > BB mid {_fmt_price(bb['middle'])}, RSI {rsi:.1f}",
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
@@ -359,7 +369,7 @@ class SignalGenerator:
         return Signal(
             action=SignalAction.HOLD,
             confidence=0.5,
-            reason=f"Awaiting momentum confirmation (RSI {rsi:.1f}, MACD hist {macd['histogram']:.4f})",
+            reason=f"Awaiting momentum confirmation (RSI {rsi:.1f}, MACD hist {macd['histogram']:.6f})",
             strategy=Strategy.MOMENTUM,
             indicators=indicators,
         )
@@ -372,7 +382,7 @@ class SignalGenerator:
             return Signal(
                 action=SignalAction.BUY,
                 confidence=conf,
-                reason=f"Mean reversion BUY: price {price:.0f} at/below BB lower {bb['lower']:.0f}, RSI {rsi:.1f} oversold",
+                reason=f"Mean reversion BUY: price {_fmt_price(price)} at/below BB lower {_fmt_price(bb['lower'])}, RSI {rsi:.1f} oversold",
                 strategy=Strategy.MEAN_REVERSION,
                 indicators=indicators,
             )
@@ -381,14 +391,14 @@ class SignalGenerator:
             return Signal(
                 action=SignalAction.SELL,
                 confidence=conf,
-                reason=f"Mean reversion SELL: price {price:.0f} at/above BB upper {bb['upper']:.0f}, RSI {rsi:.1f} overbought",
+                reason=f"Mean reversion SELL: price {_fmt_price(price)} at/above BB upper {_fmt_price(bb['upper'])}, RSI {rsi:.1f} overbought",
                 strategy=Strategy.MEAN_REVERSION,
                 indicators=indicators,
             )
         return Signal(
             action=SignalAction.HOLD,
             confidence=0.4,
-            reason=f"Price {price:.0f} within bands ({bb['lower']:.0f}–{bb['upper']:.0f}), no reversion signal",
+            reason=f"Price {_fmt_price(price)} within bands ({_fmt_price(bb['lower'])}–{_fmt_price(bb['upper'])}), no reversion signal",
             strategy=Strategy.MEAN_REVERSION,
             indicators=indicators,
         )
@@ -401,7 +411,7 @@ class SignalGenerator:
             return Signal(
                 action=SignalAction.BUY,
                 confidence=0.7,
-                reason=f"Grid BUY: price {price:.0f} in bottom zone (zone {dist_from_lower:.1f}/5)",
+                reason=f"Grid BUY: price {_fmt_price(price)} in bottom zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
@@ -409,7 +419,7 @@ class SignalGenerator:
             return Signal(
                 action=SignalAction.SELL,
                 confidence=0.7,
-                reason=f"Grid SELL: price {price:.0f} in top zone (zone {dist_from_lower:.1f}/5)",
+                reason=f"Grid SELL: price {_fmt_price(price)} in top zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
@@ -823,8 +833,15 @@ class HydraEngine:
             self.candles = self.candles[-self.MAX_CANDLES:]
             self.prices = self.prices[-self.MAX_CANDLES:]
 
-    def tick(self) -> Dict[str, Any]:
-        """Run one decision cycle. Returns full state as dict."""
+    def tick(self, generate_only: bool = False) -> Dict[str, Any]:
+        """Run one decision cycle. Returns full state as dict.
+
+        Args:
+            generate_only: If True, generate signal but do NOT execute trades.
+                           Use execute_signal() afterward to execute selectively.
+                           This allows an external layer (e.g. AI brain) to review
+                           the signal before committing to a trade.
+        """
         self.tick_count += 1
 
         if self.halted:
@@ -850,8 +867,8 @@ class HydraEngine:
             mean_reversion_rsi_sell=self.mean_reversion_rsi_sell,
         )
 
-        # Execute if actionable
-        trade = self._maybe_execute(signal)
+        # Execute if actionable (skip when generate_only for external review)
+        trade = None if generate_only else self._maybe_execute(signal)
 
         # Update portfolio metrics
         current_price = self.prices[-1] if self.prices else 0
@@ -950,6 +967,39 @@ class HydraEngine:
             return trade
 
         return None
+
+    def execute_signal(self, action: str, confidence: float, reason: str = "",
+                        strategy: str = "MOMENTUM") -> Optional[Trade]:
+        """Execute a trade based on an externally-provided signal.
+
+        Use after tick(generate_only=True) to execute with a (possibly modified)
+        signal from an AI brain or cross-pair coordinator.
+
+        Args:
+            action: "BUY", "SELL", or "HOLD"
+            confidence: Signal confidence 0-1
+            reason: Human-readable reason string
+            strategy: Strategy name for logging
+
+        Returns:
+            Trade if executed, None otherwise
+        """
+        try:
+            sig_action = SignalAction(action)
+        except ValueError:
+            return None
+        try:
+            sig_strategy = Strategy(strategy)
+        except ValueError:
+            sig_strategy = Strategy.MOMENTUM
+
+        signal = Signal(
+            action=sig_action,
+            confidence=confidence,
+            reason=reason,
+            strategy=sig_strategy,
+        )
+        return self._maybe_execute(signal)
 
     def snapshot_params(self) -> Dict[str, float]:
         """Return a snapshot of the current tunable parameters."""

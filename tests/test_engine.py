@@ -8,6 +8,11 @@ import sys
 import os
 import math
 
+
+class SkipTest(Exception):
+    """Raised to skip a test (e.g. missing optional dependency)."""
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hydra_engine import (
     Indicators, RegimeDetector, SignalGenerator, PositionSizer, HydraEngine,
@@ -554,7 +559,21 @@ class TestCompetitionMode:
 # 6. BRAIN TESTS (no API key needed — tests fallback behavior)
 # ═══════════════════════════════════════════════════════════════
 
+def _brain_available():
+    """Check if brain dependencies (anthropic or openai SDK) are installed."""
+    try:
+        from hydra_brain import HAS_ANTHROPIC, HAS_OPENAI
+        return HAS_ANTHROPIC or HAS_OPENAI
+    except ImportError:
+        return False
+
+
 class TestBrain:
+    def _skip_if_no_sdk(self):
+        """Skip brain tests that require an SDK to construct a HydraBrain."""
+        if not _brain_available():
+            raise SkipTest("anthropic/openai SDK not installed")
+
     def _make_state(self, action="BUY", confidence=0.7):
         """Build a minimal engine state dict for brain testing."""
         return {
@@ -578,11 +597,12 @@ class TestBrain:
         }
 
     def test_brain_import(self):
-        from hydra_brain import HydraBrain, BrainDecision, HAS_ANTHROPIC
+        from hydra_brain import HydraBrain, BrainDecision
         assert BrainDecision is not None
-        assert HAS_ANTHROPIC  # anthropic SDK should be installed
+        # SDK availability is optional — test that the module at least imports
 
     def test_fallback_decision(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         # Create brain with dummy key (won't actually call API)
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
@@ -596,6 +616,7 @@ class TestBrain:
         assert decision.action == "CONFIRM"
 
     def test_fallback_preserves_hold(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         state = self._make_state("HOLD", 0.3)
@@ -605,6 +626,7 @@ class TestBrain:
         assert decision.fallback is True
 
     def test_budget_guard(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key", max_daily_cost=0.0)
         state = self._make_state("BUY", 0.8)
@@ -612,6 +634,7 @@ class TestBrain:
         assert decision.fallback is True  # budget exceeded immediately
 
     def test_get_stats(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         stats = brain.get_stats()
@@ -622,6 +645,7 @@ class TestBrain:
         assert stats["decisions_today"] == 0
 
     def test_json_parser(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         # Direct JSON
@@ -634,6 +658,7 @@ class TestBrain:
         assert brain._parse_json('') is None
 
     def test_prompt_builders(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         state = self._make_state()
@@ -676,6 +701,7 @@ class TestBrain:
 
     def test_decision_history_per_pair(self):
         """Decision history is keyed per pair, not a shared flat list."""
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key")
         # decision_history should be a dict (per-pair), not a list
@@ -700,6 +726,7 @@ class TestBrain:
         assert "OVERRIDE HOLD" not in prompt  # XBT/USDC history should not leak
 
     def test_call_interval_caching(self):
+        self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
         brain = HydraBrain(anthropic_key="sk-ant-test-fake-key", call_interval=3)
         brain.api_available = False  # force fallback
@@ -721,6 +748,7 @@ def run_tests():
     """Simple test runner — no pytest dependency needed."""
     passed = 0
     failed = 0
+    skipped = 0
     errors = []
 
     test_classes = [
@@ -738,6 +766,9 @@ def run_tests():
                 getattr(instance, method_name)()
                 passed += 1
                 print(f"  PASS  {test_name}")
+            except SkipTest as e:
+                skipped += 1
+                print(f"  SKIP  {test_name}: {e}")
             except AssertionError as e:
                 failed += 1
                 errors.append((test_name, str(e)))
@@ -748,7 +779,7 @@ def run_tests():
                 print(f"  ERROR {test_name}: {e}")
 
     print(f"\n  {'='*50}")
-    print(f"  Results: {passed} passed, {failed} failed, {passed + failed} total")
+    print(f"  Results: {passed} passed, {failed} failed, {skipped} skipped, {passed + failed + skipped} total")
     print(f"  {'='*50}")
 
     if errors:

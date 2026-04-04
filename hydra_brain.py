@@ -183,8 +183,10 @@ class HydraBrain:
 
         # State
         self.decision_history: Dict[str, List[Dict]] = {}
-        self.daily_tokens_in = 0
+        self.daily_tokens_in = 0         # Primary provider (analyst + risk)
         self.daily_tokens_out = 0
+        self._daily_strategist_tokens_in = 0   # Strategist (xAI) — tracked separately for accurate costing
+        self._daily_strategist_tokens_out = 0
         self.daily_decisions = 0
         self.daily_overrides = 0
         self.daily_escalations = 0
@@ -247,11 +249,13 @@ class HydraBrain:
                 )
             )
 
+            strategist_tokens_in = 0
+            strategist_tokens_out = 0
             if needs_strategist:
                 try:
                     strategist_output, s_in, s_out = self._run_strategist(state, analyst_output, risk_output)
-                    total_tokens_in += s_in
-                    total_tokens_out += s_out
+                    strategist_tokens_in = s_in
+                    strategist_tokens_out = s_out
                     escalated = True
                 except Exception as e:
                     print(f"  [BRAIN] Strategist failed (continuing with Risk Manager decision): {e}")
@@ -270,6 +274,7 @@ class HydraBrain:
                 final_size = risk_output.get("size_multiplier", 1.0)
                 strategist_reasoning = ""
 
+            all_tokens = total_tokens_in + total_tokens_out + strategist_tokens_in + strategist_tokens_out
             decision = BrainDecision(
                 action=final_decision,
                 final_signal=final_action,
@@ -281,7 +286,7 @@ class HydraBrain:
                 combined_summary=self._build_summary(analyst_output, risk_output, strategist_output),
                 risk_flags=risk_output.get("risk_flags", []),
                 portfolio_health=risk_output.get("portfolio_health", "HEALTHY"),
-                tokens_used=total_tokens_in + total_tokens_out,
+                tokens_used=all_tokens,
                 latency_ms=(time.time() - start) * 1000,
                 fallback=False,
                 escalated=escalated,
@@ -291,6 +296,8 @@ class HydraBrain:
             with self._lock:
                 self.daily_tokens_in += total_tokens_in
                 self.daily_tokens_out += total_tokens_out
+                self._daily_strategist_tokens_in += strategist_tokens_in
+                self._daily_strategist_tokens_out += strategist_tokens_out
                 self.daily_decisions += 1
                 if escalated:
                     self.daily_escalations += 1
@@ -561,9 +568,12 @@ Make the final call. Think carefully, then respond with JSON only."""
         )
 
     def _estimated_cost(self) -> float:
-        """Estimate daily API cost from token usage."""
-        return (self.daily_tokens_in / 1_000_000 * self.INPUT_COST_PER_M +
-                self.daily_tokens_out / 1_000_000 * self.OUTPUT_COST_PER_M)
+        """Estimate daily API cost from token usage (primary + strategist)."""
+        primary_cost = (self.daily_tokens_in / 1_000_000 * self.INPUT_COST_PER_M +
+                        self.daily_tokens_out / 1_000_000 * self.OUTPUT_COST_PER_M)
+        strategist_cost = (self._daily_strategist_tokens_in / 1_000_000 * COST_XAI[0] +
+                           self._daily_strategist_tokens_out / 1_000_000 * COST_XAI[1])
+        return primary_cost + strategist_cost
 
     def _maybe_reset_daily(self):
         """Reset daily counters at midnight UTC."""
@@ -571,6 +581,8 @@ Make the final call. Think carefully, then respond with JSON only."""
         if today != self.daily_reset_date:
             self.daily_tokens_in = 0
             self.daily_tokens_out = 0
+            self._daily_strategist_tokens_in = 0
+            self._daily_strategist_tokens_out = 0
             self.daily_decisions = 0
             self.daily_overrides = 0
             self.daily_escalations = 0
@@ -587,7 +599,8 @@ Make the final call. Think carefully, then respond with JSON only."""
             "has_strategist": self.has_strategist,
             "cost_today": round(self._estimated_cost(), 4),
             "max_daily_cost": self.max_daily_cost,
-            "tokens_today": self.daily_tokens_in + self.daily_tokens_out,
+            "tokens_today": (self.daily_tokens_in + self.daily_tokens_out +
+                            self._daily_strategist_tokens_in + self._daily_strategist_tokens_out),
             "avg_latency_ms": round(
                 self.last_decision.latency_ms if self.last_decision and not self.last_decision.fallback else 0, 0
             ),

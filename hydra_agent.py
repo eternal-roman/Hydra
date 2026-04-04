@@ -629,6 +629,32 @@ class HydraAgent:
                             print(f"  [WARN] Brain failed for {pair}: {e}")
                             all_states[pair] = engine_states[pair]
 
+            # Phase 2.5: Execute finalized signals on engines (deferred from generate_only)
+            # When brain is active, tick() ran with generate_only=True, so we must
+            # now execute the final (possibly brain-modified) signals on the engines.
+            if self.brain:
+                for pair in self.pairs:
+                    state = all_states.get(pair)
+                    if not state:
+                        continue
+                    sig = state.get("signal", {})
+                    engine = self.engines[pair]
+                    trade = engine.execute_signal(
+                        action=sig.get("action", "HOLD"),
+                        confidence=sig.get("confidence", 0),
+                        reason=sig.get("reason", ""),
+                        strategy=state.get("strategy", "MOMENTUM"),
+                    )
+                    if trade:
+                        state["last_trade"] = {
+                            "action": trade.action,
+                            "price": round(trade.price, 8),
+                            "amount": round(trade.amount, 8),
+                            "value": round(trade.value, 2),
+                            "reason": trade.reason,
+                            "profit": round(trade.profit, 2) if trade.profit is not None else None,
+                        }
+
             # Print status and execute trades (sequential — rate limiting required)
             for pair in self.pairs:
                 state = all_states.get(pair)
@@ -663,7 +689,7 @@ class HydraAgent:
                 self._run_tuner_update()
 
             # Broadcast state to dashboard (uses cached balance, no extra API call)
-            dashboard_state = self._build_dashboard_state(tick, all_states, elapsed, remaining)
+            dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
             self.broadcaster.broadcast(dashboard_state)
 
             # Rolling save — persist trade log every tick so no data is lost on crash
@@ -688,7 +714,12 @@ class HydraAgent:
         self._print_final_report()
 
     def _fetch_and_tick(self, pair: str) -> Optional[dict]:
-        """Phase 1: Fetch latest data from Kraken and run engine tick. No brain call."""
+        """Phase 1: Fetch latest data from Kraken and run engine tick.
+
+        When a brain is active, uses generate_only=True so the engine produces
+        signals without executing trades internally. This prevents engine state
+        from diverging when the brain later overrides a signal.
+        """
         engine = self.engines[pair]
 
         # Fetch latest candle
@@ -704,7 +735,8 @@ class HydraAgent:
                     "open": p, "high": p, "low": p, "close": p, "volume": 0,
                 })
 
-        return engine.tick()
+        # When brain is active, defer execution until after brain review
+        return engine.tick(generate_only=bool(self.brain))
 
     def _apply_brain(self, pair: str, state: dict, all_engine_states: dict) -> dict:
         """Phase 2: Run brain with full cross-pair context. Mutates state in place."""
@@ -755,13 +787,12 @@ class HydraAgent:
                 "latency_ms": round(decision.latency_ms, 0),
             }
             # Apply AI decision to engine state
+            # Note: engine ran with generate_only=True, so no trade was executed yet.
+            # Modifying the signal here changes what execute_signal() will act on.
             if decision.action == "OVERRIDE":
                 state["signal"]["action"] = decision.final_signal
                 state["signal"]["confidence"] = decision.confidence_adj
                 state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
-                # Clear last_trade if overridden to HOLD
-                if decision.final_signal == "HOLD":
-                    state.pop("last_trade", None)
             elif decision.action == "ADJUST":
                 state["signal"]["confidence"] = decision.confidence_adj
                 state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
@@ -1103,7 +1134,7 @@ class HydraAgent:
         }
 
     def _build_dashboard_state(self, tick: int, all_states: dict,
-                                elapsed: float, remaining: float) -> dict:
+                                elapsed: float) -> dict:
         """Build the full state dict for the dashboard WebSocket."""
         # Fetch balance every 5th tick to reduce API calls
         if tick % 5 == 1 or not hasattr(self, '_cached_balance'):
@@ -1133,6 +1164,7 @@ class HydraAgent:
             "trade_log": self.trade_log[-20:],
             "running": self.running,
             "interval": self.interval,
+            "mode": self.mode,
             "ai_brain": self.brain.get_stats() if self.brain else None,
         }
 
