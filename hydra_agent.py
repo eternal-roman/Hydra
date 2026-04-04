@@ -1234,9 +1234,12 @@ class HydraAgent:
             print(f"\n  TRADE LOG ({len(self.trade_log)} entries)")
             print(f"  {'-'*70}")
             for t in self.trade_log[-20:]:
-                status_icon = "OK" if t["status"] == "EXECUTED" else "XX"
-                print(f"  [{status_icon}] {t['time']} | {t['action']:<4} {t['amount']:.8f} {t['pair']:<10} "
-                      f"@ ${t['price']:>10,.4f} | {t['status']}")
+                if t.get("type") == "COORDINATED_SWAP":
+                    print(f"  [SW] {t['time']} | SWAP {t.get('sell_pair','?')} → {t.get('buy_pair','?')} | {t.get('reason','')[:40]}")
+                    continue
+                status_icon = "OK" if t.get("status") == "EXECUTED" else "XX"
+                print(f"  [{status_icon}] {t['time']} | {t.get('action','?'):<4} {t.get('amount', 0):.8f} {t.get('pair','?'):<10} "
+                      f"@ ${t.get('price', 0):>10,.4f} | {t.get('status','?')}")
         else:
             print(f"\n  No trades executed during session.")
 
