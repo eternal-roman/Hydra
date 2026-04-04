@@ -1200,7 +1200,7 @@ class HydraEngine:
             row("Win Rate", f"{win_rate:.1f}%"),
             sep(),
             row("Open Position", f"{self.position.size:.6f} {base}"),
-            row("Avg Entry", f"${self.position.avg_entry:,.2f}"),
+            row("Avg Entry", "$" + _fmt_price(self.position.avg_entry)),
             row("Unrealized P&L", f"${self.position.unrealized_pnl:+,.2f}"),
             row("Cash Balance", f"${self.balance:,.2f}"),
             sep(),

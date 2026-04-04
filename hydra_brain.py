@@ -153,7 +153,7 @@ class HydraBrain:
         if anthropic_key and HAS_ANTHROPIC:
             self.primary_client = anthropic.Anthropic(api_key=anthropic_key)
             self.primary_provider = "anthropic"
-            self.primary_model = "claude-sonnet-4-20250514"
+            self.primary_model = "claude-sonnet-4-6"
         elif xai_key and HAS_OPENAI:
             # Fallback: use xAI for primary if no Anthropic key
             self.primary_client = openai.OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1")
