@@ -548,7 +548,7 @@ export default function App() {
                   <span style={{ color: COLORS.textDim }}>Dead Man</span>
                   <span style={{ color: COLORS.accent, textAlign: "right" }}>Active</span>
                   <span style={{ color: COLORS.textDim }}>Sizing</span>
-                  <span style={{ color: COLORS.text, textAlign: "right" }}>Quarter-Kelly</span>
+                  <span style={{ color: COLORS.text, textAlign: "right" }}>{state?.mode === "competition" ? "Half-Kelly" : "Quarter-Kelly"}</span>
                 </div>
               </div>
             </div>
