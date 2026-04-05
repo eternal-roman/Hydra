@@ -194,6 +194,7 @@ start_all.bat
 --ws-port          WebSocket port for dashboard (default: 8765)
 --mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
 --paper            Use paper trading — no API keys needed, no real money
+--resume           Restore engine/coordinator state from hydra_session_snapshot.json
 ```
 
 ### Competition Mode
@@ -254,7 +255,7 @@ hydra/
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
 ├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
-├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket
+├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, order reconciler, --resume
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
 ├── start_dashboard.bat     # Dashboard with auto-restart

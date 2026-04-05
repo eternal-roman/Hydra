@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Order reconciler** (`OrderReconciler`) — polls `kraken open-orders` every
+  5 ticks and detects orders that vanished from the exchange (filled,
+  dead-man-switch cancelled, rejected). Prevents silent divergence between
+  the agent's local order registry and exchange state.
+- **Session snapshots + `--resume`** — atomic JSON snapshots of all engine
+  state (balance, position, equity history, candles), coordinator regime
+  history, and recent trade log. Written every 12 ticks (~1h at 5-min
+  candles) and on SIGINT/SIGTERM shutdown. `--resume` flag restores from
+  `hydra_session_snapshot.json`.
+- **Shutdown cancel-all** — `_handle_shutdown` now issues `kraken cancel-all`
+  before exiting to clear resting limit orders.
+- **Trade log bounding** — in-memory trade log capped at 2000 entries to
+  prevent unbounded growth on long-running sessions.
+
+### Fixed
+- **Sharpe annualization** — `_calc_sharpe` now derives the annualization
+  period from observed candle timestamp deltas (median) instead of the
+  nominal `candle_interval` argument. Falls back to nominal when observed
+  cadence is synthetic or unavailable.
+
+---
+
 ## [2.3.1] — 2026-04-02
 
 ### Changed

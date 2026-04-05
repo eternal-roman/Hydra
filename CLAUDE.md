@@ -10,7 +10,8 @@ HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market co
 
 ```
 hydra_engine.py     — Pure Python trading engine (indicators, regime detection, signals, position sizing)
-hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution)
+hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution,
+                      order reconciler, session snapshot + --resume)
 hydra_brain.py      — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
 hydra_tuner.py      — Self-tuning parameters via Bayesian updating of regime/signal thresholds
 dashboard/src/App.jsx — React dashboard (single-file, all inline styles)
@@ -44,6 +45,9 @@ python hydra_agent.py --candle-interval 1
 
 # Agent — paper trading (no API keys needed)
 python hydra_agent.py --mode competition --paper
+
+# Agent — resume previous session (restores engines + coordinator state)
+python hydra_agent.py --resume
 
 # Engine test (no API keys needed)
 python hydra_engine.py
