@@ -6,6 +6,78 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.4.0] — 2026-04-05
+
+### Added
+- **Hamilton (1989) regime-switching filter** (`hydra_engine.RegimeSwitchingFilter`) —
+  Bayesian filter over the 4 regimes (TREND_UP/DOWN, RANGING, VOLATILE). Maintains a
+  posterior probability vector per pair, seeded from observed regime history via a
+  Laplace-smoothed transition matrix. Pure Python, ~O(16) ops per update. Exposes the
+  full posterior via `state["regime_probs"]` for downstream consumers.
+- **QAOA-inspired joint-signal solver** (`hydra_engine.JointSignalSolver`) — replaces
+  the three hardcoded if/else rules (with literal 0.8/0.85 confidences) in the old
+  `CrossPairCoordinator.get_overrides`. Builds an Ising-style cost Hamiltonian
+  `E(s) = -h·s + γ·sᵀΣs` over the N-pair spin configuration space and exact-
+  diagonalises the 2^N states (8 for the SOL/USDC + SOL/XBT + XBT/USDC triangle) in
+  pure Python. `h` combines per-pair signal with regime-probability drift from the
+  Hamilton filter; `Σ` is the rolling 50-candle log-return covariance. Per-pair
+  confidences are derived from the energy gap to the runner-up state — no literal
+  constants anywhere.
+- **Agentic brain loop** (`hydra_brain.HydraBrain.step`) — the AI brain now maintains
+  genuine cross-tick state: episodic `BrainMemory` (last 200 decisions per pair with
+  state digest, outcome back-filling, regret tracking), named `beliefs` updated via
+  EMA on closed trades, `GoalState` with explicit drawdown budget / target Sharpe /
+  session PnL target, and a `risk_posture` (conservative/neutral/aggressive) promoted
+  automatically from realised drawdown vs budget. `step()` consults multi-step
+  `BrainPlan`s registered after high-conviction signals — if a plan's `if_condition`
+  matches the live state, the plan step fires without any API call. Otherwise the
+  existing Claude-Analyst → Claude-Risk-Manager → Grok-Strategist pipeline is
+  delegated to, and a small follow-up plan is optionally registered. `reflect()`
+  back-fills realised PnL on closed trades and updates beliefs.
+- **Session snapshot + `--resume`** — atomic JSON snapshot at
+  `hydra_session_snapshot.json` written via `tmp` + `os.replace()` every tick. On
+  `--resume` each engine, the coordinator's regime history + Hamilton filter seeds,
+  and the full brain memory (episodes, beliefs, plans, goals) are restored.
+- **Order reconciler** (`hydra_agent.OrderReconciler`) — polls `kraken open-orders`
+  every 5 ticks, diffs against locally-registered txids, and emits events when a
+  known order disappears from the exchange (fill / cancel / reject).
+- `HydraEngine.snapshot_runtime()` / `restore_runtime()` — serialise/deserialise
+  mutable engine state (balance, position, equity history, candle buffer, halted
+  flag) for `--resume`.
+
+### Changed
+- **`CrossPairCoordinator.get_overrides`** — two-layer pipeline: per-pair Hamilton
+  filter update → attach `regime_probs` → joint-signal solver. No hardcoded
+  confidences remain. Backward-compatible output shape: `{pair: {action, signal,
+  confidence_adj, reason, swap?}}` unchanged, plus new `joint_energy` /
+  `energy_gap` fields.
+- **`HydraEngine._calc_sharpe`** — annualisation now uses the *observed* median
+  candle timestamp delta (with sub-second fallback to nominal `candle_interval`),
+  not a hardcoded `525600 / candle_interval`. Corrects skew when the configured
+  interval disagrees with the exchange's actual cadence.
+- **`HydraBrain.deliberate`** — becomes a thin wrapper over `step()` so existing
+  callsites in `hydra_agent.py` inherit the agentic loop transparently.
+- **Total modifier cap** — order book still capped at +0.15 above engine confidence;
+  joint-signal coordinator overrides are flagged via `cross_pair_override` and
+  bypass the cap so principled covariance-based decisions aren't clipped.
+- **Kill-switch on SIGINT/SIGTERM** — agent now cancels all open Kraken orders via
+  `cancel-all` and flushes a final session snapshot before exit. Positions are
+  left intact (no forced market close).
+- **Brain `size_multiplier` clamp `[0.0, 1.25]`** — enforced inside `step()`,
+  further capped to 0.5 when `goals.risk_posture == "conservative"`.
+
+### Tests
+- `tests/test_cross_pair.py` rewritten for the new pipeline: 23 tests across
+  Hamilton filter convergence, transition-matrix seeding, joint-signal solver
+  ground-state properties (zero-covariance reduction, energy gap → confidence
+  mapping, no-hardcoded-constants regression guard), coordinator pipeline, and
+  timestamp-derived Sharpe.
+- `tests/test_brain_agent.py` — 21 tests across `BrainMemory` CRUD + round-trip
+  serialisation, `GoalState` posture promotion, `BrainPlan` follow-through,
+  `size_multiplier` clamping, and `reflect()` outcome back-fill.
+
+---
+
 ## [2.3.1] — 2026-04-02
 
 ### Changed

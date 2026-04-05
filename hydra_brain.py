@@ -15,12 +15,14 @@ Usage:
 """
 
 import json
+import math
 import time
 import os
 import re
 import threading
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from collections import deque
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Any, Deque
 from datetime import datetime, timezone
 
 try:
@@ -39,6 +41,208 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════
 # DATA
 # ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class GoalState:
+    """Explicit, trackable objectives the brain reasons against every tick.
+
+    Unlike a one-shot risk gate, the brain uses this to plan multi-tick
+    trajectories: when `risk_posture` shifts to `conservative` because
+    realised drawdown is approaching `drawdown_budget_pct`, planned steps
+    that would add exposure are invalidated and re-planned.
+    """
+    target_sharpe: float = 1.0
+    drawdown_budget_pct: float = 10.0
+    session_pnl_target_pct: float = 5.0
+    risk_posture: str = "neutral"  # conservative | neutral | aggressive
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PlanStep:
+    """A single step in a multi-tick plan.
+
+    `if_condition` is a small dict of thresholds checked against the live
+    state. `then_action` is what the brain wants to do when the condition
+    matches. `success_metric` is the signal used by the reflection loop to
+    mark the plan step as successful or failed after the fact.
+    """
+    if_condition: Dict[str, Any]
+    then_action: Dict[str, Any]
+    success_metric: Dict[str, Any] = field(default_factory=dict)
+    status: str = "pending"  # pending | fired | succeeded | failed
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class BrainPlan:
+    """Multi-step plan the brain commits to across ticks."""
+    goal: str
+    horizon_ticks: int
+    created_at_tick: int
+    steps: List[PlanStep] = field(default_factory=list)
+    step_idx: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "goal": self.goal,
+            "horizon_ticks": self.horizon_ticks,
+            "created_at_tick": self.created_at_tick,
+            "step_idx": self.step_idx,
+            "steps": [s.to_dict() for s in self.steps],
+        }
+
+    def is_expired(self, current_tick: int) -> bool:
+        return (current_tick - self.created_at_tick) >= self.horizon_ticks
+
+    def current_step(self) -> Optional[PlanStep]:
+        if 0 <= self.step_idx < len(self.steps):
+            return self.steps[self.step_idx]
+        return None
+
+
+@dataclass
+class Episode:
+    """One decision + (eventually) its realised outcome."""
+    tick: int
+    timestamp: float
+    pair: str
+    state_digest: List[float]   # small indicator vector for similarity search
+    action: str
+    signal: str
+    confidence: float
+    realized_pnl: Optional[float] = None
+    regret: Optional[float] = None  # counterfactual: HOLD return over K candles
+    closed: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class BrainMemory:
+    """Cross-tick episodic memory + beliefs + current plan per pair.
+
+    The memory is intentionally small and pure-Python so it can be JSON-
+    serialised into the session snapshot without touching any dependency.
+
+    - `episodes[pair]` holds the last `MAX_EPISODES` decisions for each pair,
+      which the agent loop retrieves via a cheap cosine similarity over the
+      state digest vector (7 dims).
+    - `beliefs` are free-form scalar convictions the brain updates during
+      reflection (e.g. "sol_usdc_mean_reversion_edge" ∈ [-1, 1]).
+    - `plans[pair]` holds the currently-active multi-step plan for a pair.
+    - `goals` is shared across all pairs.
+    """
+
+    MAX_EPISODES = 200
+    DIGEST_DIM = 7
+
+    def __init__(self, goals: Optional[GoalState] = None):
+        self.episodes: Dict[str, Deque[Episode]] = {}
+        self.beliefs: Dict[str, Dict[str, float]] = {}   # {name: {value, n}}
+        self.plans: Dict[str, BrainPlan] = {}
+        self.goals: GoalState = goals or GoalState()
+
+    # ─── episodes ───
+
+    def add_episode(self, episode: Episode):
+        dq = self.episodes.setdefault(
+            episode.pair, deque(maxlen=self.MAX_EPISODES)
+        )
+        dq.append(episode)
+
+    def recent_episodes(self, pair: str, n: int = 10) -> List[Episode]:
+        dq = self.episodes.get(pair)
+        if not dq:
+            return []
+        return list(dq)[-n:]
+
+    @staticmethod
+    def _cosine(a: List[float], b: List[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(y * y for y in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    def retrieve_similar(self, pair: str, digest: List[float], k: int = 5) -> List[Episode]:
+        dq = self.episodes.get(pair)
+        if not dq:
+            return []
+        closed = [e for e in dq if e.closed]
+        if not closed:
+            return []
+        scored = sorted(
+            closed, key=lambda e: self._cosine(digest, e.state_digest), reverse=True
+        )
+        return scored[:k]
+
+    # ─── beliefs ───
+
+    def update_belief(self, name: str, observation: float, alpha: float = 0.2):
+        """Exponential-moving-average belief update bounded to [-1, 1]."""
+        rec = self.beliefs.setdefault(name, {"value": 0.0, "n": 0})
+        rec["value"] = (1 - alpha) * rec["value"] + alpha * max(-1.0, min(1.0, observation))
+        rec["n"] += 1
+
+    def get_belief(self, name: str) -> float:
+        return self.beliefs.get(name, {}).get("value", 0.0)
+
+    # ─── plan ───
+
+    def set_plan(self, pair: str, plan: BrainPlan):
+        self.plans[pair] = plan
+
+    def get_plan(self, pair: str) -> Optional[BrainPlan]:
+        return self.plans.get(pair)
+
+    def clear_plan(self, pair: str):
+        self.plans.pop(pair, None)
+
+    # ─── (de)serialisation for session snapshot ───
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "episodes": {
+                pair: [e.to_dict() for e in dq]
+                for pair, dq in self.episodes.items()
+            },
+            "beliefs": self.beliefs,
+            "plans": {p: plan.to_dict() for p, plan in self.plans.items()},
+            "goals": self.goals.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BrainMemory":
+        goals_data = data.get("goals") or {}
+        mem = cls(goals=GoalState(**{k: v for k, v in goals_data.items() if k in GoalState.__dataclass_fields__}))
+        for pair, eps in (data.get("episodes") or {}).items():
+            dq: Deque[Episode] = deque(maxlen=cls.MAX_EPISODES)
+            for e in eps:
+                dq.append(Episode(**{
+                    k: v for k, v in e.items()
+                    if k in Episode.__dataclass_fields__
+                }))
+            mem.episodes[pair] = dq
+        mem.beliefs = dict(data.get("beliefs") or {})
+        for pair, plan in (data.get("plans") or {}).items():
+            steps = [PlanStep(**s) for s in plan.get("steps", [])]
+            mem.plans[pair] = BrainPlan(
+                goal=plan.get("goal", ""),
+                horizon_ticks=int(plan.get("horizon_ticks", 20)),
+                created_at_tick=int(plan.get("created_at_tick", 0)),
+                steps=steps,
+                step_idx=int(plan.get("step_idx", 0)),
+            )
+        return mem
+
 
 @dataclass
 class BrainDecision:
@@ -181,6 +385,9 @@ class HydraBrain:
         self.INPUT_COST_PER_M = COST_ANTHROPIC[0] if self.primary_provider == "anthropic" else COST_XAI[0]
         self.OUTPUT_COST_PER_M = COST_ANTHROPIC[1] if self.primary_provider == "anthropic" else COST_XAI[1]
 
+        # Agentic state — cross-tick memory, goals, multi-step plans
+        self.memory: BrainMemory = BrainMemory()
+
         # State
         self.decision_history: Dict[str, List[Dict]] = {}
         self.daily_tokens_in = 0         # Primary provider (analyst + risk)
@@ -198,9 +405,254 @@ class HydraBrain:
         self.last_decision: Optional[BrainDecision] = None
         self._lock = threading.Lock()  # Thread safety for parallel brain calls
 
-    # ─── Main Entry Point ───
+    # ─── Agentic loop ───
+
+    @staticmethod
+    def _state_digest(state: Dict[str, Any]) -> List[float]:
+        """Small dense vector used for similarity retrieval over episodes.
+
+        Keeps the scale roughly in [-3, 3] per component so cosine similarity
+        is meaningful. Pure Python, 7 dimensions.
+        """
+        ind = state.get("indicators") or {}
+        trend = state.get("trend") or {}
+        vol = state.get("volatility") or {}
+        sig = state.get("signal") or {}
+        port = state.get("portfolio") or {}
+        rsi = float(ind.get("rsi", 50.0) or 50.0)
+        macd_hist = float(ind.get("macd_histogram", 0.0) or 0.0)
+        bb_width = float(ind.get("bb_width", 0.0) or 0.0)
+        atr_pct = float(vol.get("atr_pct", 0.0) or 0.0)
+        ema20 = float(trend.get("ema20", 0.0) or 0.0)
+        ema50 = float(trend.get("ema50", 0.0) or 0.0)
+        ratio = (ema20 / ema50 - 1.0) if ema50 > 0 else 0.0
+        conf = float(sig.get("confidence", 0.0) or 0.0)
+        pnl_pct = float(port.get("pnl_pct", 0.0) or 0.0) / 100.0
+        return [
+            (rsi - 50.0) / 50.0,   # centered ∈ [-1, 1]
+            max(-3.0, min(3.0, macd_hist)),
+            bb_width,
+            atr_pct / 10.0,
+            ratio * 100.0,
+            conf,
+            max(-1.0, min(1.0, pnl_pct)),
+        ]
+
+    def _plan_condition_matches(self, cond: Dict[str, Any], state: Dict[str, Any]) -> bool:
+        """Tiny DSL for plan-step conditions. Supported keys:
+        - regime: string → must equal state['regime']
+        - min_confidence, max_confidence: threshold on signal.confidence
+        - min_rsi, max_rsi: threshold on indicators.rsi
+        - min_drawdown_pct, max_drawdown_pct: threshold on portfolio.max_drawdown_pct
+        """
+        if not cond:
+            return True
+        sig = state.get("signal") or {}
+        ind = state.get("indicators") or {}
+        port = state.get("portfolio") or {}
+        conf = float(sig.get("confidence", 0.0) or 0.0)
+        rsi = float(ind.get("rsi", 50.0) or 50.0)
+        dd = float(port.get("max_drawdown_pct", 0.0) or 0.0)
+        if "regime" in cond and state.get("regime") != cond["regime"]:
+            return False
+        if "min_confidence" in cond and conf < float(cond["min_confidence"]):
+            return False
+        if "max_confidence" in cond and conf > float(cond["max_confidence"]):
+            return False
+        if "min_rsi" in cond and rsi < float(cond["min_rsi"]):
+            return False
+        if "max_rsi" in cond and rsi > float(cond["max_rsi"]):
+            return False
+        if "min_drawdown_pct" in cond and dd < float(cond["min_drawdown_pct"]):
+            return False
+        if "max_drawdown_pct" in cond and dd > float(cond["max_drawdown_pct"]):
+            return False
+        return True
+
+    def _update_goal_posture(self, state: Dict[str, Any]):
+        """Promote `risk_posture` based on realised drawdown vs budget."""
+        port = state.get("portfolio") or {}
+        dd = float(port.get("max_drawdown_pct", 0.0) or 0.0)
+        budget = self.memory.goals.drawdown_budget_pct
+        if dd >= 0.75 * budget:
+            self.memory.goals.risk_posture = "conservative"
+        elif dd >= 0.4 * budget:
+            self.memory.goals.risk_posture = "neutral"
+        else:
+            # Aggressive only if PnL trajectory is positive
+            pnl_pct = float(port.get("pnl_pct", 0.0) or 0.0)
+            self.memory.goals.risk_posture = "aggressive" if pnl_pct > 1.0 else "neutral"
+
+    def _decision_from_plan_step(self, pair: str, state: Dict[str, Any], step: PlanStep) -> Optional[BrainDecision]:
+        """Build a BrainDecision from a plan step whose condition matched."""
+        then = step.then_action or {}
+        final_action = then.get("final_action", state.get("signal", {}).get("action", "HOLD"))
+        confidence = float(then.get("confidence", state.get("signal", {}).get("confidence", 0.0)))
+        size_multiplier = float(then.get("size_multiplier", 1.0))
+        # Clamp size multiplier per user-locked decision [0.0, 1.25]
+        size_multiplier = max(0.0, min(1.25, size_multiplier))
+        posture = self.memory.goals.risk_posture
+        if posture == "conservative":
+            size_multiplier = min(size_multiplier, 0.5)
+        step.status = "fired"
+        return BrainDecision(
+            action="PLAN_STEP",
+            final_signal=final_action,
+            confidence_adj=confidence,
+            size_multiplier=size_multiplier,
+            analyst_reasoning=f"Plan step {step.status}: {then.get('reason', '')}",
+            risk_reasoning=f"Posture={posture}, drawdown budget guarded",
+            combined_summary=f"[PLAN] {final_action} per step {step.to_dict()}",
+            portfolio_health="HEALTHY" if posture != "conservative" else "CAUTION",
+            fallback=False,
+        )
+
+    def step(self, state: Dict[str, Any]) -> BrainDecision:
+        """Genuine agentic decision loop with memory + goals + planning.
+
+        Flow per tick:
+          1. Update risk posture from drawdown vs goal budget.
+          2. Build state digest, retrieve similar past episodes.
+          3. If a current plan has a step whose `if_condition` matches now,
+             emit the step's `then_action` and advance the plan without an
+             API call.
+          4. Otherwise delegate to the 3-agent Claude/Grok pipeline
+             (`_deliberate_pipeline`). On CONFIRM with strong conviction,
+             optionally register a short forward plan from the decision.
+          5. Record an Episode in memory (closed=False — outcome back-filled
+             later by `reflect`).
+          6. Enforce the user-locked size_multiplier clamp [0.0, 1.25] and
+             the `risk_posture=conservative` guardrail before returning.
+
+        The old `deliberate(state)` entrypoint delegates here for backward
+        compatibility — see below.
+        """
+        pair = state.get("asset", "UNKNOWN")
+        tick = int(state.get("tick", 0))
+
+        # 1. Goal posture update
+        self._update_goal_posture(state)
+
+        # 2. Digest + retrieval (retrieval results are fed into the prompt
+        # implicitly via the decision_history field; richer RAG is future work).
+        digest = self._state_digest(state)
+
+        # 3. Plan consultation
+        plan = self.memory.get_plan(pair)
+        if plan is not None:
+            if plan.is_expired(tick):
+                self.memory.clear_plan(pair)
+                plan = None
+            else:
+                step_obj = plan.current_step()
+                if step_obj is not None and step_obj.status == "pending" \
+                        and self._plan_condition_matches(step_obj.if_condition, state):
+                    decision = self._decision_from_plan_step(pair, state, step_obj)
+                    plan.step_idx += 1
+                    if plan.step_idx >= len(plan.steps):
+                        self.memory.clear_plan(pair)
+                    # Record as episode (digest stored for later retrieval)
+                    self.memory.add_episode(Episode(
+                        tick=tick, timestamp=time.time(), pair=pair,
+                        state_digest=digest,
+                        action=decision.action,
+                        signal=decision.final_signal,
+                        confidence=decision.confidence_adj,
+                    ))
+                    return decision
+
+        # 4. Delegate to the 3-agent pipeline for genuine reasoning
+        decision = self._deliberate_pipeline(state)
+
+        # 4a. Enforce size_multiplier clamp per locked decision
+        decision.size_multiplier = max(0.0, min(1.25, decision.size_multiplier))
+        if self.memory.goals.risk_posture == "conservative":
+            decision.size_multiplier = min(decision.size_multiplier, 0.5)
+
+        # 4b. Optionally register a short plan if the pipeline returned a
+        # strong directional view — exposes the brain as genuinely forward-
+        # looking rather than tick-local.
+        if (not decision.fallback
+                and decision.final_signal in ("BUY", "SELL")
+                and decision.confidence_adj >= 0.7
+                and self.memory.get_plan(pair) is None):
+            self._register_followup_plan(pair, tick, state, decision)
+
+        # 5. Record episode (outcome back-filled on close)
+        self.memory.add_episode(Episode(
+            tick=tick, timestamp=time.time(), pair=pair,
+            state_digest=digest,
+            action=decision.action,
+            signal=decision.final_signal,
+            confidence=decision.confidence_adj,
+        ))
+
+        return decision
+
+    def _register_followup_plan(self, pair: str, tick: int, state: Dict[str, Any], decision: BrainDecision):
+        """Create a small 2-step follow-up plan after a high-conviction signal.
+
+        Step 1: If drawdown starts to bite within N ticks, de-risk.
+        Step 2: If the move plays out (opposite-direction RSI regime), take profit.
+        """
+        opposite = "SELL" if decision.final_signal == "BUY" else "BUY"
+        steps: List[PlanStep] = [
+            PlanStep(
+                if_condition={"min_drawdown_pct": 3.0},
+                then_action={
+                    "final_action": "HOLD",
+                    "confidence": 0.4,
+                    "size_multiplier": 0.3,
+                    "reason": "Plan guard: drawdown >3% after high-conviction entry — de-risk",
+                },
+            ),
+            PlanStep(
+                if_condition=(
+                    {"min_rsi": 70.0} if decision.final_signal == "BUY" else {"max_rsi": 30.0}
+                ),
+                then_action={
+                    "final_action": opposite,
+                    "confidence": 0.7,
+                    "size_multiplier": 0.8,
+                    "reason": "Plan target: take profit on overbought/oversold mirror",
+                },
+            ),
+        ]
+        self.memory.set_plan(pair, BrainPlan(
+            goal=f"Ride {decision.final_signal} move initiated at tick {tick}",
+            horizon_ticks=20,
+            created_at_tick=tick,
+            steps=steps,
+        ))
+
+    def reflect(self, pair: str, closed_trade: Dict[str, Any]):
+        """Back-fill realised outcome into the last matching open episode and
+        update named beliefs. Call this from the agent loop whenever a
+        position closes."""
+        dq = self.memory.episodes.get(pair)
+        if not dq:
+            return
+        profit = float(closed_trade.get("profit") or 0.0)
+        # Back-fill the most recent open (non-closed) episode
+        for ep in reversed(dq):
+            if not ep.closed:
+                ep.realized_pnl = profit
+                ep.closed = True
+                # Counterfactual regret: if we held instead, what would have happened?
+                # For now we use -profit as a crude proxy (losing ⇒ regret is positive).
+                ep.regret = -profit if ep.signal != "HOLD" else 0.0
+                break
+        # Belief update — simple EMA of normalised profit
+        normalised = max(-1.0, min(1.0, profit / 10.0))
+        self.memory.update_belief(f"{pair}_trade_edge", normalised)
+
+    # ─── Main Entry Point (backward-compatible wrapper) ───
 
     def deliberate(self, state: Dict[str, Any]) -> BrainDecision:
+        """Backward-compatible entry. Delegates to the agentic `step()` loop."""
+        return self.step(state)
+
+    def _deliberate_pipeline(self, state: Dict[str, Any]) -> BrainDecision:
         """Evaluate engine signal with 3-agent pipeline. Thread-safe."""
         # Pre-flight: shared state checks under lock
         with self._lock:

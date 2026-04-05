@@ -40,6 +40,12 @@ if os.path.exists(_env_path):
 from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
 from hydra_tuner import ParameterTracker
 
+# Brain memory import (cross-tick agentic state). Gated by HAS_BRAIN below.
+try:
+    from hydra_brain import BrainMemory
+except ImportError:
+    BrainMemory = None  # type: ignore
+
 try:
     from hydra_brain import HydraBrain
     HAS_BRAIN = True
@@ -269,6 +275,63 @@ class KrakenCLI:
 # WEBSOCKET BROADCAST SERVER (for React Dashboard)
 # ═══════════════════════════════════════════════════════════════
 
+class OrderReconciler:
+    """Polls Kraken `open-orders` every N ticks and reconciles against the
+    local agent's issued-order registry. Stateless on exchange side — uses the
+    existing KrakenCLI wrapper.
+
+    Purpose: detect orders that vanished from the exchange (filled, cancelled
+    by dead-man's-switch, rejected) so the agent's perception of its open-
+    order set cannot silently diverge from reality. When a known order is no
+    longer present in the live snapshot, the reconciler emits a reconcile
+    event for the caller to handle (e.g. mark trade log entry as filled).
+    """
+
+    def __init__(self, poll_every_ticks: int = 5):
+        self.poll_every_ticks = poll_every_ticks
+        self.known_orders: Dict[str, dict] = {}  # txid → {pair, side, amount, registered_at}
+        self._last_poll_tick = 0
+
+    def register(self, txid: str, pair: str, side: str, amount: float):
+        if not txid:
+            return
+        self.known_orders[txid] = {
+            "pair": pair, "side": side, "amount": amount,
+            "registered_at": time.time(),
+        }
+
+    def maybe_reconcile(self, tick: int) -> List[dict]:
+        """Return a list of reconcile events for orders that disappeared
+        from the exchange since the last poll. Empty list if not yet time."""
+        if tick - self._last_poll_tick < self.poll_every_ticks:
+            return []
+        self._last_poll_tick = tick
+        try:
+            snap = KrakenCLI.open_orders()
+        except Exception as e:
+            return [{"type": "poll_failed", "error": str(e)}]
+        if isinstance(snap, dict) and "error" in snap:
+            return [{"type": "poll_failed", "error": snap.get("error")}]
+        # Kraken open-orders response shape: {"open": {txid: {...}}, ...}
+        live_txids = set()
+        if isinstance(snap, dict):
+            opens = snap.get("open") or snap
+            if isinstance(opens, dict):
+                live_txids = set(opens.keys())
+        events: List[dict] = []
+        for txid in list(self.known_orders.keys()):
+            if txid not in live_txids:
+                info = self.known_orders.pop(txid)
+                events.append({
+                    "type": "order_disappeared",
+                    "txid": txid,
+                    "pair": info["pair"],
+                    "side": info["side"],
+                    "amount": info["amount"],
+                })
+        return events
+
+
 class DashboardBroadcaster:
     """Async WebSocket server that broadcasts agent state to dashboard clients."""
 
@@ -358,6 +421,7 @@ class HydraAgent:
         paper: bool = False,
         candle_interval: int = 5,
         reset_params: bool = False,
+        resume: bool = False,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
@@ -366,9 +430,11 @@ class HydraAgent:
         self.mode = mode
         self.paper = paper
         self.candle_interval = candle_interval
+        self.resume = resume
         self.running = True
         self.start_time = None
         self.trade_log = []
+        self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
 
@@ -423,6 +489,9 @@ class HydraAgent:
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
 
+        # Live order reconciler — polls kraken open-orders every 5 ticks
+        self.reconciler = OrderReconciler(poll_every_ticks=5)
+
         # Cross-pair regime coordinator
         self.coordinator = CrossPairCoordinator(pairs)
         self._swap_counter = 0  # Monotonic swap ID generator
@@ -430,13 +499,104 @@ class HydraAgent:
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
+        # Optional session resume — restore engine + brain state before the loop starts
+        if self.resume:
+            self._load_snapshot()
+
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
         sig.signal(sig.SIGTERM, self._handle_shutdown)
 
     def _handle_shutdown(self, signum, frame):
-        print("\n\n  [HYDRA] Shutdown signal received. Generating final report...\n")
+        print("\n\n  [HYDRA] Shutdown signal received. Cancelling open orders, flushing snapshot...\n")
         self.running = False
+        # Kill-switch: cancel any resting limit orders on the exchange.
+        # Does NOT market-close positions — the user's locked decision is
+        # that we leave position state intact on shutdown.
+        if not self.paper:
+            try:
+                result = KrakenCLI.cancel_all()
+                if "error" in result:
+                    print(f"  [HYDRA] cancel-all reported: {result.get('error')}")
+                else:
+                    print("  [HYDRA] cancel-all issued successfully.")
+            except Exception as e:
+                print(f"  [HYDRA] cancel-all failed: {e}")
+        try:
+            self._save_snapshot()
+        except Exception as e:
+            print(f"  [HYDRA] snapshot flush failed: {e}")
+
+    # ─── Session snapshot (atomic JSON; resumable across runs) ─────────────
+    def _snapshot_path(self) -> str:
+        return os.path.join(self._snapshot_dir, "hydra_session_snapshot.json")
+
+    def _save_snapshot(self):
+        """Atomic snapshot of all engines, coordinator regime history, brain
+        memory, and trade log. Writes to .tmp then os.replace()s into place."""
+        data = {
+            "version": 2,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": self.mode,
+            "paper": self.paper,
+            "pairs": self.pairs,
+            "engines": {
+                pair: engine.snapshot_runtime() for pair, engine in self.engines.items()
+            },
+            "coordinator": {
+                "regime_history": self.coordinator.regime_history,
+                "filters": {
+                    pair: {
+                        "probs": list(f.probs),
+                        "persistence": f.persistence,
+                        "observations": f.observations,
+                    }
+                    for pair, f in self.coordinator.filters.items()
+                },
+            },
+            "trade_log": self.trade_log[-200:],
+            "brain_memory": (
+                self.brain.memory.to_dict()
+                if self.brain and hasattr(self.brain, "memory")
+                else None
+            ),
+        }
+        path = self._snapshot_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, path)
+
+    def _load_snapshot(self):
+        """Restore engines, coordinator, and brain memory from snapshot."""
+        path = self._snapshot_path()
+        if not os.path.exists(path):
+            print(f"  [RESUME] No snapshot found at {path} — starting fresh")
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"  [RESUME] Snapshot load failed: {e}")
+            return
+        print(f"  [RESUME] Loaded snapshot from {data.get('timestamp', '?')}")
+        engines_data = data.get("engines") or {}
+        for pair, snap in engines_data.items():
+            if pair in self.engines:
+                self.engines[pair].restore_runtime(snap)
+        coord = data.get("coordinator") or {}
+        rh = coord.get("regime_history") or {}
+        for pair, hist in rh.items():
+            self.coordinator.regime_history[pair] = list(hist)
+            if pair in self.coordinator.filters and len(hist) >= 2:
+                self.coordinator.filters[pair].seed_transition_matrix(hist)
+        self.trade_log = list(data.get("trade_log") or [])
+        if self.brain and data.get("brain_memory") and BrainMemory is not None:
+            try:
+                self.brain.memory = BrainMemory.from_dict(data["brain_memory"])
+                print("  [RESUME] Brain memory restored.")
+            except Exception as e:
+                print(f"  [RESUME] Brain memory restore failed: {e}")
 
     def run(self):
         """Main agent loop."""
@@ -588,15 +748,23 @@ class HydraAgent:
                               f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
 
             # ── Total modifier cap ──────────────────────────────────
-            # External modifiers (cross-pair + order book) can reduce confidence without limit
+            # External modifiers (order book) can reduce confidence without limit
             # but cannot boost it more than +0.15 above the engine's original signal.
-            # This prevents stacking modifiers from inflating weak signals into high-conviction
-            # trades that get oversized via Kelly criterion.
+            # The new joint-signal coordinator (Hamilton filter + QAOA-inspired
+            # Ising Hamiltonian) is allowed to emit confidences from scratch —
+            # its decisions are principled and covariance-weighted, so clipping
+            # would defeat the purpose. Those overrides are flagged via
+            # `cross_pair_override` and bypass the cap.
             MAX_TOTAL_MODIFIER_BOOST = 0.15
             for pair in self.pairs:
                 state = engine_states.get(pair)
                 orig = original_signals.get(pair)
                 if not state or not orig:
+                    continue
+                if state.get("cross_pair_override"):
+                    # Only enforce the lower bound for coordinator-derived overrides
+                    if state["signal"]["confidence"] < 0.0:
+                        state["signal"]["confidence"] = 0.0
                     continue
                 orig_conf = orig["confidence"]
                 if state["signal"]["confidence"] > orig_conf + MAX_TOTAL_MODIFIER_BOOST:
@@ -669,6 +837,16 @@ class HydraAgent:
                     self._execute_coordinated_swap(swap, all_states)
             self._log_regime_transitions(all_states)
 
+            # Phase 3.5: reconcile tracked open orders against exchange state
+            if not self.paper:
+                events = self.reconciler.maybe_reconcile(tick)
+                for ev in events:
+                    if ev.get("type") == "order_disappeared":
+                        print(f"  [RECONCILE] {ev['pair']} {ev['side']} {ev['txid']} "
+                              f"no longer on exchange (filled/cancelled)")
+                    elif ev.get("type") == "poll_failed":
+                        print(f"  [RECONCILE] poll failed: {ev.get('error')}")
+
             # Phase 4: Record trade outcomes for self-tuning
             for pair in self.pairs:
                 state = all_states.get(pair)
@@ -683,6 +861,13 @@ class HydraAgent:
                         params_at_entry, "SELL", outcome, trade["profit"],
                     )
                     self._completed_trades_since_update += 1
+                    # Agentic reflection: back-fill the episode's realised PnL
+                    # and update the brain's named beliefs.
+                    if self.brain and hasattr(self.brain, "reflect"):
+                        try:
+                            self.brain.reflect(pair, trade)
+                        except Exception as e:
+                            print(f"  [BRAIN] reflect failed for {pair}: {e}")
 
             # Run tuner updates every 50 completed trades
             if self._completed_trades_since_update >= 50:
@@ -700,6 +885,13 @@ class HydraAgent:
                         json.dump(self.trade_log, f, indent=2)
                 except Exception:
                     pass
+
+            # Atomic session snapshot (engine state + brain memory + coordinator)
+            # Every tick; cheap because it's ~tens of KB of JSON.
+            try:
+                self._save_snapshot()
+            except Exception as e:
+                print(f"  [SNAPSHOT] Save failed: {e}")
 
             # Sleep until next tick
             next_tick_time = self.start_time + tick * self.interval
@@ -897,6 +1089,9 @@ class HydraAgent:
             txid = result.get("txid", result.get("result", {}).get("txid", "unknown"))
             print(f"  [TRADE] SUCCESS: {action.upper()} {amount:.8f} {pair} | txid: {txid}")
             status = "EXECUTED"
+            # Register with reconciler so we can detect disappearance later.
+            if isinstance(txid, str) and txid and txid != "unknown":
+                self.reconciler.register(txid, pair, action, amount)
 
         self.trade_log.append({
             "time": datetime.now(timezone.utc).isoformat(),
@@ -1344,6 +1539,8 @@ def main():
                         help="Use paper trading (no API keys needed, no real money)")
     parser.add_argument("--reset-params", action="store_true",
                         help="Reset learned tuning parameters to defaults")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume session from hydra_session_snapshot.json (engines + brain memory)")
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
@@ -1382,6 +1579,7 @@ def main():
         paper=args.paper,
         candle_interval=candle_interval,
         reset_params=args.reset_params,
+        resume=args.resume,
     )
     agent.run()
 
