@@ -775,6 +775,29 @@ class RegimeSwitchingFilter:
     def probs_dict(self) -> Dict[str, float]:
         return {r: round(self.probs[i], 6) for i, r in enumerate(self.REGIMES)}
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialisable snapshot of the filter's full state."""
+        return {
+            "probs": list(self.probs),
+            "persistence": self.persistence,
+            "observations": self.observations,
+            "P": [list(row) for row in self.P],
+        }
+
+    def load_dict(self, data: Dict[str, Any]):
+        """Restore state from a `to_dict` payload. Re-normalises probs defensively."""
+        if not data:
+            return
+        probs = data.get("probs")
+        if isinstance(probs, list) and len(probs) == 4:
+            total = sum(probs) or 1.0
+            self.probs = [float(p) / total for p in probs]
+        self.persistence = float(data.get("persistence", self.persistence))
+        self.observations = int(data.get("observations", self.observations))
+        P = data.get("P")
+        if isinstance(P, list) and len(P) == 4 and all(len(row) == 4 for row in P):
+            self.P = [[float(x) for x in row] for row in P]
+
 
 # ═══════════════════════════════════════════════════════════════
 # JOINT-SIGNAL SOLVER (QAOA-inspired Ising cost Hamiltonian)
@@ -881,6 +904,25 @@ class JointSignalSolver:
         return series
 
     @staticmethod
+    def _build_override(
+        action_type: str,
+        joint_action: str,
+        confidence: float,
+        reason: str,
+        e_best: float,
+        gap: float,
+    ) -> Dict[str, Any]:
+        """Shared payload constructor for OVERRIDE/ADJUST emissions."""
+        return {
+            "action": action_type,
+            "signal": joint_action,
+            "confidence_adj": confidence,
+            "reason": reason,
+            "joint_energy": round(e_best, 6),
+            "energy_gap": round(gap, 6),
+        }
+
+    @staticmethod
     def _energy(s: List[int], h: List[float], cov: List[List[float]], gamma: float) -> float:
         n = len(s)
         lin = -sum(h[i] * s[i] for i in range(n))
@@ -951,23 +993,13 @@ class JointSignalSolver:
             # Emit an override only when (a) joint action differs from current,
             # or (b) the blended confidence meaningfully updates current.
             if joint_action != current_action:
-                overrides[pair] = {
-                    "action": "OVERRIDE",
-                    "signal": joint_action,
-                    "confidence_adj": blended,
-                    "reason": reason,
-                    "joint_energy": round(e_best, 6),
-                    "energy_gap": round(gap, 6),
-                }
+                overrides[pair] = self._build_override(
+                    "OVERRIDE", joint_action, blended, reason, e_best, gap,
+                )
             elif joint_action != "HOLD" and abs(blended - current_conf) > 0.05:
-                overrides[pair] = {
-                    "action": "ADJUST",
-                    "signal": joint_action,
-                    "confidence_adj": blended,
-                    "reason": reason,
-                    "joint_energy": round(e_best, 6),
-                    "energy_gap": round(gap, 6),
-                }
+                overrides[pair] = self._build_override(
+                    "ADJUST", joint_action, blended, reason, e_best, gap,
+                )
 
         # Coordinated swap detection: pair `i` goes short while pair `j` goes long
         # AND both are in the SOL/{USDC,XBT} triangle with an existing SOL position.

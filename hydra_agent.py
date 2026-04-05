@@ -410,6 +410,10 @@ class HydraAgent:
     CROSS_PAIR = "SOL/XBT"          # Opportunistic regime-driven swaps
     BTC_PAIR = "XBT/USDC"           # For BTC/USDC when we can afford it
 
+    # Resilience
+    SNAPSHOT_EVERY_N_TICKS = 12     # ~1h at 5-min candles; --resume still accurate
+    TRADE_LOG_CAP = 2000            # Bound in-memory trade log to avoid unbounded growth
+
     def __init__(
         self,
         pairs: List[str],
@@ -546,11 +550,7 @@ class HydraAgent:
             "coordinator": {
                 "regime_history": self.coordinator.regime_history,
                 "filters": {
-                    pair: {
-                        "probs": list(f.probs),
-                        "persistence": f.persistence,
-                        "observations": f.observations,
-                    }
+                    pair: f.to_dict()
                     for pair, f in self.coordinator.filters.items()
                 },
             },
@@ -590,18 +590,12 @@ class HydraAgent:
             self.coordinator.regime_history[pair] = list(hist)
             if pair in self.coordinator.filters and len(hist) >= 2:
                 self.coordinator.filters[pair].seed_transition_matrix(hist)
-        # Restore the Hamilton filter posterior itself (the whole point of
-        # persisting it) — not just the empirical transition matrix seed.
-        saved_filters = coord.get("filters") or {}
-        for pair, fstate in saved_filters.items():
+        # Restore the Hamilton filter posterior itself — not just the
+        # empirical transition matrix seed — via the filter's own load_dict.
+        for pair, fstate in (coord.get("filters") or {}).items():
             f = self.coordinator.filters.get(pair)
-            if not f:
-                continue
-            probs = fstate.get("probs")
-            if isinstance(probs, list) and len(probs) == 4:
-                total = sum(probs) or 1.0
-                f.probs = [float(p) / total for p in probs]
-            f.observations = int(fstate.get("observations", f.observations))
+            if f:
+                f.load_dict(fstate)
         self.trade_log = list(data.get("trade_log") or [])
         if self.brain and data.get("brain_memory") and BrainMemory is not None:
             try:
@@ -898,12 +892,21 @@ class HydraAgent:
                 except Exception:
                     pass
 
-            # Atomic session snapshot (engine state + brain memory + coordinator)
-            # Every tick; cheap because it's ~tens of KB of JSON.
-            try:
-                self._save_snapshot()
-            except Exception as e:
-                print(f"  [SNAPSHOT] Save failed: {e}")
+            # Bound the in-memory trade log so a long-running session cannot
+            # grow it without limit. Oldest entries are dropped; the last
+            # `TRADE_LOG_CAP` are retained and persisted via the snapshot.
+            if len(self.trade_log) > self.TRADE_LOG_CAP:
+                self.trade_log = self.trade_log[-self.TRADE_LOG_CAP:]
+
+            # Atomic session snapshot (engines + brain memory + coordinator).
+            # Throttled to once per SNAPSHOT_EVERY_N_TICKS so we don't write
+            # ~20 KB of JSON every tick. `_handle_shutdown` still flushes a
+            # final snapshot on SIGINT/SIGTERM so --resume remains accurate.
+            if tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
+                try:
+                    self._save_snapshot()
+                except Exception as e:
+                    print(f"  [SNAPSHOT] Save failed: {e}")
 
             # Sleep until next tick
             next_tick_time = self.start_time + tick * self.interval
