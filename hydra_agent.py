@@ -590,6 +590,18 @@ class HydraAgent:
             self.coordinator.regime_history[pair] = list(hist)
             if pair in self.coordinator.filters and len(hist) >= 2:
                 self.coordinator.filters[pair].seed_transition_matrix(hist)
+        # Restore the Hamilton filter posterior itself (the whole point of
+        # persisting it) — not just the empirical transition matrix seed.
+        saved_filters = coord.get("filters") or {}
+        for pair, fstate in saved_filters.items():
+            f = self.coordinator.filters.get(pair)
+            if not f:
+                continue
+            probs = fstate.get("probs")
+            if isinstance(probs, list) and len(probs) == 4:
+                total = sum(probs) or 1.0
+                f.probs = [float(p) / total for p in probs]
+            f.observations = int(fstate.get("observations", f.observations))
         self.trade_log = list(data.get("trade_log") or [])
         if self.brain and data.get("brain_memory") and BrainMemory is not None:
             try:
@@ -988,6 +1000,12 @@ class HydraAgent:
             elif decision.action == "ADJUST":
                 state["signal"]["confidence"] = decision.confidence_adj
                 state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
+            elif decision.action == "PLAN_STEP":
+                # Agentic plan step fired — apply its action/confidence just
+                # like an OVERRIDE so execute_signal() acts on the plan's intent.
+                state["signal"]["action"] = decision.final_signal
+                state["signal"]["confidence"] = decision.confidence_adj
+                state["signal"]["reason"] = f"[BRAIN PLAN] {decision.combined_summary}"
             # CONFIRM leaves signal unchanged, just adds reasoning
         except Exception as e:
             state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
