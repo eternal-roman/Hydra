@@ -19,28 +19,36 @@ HYDRA detects **what the market is doing right now** and selects the optimal str
 | **Trending Up** | EMA20 > EMA50 x 1.005, price > EMA20 | **Momentum** | Ride the wave — MACD histogram > 0, RSI 30-70, price > BB middle |
 | **Trending Down** | EMA20 < EMA50 x 0.995, price < EMA20 | **Defensive** | Preserve capital — only buy extreme oversold (RSI < 20), sell rallies |
 | **Ranging** | No clear trend direction | **Mean Reversion** | Buy at lower Bollinger Band (RSI < 35), sell at upper (RSI > 65) |
-| **Volatile** | ATR > 4% or BB width > 8% | **Grid** | Split orders across 5 Bollinger Band zones |
+| **Volatile** | ATR > 4% or BB width > 8% (1-min candles) | **Grid** | Split orders across 5 Bollinger Band zones |
 
 Volatility is checked first — it overrides trend detection. This prevents false trend signals during chaotic markets.
+
+> **Note on thresholds:** The values above are the engine defaults (tuned for 1-minute candles). When running with `--candle-interval 5` (the default) or higher, `hydra_agent.py` automatically scales the volatility thresholds down to `ATR > 3%` and `BB width > 6%` to account for the smoother price action over longer periods. Self-tuning (see `hydra_tuner.py`) may further shift thresholds per pair based on realised trade outcomes.
 
 ## Architecture
 
 ```
-HYDRA Agent Loop (30s tick)
-===========================
+HYDRA Agent Loop (auto-synced to candle close; ~5 min with default 5-min candles)
+=================================================================================
 
   Kraken CLI OHLC ──> Regime Detector ──> Strategy Selector
-                                          TREND_UP  → MOMENTUM
-                                          TREND_DN  → DEFENSIVE
-  Signal Generator <── Indicator Engine   RANGING   → MEAN_REV
-       │                                  VOLATILE  → GRID
+                      (+ Hamilton filter)  TREND_UP  → MOMENTUM
+                                           TREND_DN  → DEFENSIVE
+  Signal Generator <── Indicator Engine    RANGING   → MEAN_REV
+       │                                   VOLATILE  → GRID
+       │
+       ├── Order Book Analyzer   (confidence modifier ±0.07)
+       ├── Cross-Pair Coordinator (Hamilton + QAOA joint-signal solver)
+       ├── AI Brain               (Claude Analyst → Risk Manager → Grok Strategist)
        │
   Position Sizer ──> Trade Executor ──> kraken order buy
-  (Quarter-Kelly)                        --type limit
+  (Quarter/Half-Kelly)                   --type limit
                                          --oflags post
        │
   WebSocket ──> React Dashboard (localhost:3000)
 ```
+
+The tick interval is auto-derived from `--candle-interval` (candle period + 5s buffer, so ~305s for 5-min candles) unless `--interval` overrides it.
 
 ## Trading Pairs
 
@@ -194,6 +202,8 @@ start_all.bat
 --ws-port          WebSocket port for dashboard (default: 8765)
 --mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
 --paper            Use paper trading — no API keys needed, no real money
+--reset-params     Wipe all hydra_params_*.json self-tuning files back to defaults
+--resume           Restore engine/coordinator/brain state from hydra_session_snapshot.json
 ```
 
 ### Competition Mode
@@ -252,9 +262,11 @@ hydra/
 ├── AUDIT.md                # Technical audit and test results
 ├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
-├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
-├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
-├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket
+├── hydra_engine.py         # Core: indicators, regimes, signals, sizing, Hamilton filter, QAOA solver, order book, cross-pair
+├── hydra_brain.py          # Agentic AI reasoning: Claude Analyst + Risk Manager + Grok Strategist, memory, goals, plans
+├── hydra_tuner.py          # Bayesian self-tuning parameter tracker (per-pair persistence)
+├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, order reconciler, --resume
+├── tests/                  # 213 unit tests across 6 suites (engine, cross_pair, order_book, tuner, balance, brain_agent)
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
 ├── start_dashboard.bat     # Dashboard with auto-restart
@@ -300,19 +312,20 @@ HYDRA tracks and reports per pair:
 
 ## Testing & Audit
 
-See **[AUDIT.md](AUDIT.md)** for the full technical audit report covering:
+See **[AUDIT.md](AUDIT.md)** for the original v1.0 technical audit covering indicators, regime detection, signal generation, position sizing, order execution, WebSocket broadcast, dashboard components, and infrastructure (10 bugs fixed, 5 known limitations). Subsequent releases added further features and test coverage — see [CHANGELOG.md](CHANGELOG.md).
 
-- All 5 indicator implementations (EMA, RSI, ATR, BB, MACD) — correctness verified
-- Regime detection logic and priority ordering
-- Signal generation for all 4 strategies against specification
-- Position sizing formula and hard limits
-- Order execution (limit post-only, validation, rate limiting)
-- WebSocket broadcast and dashboard component verification
-- Infrastructure (auto-restart, startup, pair mapping)
-- 10 bugs found and fixed during audit
-- 5 known limitations documented
+The repository ships **213 unit tests** across 6 suites. Run any or all of them (no API keys needed):
 
-To run the engine's built-in synthetic test (no API keys needed):
+```bash
+python tests/test_engine.py        # 67 engine tests (indicators, regimes, signals, sizing)
+python tests/test_cross_pair.py    # 23 cross-pair coordinator tests (Hamilton + QAOA solver)
+python tests/test_order_book.py    # 38 order book analyzer tests
+python tests/test_tuner.py         # 26 self-tuning parameter tests
+python tests/test_balance.py       # 38 balance & asset conversion tests
+python tests/test_brain_agent.py   # 21 agentic brain tests (memory, goals, plans, reflect)
+```
+
+To run the engine's built-in synthetic demo:
 
 ```bash
 python hydra_engine.py
