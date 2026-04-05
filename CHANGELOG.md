@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Comprehensive codebase audits** — three review passes landed 12 bug fixes total
+  across win/loss tallying (partial sells now accumulate realized PnL before
+  tally), defensive BUY gating, PLAN_STEP brain decisions correctly applied,
+  Hamilton posterior restoration on `--resume`, dashboard interval variable
+  reference, stale brain decision cleanup, hardcoded dashboard interval, and
+  several smaller crash risks.
+- **Refactor pass** — filter serialisation encapsulated, session snapshot
+  writes throttled, trade log bounded, joint-signal solver emission deduped.
+
+### Tests
+- `tests/test_balance.py` — 38 balance & asset conversion tests added alongside
+  the live-exchange balance feature (see 2.3.2).
+- Current suite totals **213 tests across 6 files**: 67 engine, 23 cross-pair,
+  38 order book, 26 tuner, 38 balance, 21 brain agent.
+
+---
+
+## [2.3.2] — 2026-04-03
+
+### Added
+- **Live exchange balance** — dashboard and `HydraEngine` initialisation now
+  pull real balances from `kraken balance` on startup instead of relying solely
+  on the `--balance` reference value. The CLI flag still controls per-pair
+  reference sizing, but displayed equity and portfolio valuation reflect the
+  actual account. 38 new balance/asset-conversion tests (`tests/test_balance.py`).
+
+---
+
 ## [2.4.0] — 2026-04-05
 
 ### Added
@@ -122,7 +153,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `KrakenCLI.depth()` — fetches order book depth (top 10 levels per side) via `kraken depth` command.
 - Order book data injected into engine state as `order_book` key, visible to AI brain for reasoning.
 - Agent Phase 1.75: fetches depth for each pair between cross-pair coordination and brain deliberation, applies confidence modifier, logs imbalance/spread/wall status.
-- 31 new order book tests (`tests/test_order_book.py`): parsing (direct + nested format), imbalance ratios, spread calculation, wall detection, BUY/SELL/HOLD modifier logic, edge cases (zero volume, malformed entries, small prices). Total: 120 tests.
+- 31 new order book tests (`tests/test_order_book.py`): parsing (direct + nested format), imbalance ratios, spread calculation, wall detection, BUY/SELL/HOLD modifier logic, edge cases (zero volume, malformed entries, small prices). Total: 120 tests. *(Suite has since grown to 38 tests with later edge-case additions.)*
 
 ---
 

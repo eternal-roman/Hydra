@@ -93,15 +93,19 @@ Each strategy produces a signal: **BUY**, **SELL**, or **HOLD** with a confidenc
 ### Phase 4: Size Position (Quarter-Kelly)
 
 ```
-kelly_fraction = max(0, (confidence * 2 - 1)) * 0.25
-risk_amount = balance * 0.02  # 2% risk per trade
-position_size = (risk_amount * kelly_fraction) / current_price
+edge          = max(0, confidence * 2 - 1)       # 0 at 50% conf, 1 at 100%
+kelly_fraction = edge * 0.25                     # quarter-Kelly (conservative mode)
+position_value = kelly_fraction * balance        # USD notional
+position_size  = position_value / current_price  # base-asset quantity
 ```
 
-**Hard limits:**
-- Never allocate more than 30% of capital to a single trade
-- Minimum trade size: $50
-- Confidence threshold to execute: 0.55
+Competition mode uses `kelly_fraction = edge * 0.50` (half-Kelly) instead.
+
+**Hard limits (conservative / competition):**
+- Max position per trade: **30% / 40%** of balance
+- Min confidence to execute: **0.55 / 0.50**
+- Min trade value: **$0.50** (Kraken `costmin`)
+- Per-asset min order sizes: SOL 0.02, XBT 0.00005, ETH 0.001
 
 ### Phase 5: Execute Trade
 
@@ -159,8 +163,10 @@ LOOP every {interval}:
          a. COMPUTE position size via quarter-Kelly
          b. CHECK balance: kraken paper balance -o json
          c. VALIDATE trade size against limits
-         d. EXECUTE: kraken paper {buy|sell} {asset} --type market --volume {size}
-         e. LOG trade with timestamp, price, reason, confidence, strategy
+         d. FETCH ticker: kraken ticker {asset} -o json  (bid/ask)
+         e. VALIDATE: kraken order {buy|sell} {asset} {size} --type limit --price {bid|ask} --oflags post --validate
+         f. EXECUTE:  kraken order {buy|sell} {asset} {size} --type limit --price {bid|ask} --oflags post --yes
+         g. LOG trade with timestamp, actual limit price, reason, confidence, strategy
     8. LOG current state: regime, strategy, signal, position, equity
 
   COMPUTE portfolio metrics:
@@ -185,7 +191,7 @@ END LOOP
 2. **Dead Man's Switch**: Always run `kraken order cancel-after 60` before live orders
 3. **Position Limits**: No single position > 30% of portfolio
 4. **Trade Threshold**: Only execute when confidence ≥ 0.55
-5. **Minimum Size**: Skip trades below $50
+5. **Minimum Size**: Skip trades below $0.50 (Kraken `costmin`)
 6. **Regime Warmup**: Require 50+ candles before generating signals
 7. **Rate Limiting**: Respect Kraken API limits — minimum 2s between requests
 
@@ -228,11 +234,20 @@ END LOOP
 hydra/
 ├── SKILL.md              # This file — agent instructions
 ├── README.md             # Project overview and setup guide
-├── AUDIT.md              # Technical audit and test results
-├── hydra_engine.py       # Strategy engine (indicators, regime detection, signals)
-├── hydra_agent.py        # Agent loop (Kraken CLI, WebSocket, trade execution)
+├── CHANGELOG.md          # Version history
+├── AUDIT.md              # v1.0 technical audit (historical snapshot)
+├── CLAUDE.md             # Agent instructions for Claude Code
+├── hydra_engine.py       # Strategy engine: indicators, regimes, signals, sizing,
+│                         # Hamilton regime filter, QAOA joint-signal solver,
+│                         # order book analyzer, cross-pair coordinator
+├── hydra_brain.py        # Agentic AI: Claude Analyst + Risk Manager + Grok Strategist,
+│                         # BrainMemory, GoalState, BrainPlan, reflect() loop
+├── hydra_tuner.py        # Bayesian self-tuning parameter tracker (per-pair)
+├── hydra_agent.py        # Agent loop: Kraken CLI, WebSocket, trade execution,
+│                         # order reconciler, session snapshot + --resume
+├── tests/                # 213 unit tests across 6 suites
 └── dashboard/            # React + Vite live dashboard
-    └── src/App.jsx       # Dashboard UI (single-file)
+    └── src/App.jsx       # Dashboard UI (single-file, inline styles)
 ```
 
 ## License

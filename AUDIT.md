@@ -1,10 +1,18 @@
 # HYDRA Technical Audit Report
 
 **Date:** 2026-04-01
-**Scope:** Full end-to-end audit of all components — engine, agent, dashboard, infrastructure
+**Scope:** Full end-to-end audit of the v1.0 components — engine, agent, dashboard, infrastructure
 **Status:** All critical issues resolved. System verified operational.
 
-> **Note:** Line numbers reference the codebase as of this audit date and may drift with future changes.
+> **Historical snapshot — this audit documents the state of the v1.0 codebase.**
+> Line numbers reference the v1.0 code and have drifted significantly. Since this
+> audit, HYDRA has added the AI brain (v2.0), cross-pair coordinator + order book
+> + self-tuning (v2.1–v2.3), live exchange balance (v2.3.2), and the Hamilton
+> regime filter + QAOA joint-signal solver + agentic brain loop (v2.4.0). The
+> test suite has grown from 49 tests to **213 tests across 6 files**. See
+> [CHANGELOG.md](CHANGELOG.md) for the full history. Claims below (test counts,
+> "Annualization assumes 1-minute candles", default tick interval of 30s) were
+> accurate for v1.0 only and have been superseded.
 
 ---
 
