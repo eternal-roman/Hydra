@@ -333,6 +333,58 @@ class DashboardBroadcaster:
 
 
 # ═══════════════════════════════════════════════════════════════
+# ORDER RECONCILER
+# ═══════════════════════════════════════════════════════════════
+
+class OrderReconciler:
+    """Polls Kraken open-orders and detects orders that disappeared from the
+    exchange (filled, cancelled by dead-man's-switch, rejected).  Prevents
+    silent divergence between the agent's local order registry and reality."""
+
+    def __init__(self, poll_every_ticks: int = 5):
+        self.poll_every_ticks = poll_every_ticks
+        self.known_orders: Dict[str, dict] = {}  # txid → {pair, side, amount, registered_at}
+
+    def register(self, txid: str, pair: str, side: str, amount: float):
+        """Track a newly placed order by its Kraken txid."""
+        if txid and txid != "unknown":
+            self.known_orders[txid] = {
+                "pair": pair, "side": side, "amount": amount,
+                "registered_at": time.time(),
+            }
+
+    def maybe_reconcile(self, tick: int) -> List[dict]:
+        """Poll open-orders every N ticks. Returns events for disappeared orders."""
+        if tick % self.poll_every_ticks != 0 or not self.known_orders:
+            return []
+        try:
+            result = KrakenCLI.open_orders()
+            if isinstance(result, dict) and "error" in result:
+                return [{"type": "poll_failed", "error": result["error"]}]
+            # Extract live txids from Kraken response
+            live_txids: set = set()
+            if isinstance(result, dict):
+                opens = result.get("open", result.get("result", result))
+                if isinstance(opens, dict):
+                    live_txids = set(opens.keys())
+            # Detect disappeared orders
+            events: List[dict] = []
+            for txid in list(self.known_orders.keys()):
+                if txid not in live_txids:
+                    info = self.known_orders.pop(txid)
+                    events.append({
+                        "type": "order_disappeared",
+                        "txid": txid,
+                        "pair": info["pair"],
+                        "side": info["side"],
+                        "amount": info["amount"],
+                    })
+            return events
+        except Exception as e:
+            return [{"type": "poll_failed", "error": str(e)}]
+
+
+# ═══════════════════════════════════════════════════════════════
 # HYDRA AGENT (Main Loop)
 # ═══════════════════════════════════════════════════════════════
 
@@ -346,6 +398,8 @@ class HydraAgent:
     PRIMARY_PAIR = "SOL/USDC"       # Main trading pair
     CROSS_PAIR = "SOL/XBT"          # Opportunistic regime-driven swaps
     BTC_PAIR = "XBT/USDC"           # For BTC/USDC when we can afford it
+    TRADE_LOG_CAP = 2000            # Bound in-memory trade log
+    SNAPSHOT_EVERY_N_TICKS = 12     # ~1h at 5-min candles
 
     def __init__(
         self,
@@ -358,6 +412,7 @@ class HydraAgent:
         paper: bool = False,
         candle_interval: int = 5,
         reset_params: bool = False,
+        resume: bool = False,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
@@ -369,6 +424,7 @@ class HydraAgent:
         self.running = True
         self.start_time = None
         self.trade_log = []
+        self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
 
@@ -427,16 +483,87 @@ class HydraAgent:
         self.coordinator = CrossPairCoordinator(pairs)
         self._swap_counter = 0  # Monotonic swap ID generator
 
+        # Order reconciler — detects filled/cancelled orders (live mode only)
+        self.reconciler = OrderReconciler(poll_every_ticks=5) if not paper else None
+
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
+
+        # Restore from snapshot if requested
+        if resume:
+            self._load_snapshot()
 
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
         sig.signal(sig.SIGTERM, self._handle_shutdown)
 
     def _handle_shutdown(self, signum, frame):
-        print("\n\n  [HYDRA] Shutdown signal received. Generating final report...\n")
+        print("\n\n  [HYDRA] Shutdown signal received. Cancelling orders, flushing snapshot...\n")
         self.running = False
+        # Cancel all resting limit orders on the exchange (live mode only)
+        if not self.paper:
+            try:
+                result = KrakenCLI.cancel_all()
+                if "error" in result:
+                    print(f"  [HYDRA] Cancel-all error: {result['error']}")
+                else:
+                    print("  [HYDRA] All open orders cancelled.")
+            except Exception as e:
+                print(f"  [HYDRA] Cancel-all failed: {e}")
+        # Flush session snapshot for --resume
+        try:
+            self._save_snapshot()
+        except Exception as e:
+            print(f"  [HYDRA] Snapshot flush failed: {e}")
+
+    # ─── Session snapshot (atomic JSON; resumable across runs) ─────────────
+
+    def _snapshot_path(self) -> str:
+        return os.path.join(self._snapshot_dir, "hydra_session_snapshot.json")
+
+    def _save_snapshot(self):
+        """Atomically save session state to disk (.tmp → os.replace)."""
+        snapshot = {
+            "version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": self.mode,
+            "paper": self.paper,
+            "pairs": self.pairs,
+            "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
+            "coordinator_regime_history": self.coordinator.regime_history,
+            "trade_log": self.trade_log[-200:],
+        }
+        path = self._snapshot_path()
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(snapshot, f, default=str)
+            os.replace(tmp, path)
+        except Exception as e:
+            print(f"  [SNAPSHOT] Save failed: {e}")
+
+    def _load_snapshot(self):
+        """Restore engine + coordinator state from snapshot file."""
+        path = self._snapshot_path()
+        if not os.path.exists(path):
+            print("  [SNAPSHOT] No snapshot file found, starting fresh.")
+            return
+        try:
+            with open(path, "r") as f:
+                snapshot = json.load(f)
+            if snapshot.get("version") != 1:
+                print(f"  [SNAPSHOT] Unknown version {snapshot.get('version')}, skipping.")
+                return
+            for pair, eng_snap in snapshot.get("engines", {}).items():
+                if pair in self.engines:
+                    self.engines[pair].restore_runtime(eng_snap)
+            for pair, history in snapshot.get("coordinator_regime_history", {}).items():
+                if pair in self.coordinator.regime_history:
+                    self.coordinator.regime_history[pair] = list(history)
+            self.trade_log = list(snapshot.get("trade_log", []))
+            print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
+        except Exception as e:
+            print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
 
     def run(self):
         """Main agent loop."""
@@ -697,6 +824,15 @@ class HydraAgent:
             dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
             self.broadcaster.broadcast(dashboard_state)
 
+            # Reconcile tracked orders against exchange state (live mode only)
+            if self.reconciler:
+                for ev in self.reconciler.maybe_reconcile(tick):
+                    if ev["type"] == "order_disappeared":
+                        print(f"  [RECON] {ev['pair']} {ev['side'].upper()} {ev['txid']} "
+                              f"no longer on exchange (filled/cancelled)")
+                    elif ev["type"] == "poll_failed":
+                        print(f"  [RECON] Poll failed: {ev.get('error')}")
+
             # Rolling save — persist trade log every tick so no data is lost on crash
             if self.trade_log:
                 rolling_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_trades_live.json")
@@ -705,6 +841,14 @@ class HydraAgent:
                         json.dump(self.trade_log, f, indent=2)
                 except Exception:
                     pass
+
+            # Cap trade log to prevent unbounded memory growth
+            if len(self.trade_log) > self.TRADE_LOG_CAP:
+                self.trade_log = self.trade_log[-self.TRADE_LOG_CAP:]
+
+            # Periodic session snapshot for --resume
+            if tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
+                self._save_snapshot()
 
             # Sleep until next tick
             next_tick_time = self.start_time + tick * self.interval
@@ -912,6 +1056,8 @@ class HydraAgent:
             txid = result.get("txid", result.get("result", {}).get("txid", "unknown"))
             print(f"  [TRADE] SUCCESS: {action.upper()} {amount:.8f} {pair} | txid: {txid}")
             status = "EXECUTED"
+            if self.reconciler:
+                self.reconciler.register(txid, pair, action, amount)
 
         self.trade_log.append({
             "time": datetime.now(timezone.utc).isoformat(),
@@ -1375,6 +1521,8 @@ def main():
                         help="Use paper trading (no API keys needed, no real money)")
     parser.add_argument("--reset-params", action="store_true",
                         help="Reset learned tuning parameters to defaults")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from last session snapshot (engines + coordinator state)")
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
@@ -1413,6 +1561,7 @@ def main():
         paper=args.paper,
         candle_interval=candle_interval,
         reset_params=args.reset_params,
+        resume=args.resume,
     )
     agent.run()
 
