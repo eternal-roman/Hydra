@@ -664,6 +664,13 @@ class OrderBookAnalyzer:
         mid = (best_bid + best_ask) / 2
         if mid > 0:
             result["spread_bps"] = round((best_ask - best_bid) / mid * 10000, 1)
+        # FUTURE_RESEARCH: Spread-as-regime-signal — wide spread_bps (e.g., > 30 bps)
+        # reliably precedes volatility spikes on Kraken's SOL and XBT pairs, especially
+        # during off-hours. This data could gate the confidence modifier entirely when
+        # spread exceeds a threshold (thin/unreliable book), or feed into RegimeDetector
+        # as a secondary VOLATILE indicator alongside ATR% and BB width. The spread_bps
+        # value is already computed and returned in the result dict — only the downstream
+        # consumption in HydraEngine.tick() needs updating.
 
         # Wall detection: any single level > 3x the average
         avg_bid = bid_volume / len(bid_volumes) if bid_volumes else 0
@@ -778,6 +785,13 @@ class CrossPairCoordinator:
 
         # Rule 3: Coordinated swap
         # SOL weakening vs USDC but strengthening vs XBT — rotate into BTC
+        # FUTURE_RESEARCH: Rule 2 / Rule 3 conflict — when both rules fire simultaneously
+        # (XBT TREND_UP + SOL TREND_DOWN + SOL/XBT TREND_UP), Rule 3's overrides["SOL/USDC"]
+        # assignment below silently overwrites Rule 2's assignment above. The safer outcome
+        # (swap/SELL) wins by accident of dict assignment order, not by design. Consider a
+        # scored arbitration: each rule emits (signal, confidence, priority_score); only
+        # the highest-score rule's override is applied. See also CLAUDE.md and
+        # _execute_coordinated_swap() in hydra_agent.py for the execution-side annotation.
         if sol_regime == "TREND_DOWN" and sol_xbt_regime == "TREND_UP":
             sol_pos = 0.0
             if sol_usdc and sol_usdc.get("position"):

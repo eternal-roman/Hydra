@@ -164,6 +164,12 @@ function ConnectionStatus({ connected, tick }) {
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
+  // FUTURE_RESEARCH: Per-pair equity history — currently only aggregate balance is tracked
+  // in `history` (total_usd per tick). Individual pair equity curves would expose divergences
+  // (e.g., SOL/USDC losing while XBT/USDC gains). Implementation: replace `history` with a
+  // { [pair]: number[] } map, populate from state.pairs[pair].portfolio.equity in the
+  // ws.onmessage handler, and render a MiniChart per pair panel in addition to the aggregate
+  // balance chart. This would make per-pair drawdown instantly visible on the dashboard.
   const [history, setHistory] = useState([]);
   const [tradeLog, setTradeLog] = useState([]);
   const wsRef = useRef(null);
@@ -332,6 +338,13 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* FUTURE_RESEARCH: Order book panel — ps.order_book is populated by
+                        the backend every tick (bid_volume, ask_volume, imbalance_ratio,
+                        spread_bps, bid_wall, ask_wall, confidence_modifier) but never
+                        rendered here. A compact stacked bar showing bid vs ask volume
+                        pressure + spread_bps would make the order book confidence modifier
+                        visible. Suggested placement: between the regime badge and Indicators
+                        row. Example display: [████████░░░] 1.8× bid (+0.04 conf) 12bps */}
                     {/* Indicators */}
                     {ind.rsi !== undefined && (
                       <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
