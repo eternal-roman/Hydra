@@ -488,14 +488,19 @@ SIZING_COMPETITION = {
 
 
 class PositionSizer:
-    MIN_TRADE_VALUE = 0.50    # Minimum $0.50 trade (Kraken costmin)
-
-    # Kraken minimum order sizes per base asset
+    # Kraken minimum order sizes per base asset (ordermin)
     MIN_ORDER_SIZE = {
         "SOL": 0.02,
         "XBT": 0.00005,
         "BTC": 0.00005,
         "ETH": 0.001,
+    }
+
+    # Kraken minimum order cost per quote currency (costmin)
+    MIN_COST = {
+        "USDC": 0.5,
+        "USD": 0.5,
+        "XBT": 0.00002,
     }
 
     def __init__(self, kelly_multiplier: float = 0.25,
@@ -508,7 +513,11 @@ class PositionSizer:
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using Kelly criterion."""
-        if confidence < self.min_confidence or balance < self.MIN_TRADE_VALUE or price <= 0:
+        # Pair-aware costmin: use quote currency's minimum (e.g. 0.5 USDC, 0.00002 XBT)
+        quote = asset.split("/")[1] if "/" in asset else "USDC"
+        costmin = self.MIN_COST.get(quote, 0.5)
+
+        if confidence < self.min_confidence or balance < costmin or price <= 0:
             return 0.0
 
         # Kelly edge estimate scaled by multiplier
@@ -521,13 +530,13 @@ class PositionSizer:
         max_value = balance * self.max_position_pct
         position_value = min(position_value, max_value)
 
-        # Enforce minimum cost
-        if position_value < self.MIN_TRADE_VALUE:
+        # Enforce minimum cost (Kraken costmin per quote currency)
+        if position_value < costmin:
             return 0.0
 
         size = position_value / price
 
-        # Enforce Kraken minimum order sizes
+        # Enforce Kraken minimum order sizes (ordermin per base asset)
         base_asset = asset.split("/")[0] if "/" in asset else asset
         min_size = self.MIN_ORDER_SIZE.get(base_asset, 0.02)
         if size < min_size:
