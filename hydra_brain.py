@@ -517,17 +517,22 @@ Make the final call. Think carefully, then respond with JSON only."""
         """Lenient JSON parser — finds JSON in response text."""
         if not text:
             return None
+        cleaned = text.strip()
+        # Strip markdown code fences (```json ... ``` or ``` ... ```)
+        fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', cleaned, re.DOTALL)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
         try:
-            return json.loads(text.strip())
+            return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())

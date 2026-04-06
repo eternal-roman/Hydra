@@ -646,13 +646,16 @@ class HydraAgent:
                         strategy=state.get("strategy", "MOMENTUM"),
                     )
                     if trade:
+                        is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
+                        value_decimals = 2 if is_usd_pair else 8
                         state["last_trade"] = {
                             "action": trade.action,
                             "price": round(trade.price, 8),
                             "amount": round(trade.amount, 8),
-                            "value": round(trade.value, 2),
+                            "value": round(trade.value, value_decimals),
                             "reason": trade.reason,
-                            "profit": round(trade.profit, 2) if trade.profit is not None else None,
+                            "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
+                            "params_at_entry": trade.params_at_entry,
                         }
 
             # Print status and execute trades (sequential — rate limiting required)
@@ -670,14 +673,16 @@ class HydraAgent:
             self._log_regime_transitions(all_states)
 
             # Phase 4: Record trade outcomes for self-tuning
+            # Only record when a position is fully closed so the tuner learns
+            # from the total accumulated P&L, not individual partial-sell legs.
             for pair in self.pairs:
                 state = all_states.get(pair)
                 if not state or not state.get("last_trade"):
                     continue
                 trade = state["last_trade"]
-                if trade["action"] == "SELL" and trade.get("profit") is not None:
-                    engine = self.engines[pair]
-                    params_at_entry = engine.position.params_at_entry or engine.snapshot_params()
+                engine = self.engines[pair]
+                if trade["action"] == "SELL" and trade.get("profit") is not None and engine.position.size == 0:
+                    params_at_entry = trade.get("params_at_entry") or engine.snapshot_params()
                     outcome = "win" if trade["profit"] > 0 else "loss"
                     self.trackers[pair].record_trade(
                         params_at_entry, "SELL", outcome, trade["profit"],
@@ -727,12 +732,18 @@ class HydraAgent:
         if candles:
             engine.ingest_candle(candles[-1])
         else:
-            # Fallback to ticker
+            # Fallback to ticker — assign a synthetic timestamp aligned to the
+            # candle interval so the dedup logic in ingest_candle works correctly.
+            # Without this, repeated ticker-fallback candles each get a unique
+            # time.time() and silently inflate the candle history.
             ticker = KrakenCLI.ticker(pair)
             if "price" in ticker:
                 p = ticker["price"]
+                interval_secs = self.candle_interval * 60
+                aligned_ts = (int(time.time()) // interval_secs) * interval_secs
                 engine.ingest_candle({
                     "open": p, "high": p, "low": p, "close": p, "volume": 0,
+                    "timestamp": aligned_ts,
                 })
 
         # When brain is active, defer execution until after brain review
@@ -882,8 +893,12 @@ class HydraAgent:
             })
             return
 
-        # Execute
+        # Re-fetch ticker for fresh bid/ask — price may have moved during validation
         time.sleep(2)
+        fresh_ticker = KrakenCLI.ticker(pair)
+        if "error" not in fresh_ticker and "bid" in fresh_ticker:
+            limit_price = fresh_ticker["bid"] if action == "buy" else fresh_ticker["ask"]
+
         print(f"  [TRADE] Executing {action.upper()} {amount:.8f} {pair} @ {limit_price} (limit post-only)...")
         if action == "buy":
             result = KrakenCLI.order_buy(pair, amount, price=limit_price)
@@ -988,12 +1003,21 @@ class HydraAgent:
         print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} → BUY {buy_pair}")
         print(f"  [SWAP] Reason: {reason}")
 
-        # Leg 1: Sell
+        # Leg 1: Sell — update engine state first, then execute on exchange
+        sell_trade_obj = sell_engine.execute_signal(
+            action="SELL", confidence=0.85,
+            reason=f"[SWAP {swap_id}] Sell leg: {reason}",
+            strategy=sell_state.get("strategy", "MOMENTUM"),
+        )
+        if not sell_trade_obj:
+            print(f"  [SWAP] Engine rejected sell on {sell_pair}, skipping swap")
+            return
+
         sell_trade = {
             "action": "SELL",
-            "amount": sell_amount,
-            "price": sell_price,
-            "reason": f"[SWAP {swap_id}] Sell leg: {reason}",
+            "amount": sell_trade_obj.amount,
+            "price": sell_trade_obj.price,
+            "reason": sell_trade_obj.reason,
             "confidence": 0.85,
         }
         self._execute_trade(sell_pair, sell_trade)
@@ -1011,7 +1035,7 @@ class HydraAgent:
             return
 
         # Size buy based on the sell proceeds (conservative: use 80% of sell value)
-        sell_value = sell_amount * sell_price
+        sell_value = sell_trade_obj.amount * sell_trade_obj.price
         buy_value = sell_value * 0.8
         buy_amount = buy_value / buy_price
 
@@ -1021,6 +1045,13 @@ class HydraAgent:
         if buy_amount < min_size:
             print(f"  [SWAP] Buy amount {buy_amount:.8f} below minimum {min_size} for {buy_pair}, skipping buy leg")
             return
+
+        # Update buy engine state, then execute on exchange
+        buy_trade_obj = buy_engine.execute_signal(
+            action="BUY", confidence=0.85,
+            reason=f"[SWAP {swap_id}] Buy leg: {reason}",
+            strategy=buy_state.get("strategy", "MOMENTUM"),
+        )
 
         buy_trade = {
             "action": "BUY",
