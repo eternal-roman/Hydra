@@ -75,6 +75,7 @@ class Trade:
     strategy: str
     timestamp: float = field(default_factory=time.time)
     profit: Optional[float] = None
+    params_at_entry: Optional[Dict[str, float]] = None
 
 @dataclass
 class Position:
@@ -164,18 +165,27 @@ class Indicators:
 
     @staticmethod
     def atr(candles: List[Candle], period: int = 14) -> float:
-        """Average True Range."""
+        """Average True Range using Wilder's exponential smoothing."""
         if len(candles) < period + 1:
             return 0.0
-        tr_sum = 0.0
-        for i in range(len(candles) - period, len(candles)):
+        # Seed: SMA of the first `period` true ranges
+        atr_val = 0.0
+        for i in range(1, period + 1):
+            atr_val += max(
+                candles[i].high - candles[i].low,
+                abs(candles[i].high - candles[i - 1].close),
+                abs(candles[i].low - candles[i - 1].close),
+            )
+        atr_val /= period
+        # Wilder's smoothing for all remaining candles
+        for i in range(period + 1, len(candles)):
             tr = max(
                 candles[i].high - candles[i].low,
                 abs(candles[i].high - candles[i - 1].close),
                 abs(candles[i].low - candles[i - 1].close),
             )
-            tr_sum += tr
-        return tr_sum / period
+            atr_val = (atr_val * (period - 1) + tr) / period
+        return atr_val
 
     @staticmethod
     def bollinger_bands(
@@ -254,7 +264,7 @@ class RegimeDetector:
             return Regime.VOLATILE
 
         # Trend detection with tunable threshold
-        down_ratio = 2.0 - trend_ema_ratio  # mirror: 1.005 → 0.995
+        down_ratio = 1.0 / trend_ema_ratio  # multiplicative mirror: 1.005 → 0.99502
         if ema20 > ema50 * trend_ema_ratio and current > ema20:
             return Regime.TREND_UP
         if ema20 < ema50 * down_ratio and current < ema20:
@@ -936,13 +946,17 @@ class HydraEngine:
             sell_amount = self.position.size * sell_pct
             revenue = sell_amount * current_price
             profit = (current_price - self.position.avg_entry) * sell_amount
+            # Capture params before position state is cleared
+            entry_params = self.position.params_at_entry
 
             self.balance += revenue
             self.position.size -= sell_amount
             self.position.realized_pnl += profit
+            position_closed = False
             if self.position.size < 0.00001:
                 self.position.size = 0.0
                 self.position.avg_entry = 0.0
+                position_closed = True
                 # Only count as a completed trade when position is fully closed.
                 # Use accumulated realized PnL so partial sells at different
                 # confidence levels are tallied correctly (previously only the
@@ -966,7 +980,10 @@ class HydraEngine:
                 reason=signal.reason,
                 confidence=signal.confidence,
                 strategy=signal.strategy.value,
-                profit=profit,
+                # On full close, report total accumulated P&L; on partial, just this leg
+                profit=total_profit if position_closed else profit,
+                # Preserve entry params for tuner — cleared from position on close
+                params_at_entry=entry_params if position_closed else None,
             )
             self.trades.append(trade)
             return trade
@@ -1057,6 +1074,9 @@ class HydraEngine:
         """Build complete state dictionary for reporting."""
         current_price = self.prices[-1] if self.prices else 0
         equity = self.balance + (self.position.size * current_price)
+        # USD/USDC pairs report dollar values to 2 decimals; crypto pairs need full 8
+        is_usd_pair = self.asset.endswith("USDC") or self.asset.endswith("USD")
+        value_decimals = 2 if is_usd_pair else 8
         pnl_pct = ((equity - self.initial_balance) / self.initial_balance * 100) if self.initial_balance > 0 else 0
         win_rate = (self.win_count / (self.win_count + self.loss_count) * 100) if (self.win_count + self.loss_count) > 0 else 0
 
@@ -1089,14 +1109,14 @@ class HydraEngine:
             "position": {
                 "size": round(self.position.size, 8),
                 "avg_entry": round(self.position.avg_entry, 8),
-                "unrealized_pnl": round(self.position.unrealized_pnl, 2),
+                "unrealized_pnl": round(self.position.unrealized_pnl, value_decimals),
             },
             "portfolio": {
-                "balance": round(self.balance, 2),
-                "equity": round(equity, 2),
+                "balance": round(self.balance, value_decimals),
+                "equity": round(equity, value_decimals),
                 "pnl_pct": round(pnl_pct, 4),
                 "max_drawdown_pct": round(self.max_drawdown, 4),
-                "peak_equity": round(self.peak_equity, 2),
+                "peak_equity": round(self.peak_equity, value_decimals),
             },
             "performance": {
                 "total_trades": self.total_trades,
@@ -1129,13 +1149,20 @@ class HydraEngine:
         }
 
         if trade:
+            # Prices and amounts always use full precision (8 decimals) — critical
+            # for BTC-denominated pairs like SOL/XBT where price ≈ 0.0015.
+            # Dollar values (value, profit) use 2 decimals for USDC/USD pairs,
+            # 8 for crypto-denominated pairs.
+            is_usd_pair = self.asset.endswith("USDC") or self.asset.endswith("USD")
+            value_decimals = 2 if is_usd_pair else 8
             state["last_trade"] = {
                 "action": trade.action,
-                "price": round(trade.price, 2),
+                "price": round(trade.price, 8),
                 "amount": round(trade.amount, 8),
-                "value": round(trade.value, 2),
+                "value": round(trade.value, value_decimals),
                 "reason": trade.reason,
-                "profit": round(trade.profit, 2) if trade.profit is not None else None,
+                "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
+                "params_at_entry": trade.params_at_entry,
             }
 
         return state
