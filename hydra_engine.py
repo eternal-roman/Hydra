@@ -1055,6 +1055,72 @@ class HydraEngine:
         if "min_confidence_threshold" in params:
             self.sizer.min_confidence = params["min_confidence_threshold"]
 
+    def snapshot_runtime(self) -> Dict[str, Any]:
+        """Serialize full engine runtime state for session persistence."""
+        return {
+            "asset": self.asset,
+            "initial_balance": self.initial_balance,
+            "balance": self.balance,
+            "position": {
+                "asset": self.position.asset,
+                "size": self.position.size,
+                "avg_entry": self.position.avg_entry,
+                "unrealized_pnl": self.position.unrealized_pnl,
+                "params_at_entry": self.position.params_at_entry,
+                "realized_pnl": self.position.realized_pnl,
+            },
+            "peak_equity": self.peak_equity,
+            "max_drawdown": self.max_drawdown,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+            "total_trades": self.total_trades,
+            "tick_count": self.tick_count,
+            "halted": self.halted,
+            "halt_reason": self.halt_reason,
+            "equity_history": self.equity_history[-500:],
+            "candles": [
+                {"open": c.open, "high": c.high, "low": c.low,
+                 "close": c.close, "volume": c.volume, "timestamp": c.timestamp}
+                for c in self.candles[-self.MAX_CANDLES:]
+            ],
+        }
+
+    def restore_runtime(self, snapshot: Dict[str, Any]):
+        """Restore engine runtime state from a snapshot produced by snapshot_runtime."""
+        if not snapshot:
+            return
+        self.initial_balance = float(snapshot.get("initial_balance", self.initial_balance))
+        self.balance = float(snapshot.get("balance", self.balance))
+        p = snapshot.get("position", {})
+        self.position = Position(
+            asset=p.get("asset", self.asset),
+            size=float(p.get("size", 0.0)),
+            avg_entry=float(p.get("avg_entry", 0.0)),
+            unrealized_pnl=float(p.get("unrealized_pnl", 0.0)),
+            params_at_entry=p.get("params_at_entry"),
+            realized_pnl=float(p.get("realized_pnl", 0.0)),
+        )
+        self.peak_equity = float(snapshot.get("peak_equity", self.initial_balance))
+        self.max_drawdown = float(snapshot.get("max_drawdown", 0.0))
+        self.win_count = int(snapshot.get("win_count", 0))
+        self.loss_count = int(snapshot.get("loss_count", 0))
+        self.total_trades = int(snapshot.get("total_trades", 0))
+        self.tick_count = int(snapshot.get("tick_count", 0))
+        self.halted = bool(snapshot.get("halted", False))
+        self.halt_reason = str(snapshot.get("halt_reason", ""))
+        self.equity_history = list(snapshot.get("equity_history", []))
+        self.candles = []
+        self.prices = []
+        for raw in snapshot.get("candles", []):
+            c = Candle(
+                open=float(raw["open"]), high=float(raw["high"]),
+                low=float(raw["low"]), close=float(raw["close"]),
+                volume=float(raw.get("volume", 0.0)),
+                timestamp=float(raw.get("timestamp", time.time())),
+            )
+            self.candles.append(c)
+            self.prices.append(c.close)
+
     def _candle_status(self) -> str:
         """Check if the latest candle is still forming or closed."""
         if not self.candles:
@@ -1168,7 +1234,12 @@ class HydraEngine:
         return state
 
     def _calc_sharpe(self) -> float:
-        """Estimate Sharpe ratio from equity history."""
+        """Estimate Sharpe ratio from equity history.
+
+        Annualisation is derived from observed candle timestamp deltas (median),
+        not the nominal candle_interval, so mismatches between configuration
+        and exchange cadence do not skew the result.
+        """
         if len(self.equity_history) < 30:
             return 0.0
         recent = self.equity_history[-60:]
@@ -1182,8 +1253,21 @@ class HydraEngine:
         avg = sum(returns) / len(returns)
         var = sum((r - avg) ** 2 for r in returns) / (len(returns) - 1)
         std = math.sqrt(var) if var > 0 else 1.0
-        # Annualize: 525600 minutes/year, adjusted for candle interval
-        periods_per_year = 525600 / self.candle_interval
+        # Observed period length — median of candle timestamp deltas.
+        # Falls back to nominal candle_interval when observed cadence is
+        # synthetic (sub-second) or unavailable (no candles).
+        period_seconds = 0.0
+        if len(self.candles) >= 3:
+            deltas = sorted(
+                self.candles[i].timestamp - self.candles[i - 1].timestamp
+                for i in range(1, len(self.candles))
+                if self.candles[i].timestamp > self.candles[i - 1].timestamp
+            )
+            if deltas:
+                period_seconds = deltas[len(deltas) // 2]
+        if period_seconds < 1.0:
+            period_seconds = float(self.candle_interval) * 60.0
+        periods_per_year = (365.25 * 24.0 * 3600.0) / period_seconds
         return (avg / std) * math.sqrt(periods_per_year) if std > 0 else 0.0
 
     def get_performance_report(self) -> str:
