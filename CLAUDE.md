@@ -77,6 +77,7 @@ python tests/test_balance.py       # 38 balance & asset conversion tests
 ### Trading
 - Confidence threshold: 0.55 minimum to execute
 - Position sizing: Quarter-Kelly (`(confidence*2 - 1) * 0.25 * balance`)
+- Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 XBT), `costmin` per quote currency (0.5 USDC, 0.00002 XBT). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
 - Circuit breaker: 15% max drawdown halts the engine permanently for the session
 - Rate limiting: 2-second minimum between every Kraken API call — do not remove or reduce
 
