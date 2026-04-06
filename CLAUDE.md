@@ -10,7 +10,8 @@ HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market co
 
 ```
 hydra_engine.py     — Pure Python trading engine (indicators, regime detection, signals, position sizing)
-hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution)
+hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution,
+                      order reconciler, session snapshot + --resume)
 hydra_brain.py      — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
 hydra_tuner.py      — Self-tuning parameters via Bayesian updating of regime/signal thresholds
 dashboard/src/App.jsx — React dashboard (single-file, all inline styles)
@@ -45,6 +46,9 @@ python hydra_agent.py --candle-interval 1
 # Agent — paper trading (no API keys needed)
 python hydra_agent.py --mode competition --paper
 
+# Agent — resume previous session (restores engines + coordinator state)
+python hydra_agent.py --mode competition --resume
+
 # Engine test (no API keys needed)
 python hydra_engine.py
 
@@ -60,6 +64,7 @@ python tests/test_balance.py       # 38 balance & asset conversion tests
 
 ### Indicators (hydra_engine.py)
 - RSI uses Wilder's exponential smoothing — do not simplify to SMA
+- ATR uses Wilder's exponential smoothing (same as RSI) — do not simplify to simple average
 - MACD builds a full historical series then applies 9-EMA — do not simplify to single-point calculation
 - Bollinger Bands use population variance (divide by N, not N-1)
 - All indicators are stateless static methods — they recompute from the full price array each tick
@@ -122,3 +127,6 @@ See AUDIT.md for the full verification checklist.
 - The `.env` file contains Kraken API keys — never commit it
 - `hydra_trades_*.json` files are runtime trade logs — they're gitignored
 - `hydra_params_*.json` files are learned tuning parameters — they're gitignored
+- `hydra_session_snapshot.json` is the session snapshot for `--resume` — it's gitignored
+- On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this
+- `start_hydra.bat` uses `--mode competition --resume` for production — do not remove these flags

@@ -952,6 +952,7 @@ class HydraEngine:
             self.balance += revenue
             self.position.size -= sell_amount
             self.position.realized_pnl += profit
+            total_profit = profit  # default: single-leg profit
             position_closed = False
             if self.position.size < 0.00001:
                 self.position.size = 0.0
@@ -1227,6 +1228,7 @@ class HydraEngine:
                 "amount": round(trade.amount, 8),
                 "value": round(trade.value, value_decimals),
                 "reason": trade.reason,
+                "confidence": round(trade.confidence, 4),
                 "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
                 "params_at_entry": trade.params_at_entry,
             }

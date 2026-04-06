@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.4.0] — 2026-04-05
+
+### Added
+- **Order reconciler** (`OrderReconciler`) — polls `kraken open-orders` every
+  5 ticks and detects orders that disappeared (filled, DMS-cancelled, rejected).
+  Prevents silent divergence between agent and exchange state.
+- **Session snapshots + `--resume`** — atomic JSON snapshots of engine state,
+  coordinator regime history, and recent trade log. Written every 12 ticks
+  (~1h at 5-min candles) and on SIGINT/SIGTERM. `start_hydra.bat` auto-restart
+  now uses `--resume` for seamless recovery.
+- **Shutdown cancel-all** — `_handle_shutdown` cancels all resting limit orders
+  on Kraken before exit.
+- **Trade log bounding** — capped at 2000 entries to prevent unbounded growth.
+
+### Fixed
+- **Brain JSON parsing** — strip markdown code fences from LLM responses;
+  increased API timeout 10s→30s and max_tokens to prevent truncation.
+- **ATR smoothing** — now uses Wilder's exponential smoothing (was simple average).
+- **TREND_DOWN symmetry** — `down_ratio` uses multiplicative inverse `1/ratio`.
+- **Coordinated swap state sync** — sell/buy legs call `execute_signal()` on
+  engines before placing Kraken orders; swap sell pairs excluded from Phase 2.5
+  to prevent premature position close.
+- **Swap currency conversion** — buy-leg sizing converts proceeds to buy-pair
+  quote currency via XBT/USDC price when currencies differ.
+- **Tuner accuracy** — records on full position close only, using accumulated
+  `realized_pnl`, with `params_at_entry` preserved on Trade object.
+- **Ticker freshness** — re-fetches bid/ask immediately before order placement.
+- **Price precision** — 8 decimals for all prices/amounts; pair-aware rounding
+  for dollar values (2 for USDC/USD, 8 for crypto pairs).
+- **Candle dedup** — ticker-fallback candles get interval-aligned timestamps.
+- **Sharpe annualization** — uses observed candle timestamp deltas (median)
+  instead of nominal `candle_interval`.
+- **Txid handling** — unwraps list-format txids from Kraken API.
+- **Trade confidence** — `last_trade` dicts now include `confidence` key.
+- **Competition mode** — `start_hydra.bat` uses `--mode competition --resume`.
+
+---
+
 ## [2.3.1] — 2026-04-02
 
 ### Changed
