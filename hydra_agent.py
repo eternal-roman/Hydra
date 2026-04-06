@@ -835,6 +835,8 @@ class HydraAgent:
             self.broadcaster.broadcast(dashboard_state)
 
             # Reconcile tracked orders against exchange state (live mode only)
+            if self.reconciler and self.reconciler.known_orders and tick % self.reconciler.poll_every_ticks == 0:
+                time.sleep(2)  # Rate limit before Kraken API call
             if self.reconciler:
                 for ev in self.reconciler.maybe_reconcile(tick):
                     if ev["type"] == "order_disappeared":
@@ -1193,31 +1195,8 @@ class HydraAgent:
             print(f"  [SWAP] No engine for {buy_pair}, skipping buy leg")
             return
 
-        # Size buy based on the sell proceeds (conservative: use 80% of sell value)
-        # sell_trade_obj.price is in the sell pair's quote (e.g. USDC for SOL/USDC)
-        # buy_price is in the buy pair's quote (e.g. XBT for SOL/XBT)
-        # If currencies differ, convert via the XBT/USDC engine price
-        sell_value = sell_trade_obj.amount * sell_trade_obj.price
-        sell_quote = sell_pair.split("/")[1] if "/" in sell_pair else ""
-        buy_quote = buy_pair.split("/")[1] if "/" in buy_pair else ""
-        if sell_quote != buy_quote:
-            # Convert sell proceeds to buy quote currency
-            xbt_engine = self.engines.get("XBT/USDC") or self.engines.get("BTC/USDC")
-            if xbt_engine and xbt_engine.prices:
-                xbt_usdc_price = xbt_engine.prices[-1]
-                if xbt_usdc_price > 0:
-                    sell_value = sell_value / xbt_usdc_price  # USDC → XBT
-        buy_value = sell_value * 0.8
-        buy_amount = buy_value / buy_price
-
-        # Enforce Kraken minimum order size
-        base_asset = buy_pair.split("/")[0] if "/" in buy_pair else buy_pair
-        min_size = PositionSizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
-        if buy_amount < min_size:
-            print(f"  [SWAP] Buy amount {buy_amount:.8f} below minimum {min_size} for {buy_pair}, skipping buy leg")
-            return
-
-        # Update buy engine state, then execute on exchange
+        # Engine sizes the buy via Kelly criterion — execute_signal handles
+        # position sizing, balance check, and minimum order enforcement internally.
         buy_trade_obj = buy_engine.execute_signal(
             action="BUY", confidence=0.85,
             reason=f"[SWAP {swap_id}] Buy leg: {reason}",
