@@ -119,7 +119,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - AI reasoning displayed in dashboard: decision badges (CONFIRM/ADJUST/OVERRIDE), analyst thesis, risk assessment, Grok strategist reasoning (when escalated), risk flags.
 - AI Brain sidebar panel: decisions, overrides, escalations, strategist status, API cost, latency, active/offline status.
 - Header badge switches to "AI LIVE" when brain is active.
-- 5-layer fallback system: single failure, repeated failures (disable 30 min), budget exceeded, missing API key, timeout.
+- 5-layer fallback system: single failure, repeated failures (disable 60 ticks), budget exceeded, missing API key, timeout.
 - Daily cost guard (`max_daily_cost`) prevents runaway API spend.
 - 8 new brain tests (fallback, budget guard, JSON parser, prompt builders, caching). Total: 62 tests.
 

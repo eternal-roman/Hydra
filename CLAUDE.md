@@ -92,7 +92,7 @@ python tests/test_balance.py       # 38 balance & asset conversion tests
 - **Market Analyst** (Claude Sonnet) — evaluates engine signals, produces thesis + conviction
 - **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides trades, manages risk exposure
 - **Strategic Advisor** (Grok 4 Reasoning) — called only on contested decisions (ADJUST/OVERRIDE or conviction < 0.65)
-- Only fires on BUY/SELL signals (HOLD is free, no API call)
+- Only fires on BUY/SELL signals (HOLD is free, no API call — skip logic lives in the agent's `_apply_brain`, not in the brain itself)
 - Falls back to engine-only on API failure, budget exceeded, or missing key
 - Enable by setting `ANTHROPIC_API_KEY` and/or `XAI_API_KEY` in `.env`
 - Cost: ~$3-5/day with Grok escalation on ~20-30% of signals
@@ -130,3 +130,4 @@ See AUDIT.md for the full verification checklist.
 - `hydra_session_snapshot.json` is the session snapshot for `--resume` — it's gitignored
 - On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this
 - `start_hydra.bat` uses `--mode competition --resume` for production — do not remove these flags
+- **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) and Rule 3 (coordinated swap SELL) can theoretically conflict if BTC is TREND_UP + SOL TREND_DOWN + SOL/XBT TREND_UP simultaneously — Rule 3 overwrites Rule 2. Current behavior favors the safer SELL. Future work: add explicit priority or merge logic.

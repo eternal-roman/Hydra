@@ -58,7 +58,7 @@ All indicators are implemented in pure Python with no external dependencies.
 |-----------|---------------|---------|
 | **EMA(20, 50)** | SMA-seeded exponential moving average | Trend direction |
 | **RSI(14)** | Wilder's exponential smoothing (not simple average) | Overbought/oversold |
-| **ATR(14)** | True Range with SMA averaging | Volatility measurement |
+| **ATR(14)** | True Range with Wilder's exponential smoothing | Volatility measurement |
 | **Bollinger Bands(20, 2)** | Population std dev, width normalized by mean | Price bands and regime classification |
 | **MACD(12, 26, 9)** | Full historical MACD series with 9-EMA signal line | Momentum confirmation |
 
