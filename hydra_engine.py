@@ -258,12 +258,15 @@ class RegimeDetector:
         current = prices[-1]
         atr_pct = (atr / current) * 100 if current > 0 else 0
 
-        # FUTURE_RESEARCH: Predictive regime detection — detect impending shifts 1–2 candles
-        # ahead by monitoring MACD line acceleration (second derivative) or BB width
-        # rate-of-change. Reactive detection loses 1–2 candles of edge on regime transitions.
-        # Evidence: regime transitions in test data show consistent MACD divergence 2 candles
-        # before EMA crossover confirms. See also _log_regime_transitions() in hydra_agent.py
-        # for live transition data to validate this hypothesis.
+        # FUTURE_RESEARCH [SPECULATIVE — validate before building]:
+        # Predictive regime detection via MACD acceleration (second derivative of histogram).
+        # Hypothesis: EMA crossover is confirmed 1–2 candles after MACD divergence begins.
+        # If true, acting on MACD divergence gives a 1–2 candle entry edge on transitions.
+        # Prerequisite: Collect 3+ months of regime transition events from
+        # _log_regime_transitions() with timestamps, then measure actual MACD lead time on
+        # real Kraken data. Do NOT implement until lead time is confirmed > 1 candle on ≥60%
+        # of transitions. The current reactive detector already works; premature prediction
+        # risks acting on noise. Priority: LOW — only pursue with backtested data.
 
         # High volatility overrides trend detection
         if atr_pct > volatile_atr_pct or bb["width"] > volatile_bb_width:
@@ -517,13 +520,18 @@ class PositionSizer:
         self.min_confidence = min_confidence
         self.max_position_pct = max_position_pct
 
-    # FUTURE_RESEARCH: Win-rate-driven Kelly sizing — replace the fixed 0.25 multiplier
-    # with actual historical win-rate from HydraParamTracker observations.
-    # Full Kelly formula: f* = win_rate - (1 - win_rate) / win_loss_ratio
-    # Current quarter-Kelly uses signal confidence as a proxy edge estimate, but realized
-    # win-rate from hydra_tuner would be a more empirically grounded input.
-    # Risk: requires 50+ completed trades to stabilize; gate on min_observations before
-    # switching multiplier source. Could blend: 0.25 base + 0.25 * realized_kelly_fraction.
+    # FUTURE_RESEARCH [IMPLEMENT AFTER 100 LIVE TRADES]:
+    # Win-rate-driven Kelly sizing — replace the fixed 0.25 kelly_multiplier with actual
+    # realized win-rate from HydraParamTracker once enough history has accumulated.
+    # Full Kelly: f* = win_rate - (1 - win_rate) / avg_win_loss_ratio
+    # Implementation (~20 lines):
+    #   1. Add ParameterTracker.get_kelly_fraction() → float in hydra_tuner.py
+    #      (returns None if < 100 observations to prevent premature sizing)
+    #   2. In HydraAgent._run_tuner_update(), pass realized fraction to each engine:
+    #        engine.sizer.kelly_multiplier = tuner.get_kelly_fraction() or 0.25
+    # Gate: only activate when win_count + loss_count >= 100 and win_rate is in [0.3, 0.7]
+    # (outside that range the signal edge is either broken or suspiciously lucky).
+    # Priority: HIGH — implement after accumulating 100 completed round-trips.
 
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
@@ -571,14 +579,16 @@ class OrderBookAnalyzer:
     spread, wall detection, and a signal-aware confidence modifier.
     """
 
-    # FUTURE_RESEARCH: Non-linear order book confidence scaling — current linear ±0.07 cap
-    # treats a 3x wall (WALL_MULTIPLIER) the same as a 10x wall in terms of signal weight.
-    # Ideas:
-    #   (a) Log-scaled modifier: modifier = sign * min(log(wall_ratio) / log(10), 1) * MAX_BOOK_MODIFIER
-    #   (b) Flat wall bonus: +0.05 confidence when wall detected in signal direction (on top of imbalance)
-    #   (c) Time-decay: stale order book snapshots (>30s old) should attenuate modifier toward 0
-    # Evidence: large iceberg walls on Kraken consistently precede short-term reversals in
-    # illiquid hours. Linear scaling misses the qualitative jump between a 3x and 10x wall.
+    # FUTURE_RESEARCH [SPECULATIVE — needs backtested evidence]:
+    # Non-linear order book confidence scaling. The claim "large walls precede reversals"
+    # is plausible but unvalidated on this codebase's actual data. Before changing the
+    # modifier math, first verify: do bid_wall detections here correlate with next-candle
+    # reversals in the Kraken live log? If yes (>55% accuracy), then log-scale makes sense:
+    #   modifier = sign * min(math.log(wall_ratio) / math.log(10), 1.0) * MAX_BOOK_MODIFIER
+    # Also worth adding: a timestamp on each depth snapshot and attenuating to 0 when
+    # the snapshot is >30s stale (Kraken book data can lag on thin pairs).
+    # Priority: LOW — only implement if order_book.confidence_modifier shows
+    # non-zero impact on live win-rate. Check via dashboard order book panel first.
 
     # Imbalance thresholds
     BULLISH_THRESHOLD = 1.5   # bid/ask ratio above this = bullish pressure
@@ -664,13 +674,16 @@ class OrderBookAnalyzer:
         mid = (best_bid + best_ask) / 2
         if mid > 0:
             result["spread_bps"] = round((best_ask - best_bid) / mid * 10000, 1)
-        # FUTURE_RESEARCH: Spread-as-regime-signal — wide spread_bps (e.g., > 30 bps)
-        # reliably precedes volatility spikes on Kraken's SOL and XBT pairs, especially
-        # during off-hours. This data could gate the confidence modifier entirely when
-        # spread exceeds a threshold (thin/unreliable book), or feed into RegimeDetector
-        # as a secondary VOLATILE indicator alongside ATR% and BB width. The spread_bps
-        # value is already computed and returned in the result dict — only the downstream
-        # consumption in HydraEngine.tick() needs updating.
+        # FUTURE_RESEARCH [LOW EFFORT, TRY THIS FIRST]:
+        # Spread-as-regime-signal. spread_bps is already computed above and returned in
+        # the result dict. Using it is just 2 lines in HydraEngine.tick():
+        #   if book_data.get("spread_bps", 0) > 30:
+        #       state["regime"] = "VOLATILE"
+        # This would gate trading during thin off-hours books (spread > 30 bps signals
+        # illiquid conditions where limit orders frequently miss or get filled at bad prices).
+        # Try it: run with 5 days of live data and compare fill rates on ticks where
+        # spread_bps > 30 vs. < 10. If fill rate drops below 40% on wide-spread ticks,
+        # implement the gate. Priority: MEDIUM — fast to implement, testable quickly.
 
         # Wall detection: any single level > 3x the average
         avg_bid = bid_volume / len(bid_volumes) if bid_volumes else 0
@@ -785,13 +798,13 @@ class CrossPairCoordinator:
 
         # Rule 3: Coordinated swap
         # SOL weakening vs USDC but strengthening vs XBT — rotate into BTC
-        # FUTURE_RESEARCH: Rule 2 / Rule 3 conflict — when both rules fire simultaneously
-        # (XBT TREND_UP + SOL TREND_DOWN + SOL/XBT TREND_UP), Rule 3's overrides["SOL/USDC"]
-        # assignment below silently overwrites Rule 2's assignment above. The safer outcome
-        # (swap/SELL) wins by accident of dict assignment order, not by design. Consider a
-        # scored arbitration: each rule emits (signal, confidence, priority_score); only
-        # the highest-score rule's override is applied. See also CLAUDE.md and
-        # _execute_coordinated_swap() in hydra_agent.py for the execution-side annotation.
+        # NOTE: Rule 3 silently overwrites Rule 2 when both fire simultaneously
+        # (XBT TREND_UP + SOL TREND_DOWN + SOL/XBT TREND_UP). This is intentional —
+        # the swap/SELL outcome is safer. See CLAUDE.md for full description.
+        # FUTURE_RESEARCH [DEFER — needs co-occurrence data first]:
+        # Replace the dict-assignment race with explicit priority scoring only after
+        # live logs show Rule 2 + Rule 3 co-firing ≥5 times. Until then, the current
+        # behavior (swap wins) is correct by design and not worth the added complexity.
         if sol_regime == "TREND_DOWN" and sol_xbt_regime == "TREND_UP":
             sol_pos = 0.0
             if sol_usdc and sol_usdc.get("position"):

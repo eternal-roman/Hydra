@@ -1,23 +1,69 @@
 """
-hydra_research.py — Experimental Research Archive
+hydra_research.py — Agentic Brain Layer (Candidate for Production Integration)
 
-This file preserves experimental features from research branches that were
-deliberately NOT promoted to main. All code here is functional (tests pass on
-its origin branch) but adds complexity beyond what the production system needs.
+Status: FUNCTIONAL — unit-tested, not yet wired into production agent loop.
 
-Sources:
-  - branch: claude/evaluate-agentic-design-DgCMU  (Hamilton filter, QAOA solver,
-    agentic brain layer)
-  - branch: claude/trading-system-audit-R5u83     (captured as FUNCTIONAL_AUDIT.md)
+This module was developed on branch claude/evaluate-agentic-design-DgCMU and
+deliberately excluded from main because the integration cost was higher than
+the immediate benefit. The code is correct and all tests pass.
 
-Nothing in this file is imported by the production code.
-Use git grep "FUTURE_RESEARCH" to find the production-side annotation for each item.
+== What this is ==
 
-Contents:
-  Part 1 — Hamilton (1989) Bayesian Regime-Switching Filter
-  Part 2 — QAOA-inspired Joint-Signal Ising Solver
-  Part 3 — Agentic Brain Layer (GoalState, PlanStep, BrainPlan, Episode, BrainMemory)
-  Part 4 — HydraBrain Agentic Methods (step, reflect, plan loop)
+An upgrade to HydraBrain that adds persistent cross-tick memory, goal-driven
+risk posture, and multi-step conditional planning. Instead of treating each
+tick as stateless, the brain:
+
+  1. Maintains a GoalState (drawdown budget → risk posture: conservative /
+     neutral / aggressive) that adjusts position-size caps automatically.
+
+  2. Commits to BrainPlan objects that fire conditional actions across ticks
+     without re-consulting the LLM — e.g., "if RSI > 70 within 20 ticks after
+     this BUY, take profit at 0.8× size."
+
+  3. Records Episodes (state digest + action + realized PnL) for future offline
+     analysis and backtesting. reflect() back-fills PnL when a trade closes.
+
+== What was removed ==
+
+Two earlier experimental classes were deleted from this file after review:
+
+  - RegimeSwitchingFilter (Hamilton 1989 Bayesian filter): correct
+    implementation, but the production regime detector (EMA crossover + ATR
+    + BB) already works for 3 pairs. Hidden Markov models are designed for
+    latent-variable data (economic cycles); crypto regime is directly observed
+    from price. Removed: no production benefit.
+
+  - JointSignalSolver (QAOA-inspired Ising cost Hamiltonian): correct
+    mathematics for N-spin portfolio optimisation. For N=3 pairs the 2^3
+    enumeration is fast, but the covariance coupling (γ·sᵀΣs term) is
+    near-zero for SOL/USDC + SOL/XBT + XBT/USDC because they share the same
+    underlying assets. In practice the solver produced an empty override dict
+    on most ticks. Removed: no effect observed.
+
+== Integration checklist (when ready to wire into production) ==
+
+  1. Add BrainMemory to HydraBrain.__init__:
+       self.memory = BrainMemory()
+
+  2. In hydra_agent.py _apply_brain(), replace:
+       decision = self.brain.deliberate(state)
+     with:
+       decision = self.brain.step(state)
+
+  3. In hydra_agent.py, after position fully closes, call:
+       self.brain.reflect(pair, {"profit": trade.realized_pnl})
+
+  4. In _save_snapshot() / _load_snapshot(), add brain memory serialization:
+       snapshot["brain_memory"] = self.brain.memory.to_dict()
+       self.brain.memory = BrainMemory.from_dict(snapshot.get("brain_memory", {}))
+
+  5. Validate on 5 days of live candle data:
+       - What % of ticks fire a plan step vs. go to the LLM pipeline?
+       - Does plan-driven sizing reduce drawdown vs. baseline?
+       - Are 1-minute candle horizons too short for 20-tick plans?
+
+== Tests ==
+  tests/test_brain_agent_research.py — 15 unit tests, all passing, no API keys.
 """
 
 from __future__ import annotations
@@ -27,392 +73,6 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from typing import Any, Deque, Dict, List, Optional
-
-
-# ═══════════════════════════════════════════════════════════════
-# PART 1 — HAMILTON (1989) BAYESIAN REGIME-SWITCHING FILTER
-# ═══════════════════════════════════════════════════════════════
-#
-# FUTURE_RESEARCH pointer: See hydra_engine.py RegimeDetector.detect() for the
-# production annotation. This is the full working implementation.
-#
-# Design: maintains a posterior probability vector over 4 regimes and updates
-# it each tick from an observation likelihood built from engine indicators.
-# Pure Python — no numpy. Each update is O(16) arithmetic ops.
-
-
-# ═══════════════════════════════════════════════════════════════
-# HAMILTON (1989) REGIME-SWITCHING FILTER
-# ═══════════════════════════════════════════════════════════════
-
-class RegimeSwitchingFilter:
-    """Hamilton (1989) Bayesian filter over hidden regime states.
-
-    Maintains a posterior probability vector `p_t` over the 4 regimes
-    (TREND_UP, TREND_DOWN, RANGING, VOLATILE) and updates it each tick
-    from an observation likelihood built from engine indicators.
-
-    Update rule (per tick):
-        prior_t   = P^T · p_{t-1}          # transition matrix prediction
-        lik_t     = L(obs_t | regime)      # Gaussian likelihood per regime
-        p_t       = normalize(lik_t ⊙ prior_t)
-
-    The transition matrix `P` is initialised from a flat prior (slightly
-    favouring self-persistence) and can be re-seeded from an empirical
-    regime history via `seed_transition_matrix`.
-
-    Pure Python — no numpy dependency. Operates on a fixed 4-dim state
-    so every update is O(16) arithmetic ops.
-    """
-
-    REGIMES = ("TREND_UP", "TREND_DOWN", "RANGING", "VOLATILE")
-
-    # Feature means per regime (atr_pct, ema_ratio, rsi). Seeded so day-one
-    # behaviour roughly matches the hard thresholds in RegimeDetector.
-    _FEATURE_MEANS = {
-        "TREND_UP":   (1.5, 1.010, 60.0),
-        "TREND_DOWN": (1.5, 0.990, 40.0),
-        "RANGING":    (1.0, 1.000, 50.0),
-        "VOLATILE":   (5.0, 1.000, 50.0),
-    }
-    # Shared diagonal variances (atr_pct, ema_ratio, rsi).
-    _FEATURE_VARS = (2.5, 0.000025, 150.0)
-
-    def __init__(self, persistence: float = 0.85):
-        self.persistence = persistence
-        self.probs: List[float] = [0.25, 0.25, 0.25, 0.25]
-        self.P: List[List[float]] = self._build_transition_matrix(persistence)
-        self.observations: int = 0
-
-    @staticmethod
-    def _build_transition_matrix(p: float) -> List[List[float]]:
-        """Flat prior with self-persistence `p` on the diagonal."""
-        n = 4
-        off = (1.0 - p) / (n - 1)
-        return [[p if i == j else off for j in range(n)] for i in range(n)]
-
-    def seed_transition_matrix(self, regime_history: List[str]):
-        """Re-estimate P from an observed regime sequence with Laplace smoothing."""
-        if len(regime_history) < 2:
-            return
-        counts = [[1.0] * 4 for _ in range(4)]  # Laplace-smoothed
-        idx = {r: i for i, r in enumerate(self.REGIMES)}
-        for a, b in zip(regime_history[:-1], regime_history[1:]):
-            if a in idx and b in idx:
-                counts[idx[a]][idx[b]] += 1.0
-        for i in range(4):
-            row_sum = sum(counts[i])
-            for j in range(4):
-                self.P[i][j] = counts[i][j] / row_sum if row_sum > 0 else 0.25
-
-    @classmethod
-    def _observation_likelihood(cls, features: Dict[str, float]) -> List[float]:
-        """Diagonal Gaussian likelihood per regime. Returns raw (unnormalised) values."""
-        atr_pct = float(features.get("atr_pct", 1.0))
-        ema_ratio = float(features.get("ema_ratio", 1.0))
-        rsi = float(features.get("rsi", 50.0))
-        obs = (atr_pct, ema_ratio, rsi)
-        var = cls._FEATURE_VARS
-        liks: List[float] = []
-        for regime in cls.REGIMES:
-            mu = cls._FEATURE_MEANS[regime]
-            # log-likelihood for numerical stability, then exp at the end
-            log_l = 0.0
-            for x, m, v in zip(obs, mu, var):
-                log_l += -0.5 * ((x - m) ** 2) / v
-            liks.append(math.exp(log_l))
-        # Guarantee a positive floor so normalisation never degenerates
-        liks = [max(l, 1e-12) for l in liks]
-        return liks
-
-    def update(self, features: Dict[str, float]) -> List[float]:
-        """Run one filter step. `features` dict needs atr_pct, ema_ratio, rsi."""
-        # Predict: prior = P^T · probs
-        prior = [0.0] * 4
-        for j in range(4):
-            s = 0.0
-            for i in range(4):
-                s += self.P[i][j] * self.probs[i]
-            prior[j] = s
-        # Observe: likelihood per regime
-        lik = self._observation_likelihood(features)
-        # Posterior ∝ lik ⊙ prior
-        post = [lik[i] * prior[i] for i in range(4)]
-        total = sum(post)
-        if total <= 0:
-            post = [0.25, 0.25, 0.25, 0.25]
-        else:
-            post = [p / total for p in post]
-        self.probs = post
-        self.observations += 1
-        return post
-
-    def argmax_regime(self) -> str:
-        """Return the most probable regime as a string."""
-        idx = max(range(4), key=lambda i: self.probs[i])
-        return self.REGIMES[idx]
-
-    def probs_dict(self) -> Dict[str, float]:
-        return {r: round(self.probs[i], 6) for i, r in enumerate(self.REGIMES)}
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialisable snapshot of the filter's full state."""
-        return {
-            "probs": list(self.probs),
-            "persistence": self.persistence,
-            "observations": self.observations,
-            "P": [list(row) for row in self.P],
-        }
-
-    def load_dict(self, data: Dict[str, Any]):
-        """Restore state from a `to_dict` payload. Re-normalises probs defensively."""
-        if not data:
-            return
-        probs = data.get("probs")
-        if isinstance(probs, list) and len(probs) == 4:
-            total = sum(probs) or 1.0
-            self.probs = [float(p) / total for p in probs]
-        self.persistence = float(data.get("persistence", self.persistence))
-        self.observations = int(data.get("observations", self.observations))
-        P = data.get("P")
-        if isinstance(P, list) and len(P) == 4 and all(len(row) == 4 for row in P):
-            self.P = [[float(x) for x in row] for row in P]
-
-
-# ═══════════════════════════════════════════════════════════════
-# JOINT-SIGNAL SOLVER (QAOA-inspired Ising cost Hamiltonian)
-# ═══════════════════════════════════════════════════════════════
-
-class JointSignalSolver:
-    """Cross-pair signal resolver built on an Ising-style cost Hamiltonian.
-
-    Treats the N trading pairs as N spins (long-bias +1, short-bias -1) and
-    finds the configuration that minimises
-
-        E(s) = -h · s + γ · sᵀ Σ s
-
-    where `h_i` combines each pair's per-engine signal with its regime-filter
-    drift, and `Σ` is the rolling covariance matrix of log-returns. This is
-    the classical cost operator used in QAOA/VQE for portfolio optimisation;
-    for N=3 pairs the full configuration space is just 2^3 = 8 states, so we
-    exact-diagonalise by enumeration in pure Python.
-
-    Outputs per pair:
-        - chosen bias (+1 = long / BUY, -1 = short / SELL, 0 = HOLD)
-        - derived confidence from the energy gap to the runner-up
-        - human-readable reason referencing the covariance and regime drift
-    """
-
-    WINDOW = 50                     # candles used for return series
-    COVARIANCE_WEIGHT = 0.5         # γ — correlated-exposure penalty
-    REGIME_DRIFT_WEIGHT = 0.5       # λ — how strongly regime probs bias h
-    GAP_CONFIDENCE_SCALE = 5.0      # how sharply energy gap maps to confidence
-    HOLD_GAP_THRESHOLD = 0.02       # tiny gap ⇒ HOLD
-
-    def __init__(
-        self,
-        pairs: List[str],
-        covariance_weight: float = COVARIANCE_WEIGHT,
-        regime_drift_weight: float = REGIME_DRIFT_WEIGHT,
-    ):
-        self.pairs = list(pairs)
-        self.covariance_weight = covariance_weight
-        self.regime_drift_weight = regime_drift_weight
-
-    # ─── Math helpers ───
-
-    @staticmethod
-    def _log_returns(prices: List[float]) -> List[float]:
-        out: List[float] = []
-        for i in range(1, len(prices)):
-            p0, p1 = prices[i - 1], prices[i]
-            if p0 > 0 and p1 > 0:
-                out.append(math.log(p1 / p0))
-        return out
-
-    @staticmethod
-    def _covariance(series: List[List[float]]) -> List[List[float]]:
-        """Population covariance of N equal-length series. Pure Python."""
-        n = len(series)
-        if n == 0:
-            return []
-        k = min(len(s) for s in series)
-        if k < 2:
-            return [[0.0] * n for _ in range(n)]
-        trimmed = [s[-k:] for s in series]
-        means = [sum(s) / k for s in trimmed]
-        cov = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            for j in range(i, n):
-                acc = 0.0
-                for t in range(k):
-                    acc += (trimmed[i][t] - means[i]) * (trimmed[j][t] - means[j])
-                v = acc / k
-                cov[i][j] = v
-                cov[j][i] = v
-        return cov
-
-    def _build_signal_vector(self, all_states: Dict[str, dict]) -> List[float]:
-        """h_i = sign(action)*confidence + λ*(p_up - p_down) from the regime filter."""
-        h: List[float] = []
-        for pair in self.pairs:
-            state = all_states.get(pair) or {}
-            sig = state.get("signal") or {}
-            action = sig.get("action", "HOLD")
-            conf = float(sig.get("confidence", 0.0))
-            base = 0.0
-            if action == "BUY":
-                base = conf
-            elif action == "SELL":
-                base = -conf
-            drift = 0.0
-            probs = state.get("regime_probs")
-            if probs:
-                p_up = float(probs.get("TREND_UP", 0.0))
-                p_dn = float(probs.get("TREND_DOWN", 0.0))
-                drift = p_up - p_dn
-            h.append(base + self.regime_drift_weight * drift)
-        return h
-
-    def _build_returns(self, all_states: Dict[str, dict]) -> List[List[float]]:
-        series: List[List[float]] = []
-        for pair in self.pairs:
-            state = all_states.get(pair) or {}
-            candles = state.get("candles") or []
-            closes = [float(c.get("c", 0.0)) for c in candles[-self.WINDOW:]]
-            series.append(self._log_returns(closes))
-        return series
-
-    @staticmethod
-    def _build_override(
-        action_type: str,
-        joint_action: str,
-        confidence: float,
-        reason: str,
-        e_best: float,
-        gap: float,
-    ) -> Dict[str, Any]:
-        """Shared payload constructor for OVERRIDE/ADJUST emissions."""
-        return {
-            "action": action_type,
-            "signal": joint_action,
-            "confidence_adj": confidence,
-            "reason": reason,
-            "joint_energy": round(e_best, 6),
-            "energy_gap": round(gap, 6),
-        }
-
-    @staticmethod
-    def _energy(s: List[int], h: List[float], cov: List[List[float]], gamma: float) -> float:
-        n = len(s)
-        lin = -sum(h[i] * s[i] for i in range(n))
-        quad = 0.0
-        for i in range(n):
-            for j in range(n):
-                quad += s[i] * cov[i][j] * s[j]
-        return lin + gamma * quad
-
-    # ─── Public API ───
-
-    # Exact enumeration is 2^N; beyond 12 pairs this is the hard bottleneck
-    # for a 1-minute tick. Guard here rather than silently hanging the tick.
-    MAX_PAIRS_EXACT = 12
-
-    def solve(self, all_states: Dict[str, dict]) -> Dict[str, dict]:
-        """Run one joint-signal decision pass. Returns per-pair override dicts."""
-        n = len(self.pairs)
-        if n == 0:
-            return {}
-        if n > self.MAX_PAIRS_EXACT:
-            raise ValueError(
-                f"JointSignalSolver: exact 2^n enumeration infeasible for n={n} "
-                f"(max {self.MAX_PAIRS_EXACT}); use a heuristic solver instead."
-            )
-
-        h = self._build_signal_vector(all_states)
-        series = self._build_returns(all_states)
-        cov = self._covariance(series) if series else [[0.0] * n for _ in range(n)]
-
-        # Exact enumeration of 2^n spin configurations.
-        configs: List[List[int]] = []
-        for mask in range(2 ** n):
-            configs.append([1 if (mask >> i) & 1 else -1 for i in range(n)])
-
-        energies = [self._energy(s, h, cov, self.covariance_weight) for s in configs]
-        order = sorted(range(len(configs)), key=lambda k: energies[k])
-        best = configs[order[0]]
-        runner_up = configs[order[1]] if len(order) > 1 else best
-        e_best = energies[order[0]]
-        e_next = energies[order[1]] if len(order) > 1 else e_best
-        gap = e_next - e_best  # ≥ 0
-
-        # Map energy gap to confidence in (0,1). Small gap ⇒ low conviction.
-        joint_conf = 1.0 - math.exp(-self.GAP_CONFIDENCE_SCALE * max(gap, 0.0))
-        joint_conf = max(0.0, min(1.0, joint_conf))
-
-        # Build per-pair overrides only when the joint picture disagrees with
-        # the per-pair signal or the gap is large enough to trust.
-        overrides: Dict[str, dict] = {}
-        for i, pair in enumerate(self.pairs):
-            state = all_states.get(pair) or {}
-            sig = state.get("signal") or {}
-            current_action = sig.get("action", "HOLD")
-            current_conf = float(sig.get("confidence", 0.0))
-
-            spin = best[i]
-            if gap < self.HOLD_GAP_THRESHOLD:
-                joint_action = "HOLD"
-            else:
-                joint_action = "BUY" if spin > 0 else "SELL"
-
-            # Blend local conviction (|h_i|) with joint conviction
-            local = min(1.0, abs(h[i]))
-            blended = round(0.5 * local + 0.5 * joint_conf, 4)
-
-            # Covariance-derived reason string
-            diag = [cov[j][j] for j in range(n)]
-            reason_bits = [
-                f"joint_energy={e_best:+.4f}",
-                f"gap={gap:.4f}",
-                f"cov_diag={[round(d, 6) for d in diag]}",
-                f"h={[round(x, 3) for x in h]}",
-            ]
-            reason = "Joint-signal solver: " + " | ".join(reason_bits)
-
-            # Emit an override only when (a) joint action differs from current,
-            # or (b) the blended confidence meaningfully updates current.
-            if joint_action != current_action:
-                overrides[pair] = self._build_override(
-                    "OVERRIDE", joint_action, blended, reason, e_best, gap,
-                )
-            elif joint_action != "HOLD" and abs(blended - current_conf) > 0.05:
-                overrides[pair] = self._build_override(
-                    "ADJUST", joint_action, blended, reason, e_best, gap,
-                )
-
-        # Coordinated swap detection: pair `i` goes short while pair `j` goes long
-        # AND both are in the SOL/{USDC,XBT} triangle with an existing SOL position.
-        sol_usdc_idx = self.pairs.index("SOL/USDC") if "SOL/USDC" in self.pairs else -1
-        sol_xbt_idx = self.pairs.index("SOL/XBT") if "SOL/XBT" in self.pairs else -1
-        if sol_usdc_idx >= 0 and sol_xbt_idx >= 0:
-            if best[sol_usdc_idx] < 0 and best[sol_xbt_idx] > 0:
-                sol_state = all_states.get("SOL/USDC") or {}
-                pos = (sol_state.get("position") or {}).get("size", 0.0)
-                if pos > 0 and "SOL/USDC" in overrides:
-                    overrides["SOL/USDC"]["swap"] = {
-                        "sell_pair": "SOL/USDC",
-                        "buy_pair": "SOL/XBT",
-                        "reason": "Joint-signal: SOL/USDC short-bias + SOL/XBT long-bias ground state",
-                    }
-
-        return overrides
-
-
-# ═══════════════════════════════════════════════════════════════
-# CROSS-PAIR REGIME COORDINATOR
-# ═══════════════════════════════════════════════════════════════
-
-
 
 # ═══════════════════════════════════════════════════════════════
 # PART 3 — AGENTIC BRAIN LAYER (dataclasses)

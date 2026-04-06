@@ -1135,14 +1135,11 @@ class HydraAgent:
                 self.engines[pair].apply_tuned_params(new_params)
         self._completed_trades_since_update = 0
 
-    # FUTURE_RESEARCH: Rule priority / merge logic for coordinator conflicts.
-    # Rule 3 (coordinated swap SELL) always overwrites Rule 2 (BTC recovery BUY boost) when
-    # XBT/USDC is TREND_UP + SOL/USDC is TREND_DOWN + SOL/XBT is TREND_UP simultaneously.
-    # The current behavior (swap/SELL wins) favors capital safety, which is intentional.
-    # A more principled approach: score both rules by expected value (regime confidence ×
-    # signal strength), then execute the higher-EV action rather than a fixed priority order.
-    # Prerequisite: accumulate co-occurrence data from _log_regime_transitions() first to
-    # understand how often Rule 2 and Rule 3 actually conflict in live trading.
+    # NOTE: Rule 3 (swap SELL) overwrites Rule 2 (BTC recovery BUY boost) when both fire.
+    # Current behavior (swap wins) is intentional — the safer action takes priority.
+    # FUTURE_RESEARCH [DEFER — needs data]:
+    # Add EV-scored arbitration only after live logs confirm co-firing ≥5 times.
+    # See hydra_engine.py CrossPairCoordinator.get_overrides() Rule 3 comment.
 
     def _execute_coordinated_swap(self, swap: dict, all_states: dict):
         """Execute a coordinated cross-pair swap (sell one pair, buy another).
@@ -1249,14 +1246,13 @@ class HydraAgent:
             if prev_regime and prev_regime != current_regime:
                 print(f"  [REGIME] {pair}: {prev_regime} -> {current_regime}")
 
-                # FUTURE_RESEARCH: These advisory messages are the seed of a predictive signal
-                # layer. Track regime-transition → price-outcome pairs: did SOL/USDC TREND_DOWN
-                # actually lead to SOL/XBT TREND_UP within N candles? Building an empirical
-                # lookup table of transition accuracy per pair/regime combination would let us
-                # weight these cross-pair advisories by historical hit-rate and eventually
-                # promote the strongest ones to low-weight auxiliary trade signals.
-                # Current state: log-only. Next step: persist transition outcomes to a JSON
-                # sidecar and replay them through the tuner's Bayesian update pipeline.
+                # FUTURE_RESEARCH [COLLECT DATA FIRST — revisit at 3 months]:
+                # These advisory prints capture regime-transition events. To make them
+                # actionable, persist each transition as {pair, from, to, price, timestamp}
+                # to a JSON sidecar (e.g. hydra_transitions.json). After 3 months of data,
+                # compute: P(SOL/XBT TREND_UP | SOL/USDC TREND_DOWN, within 5 candles).
+                # If P > 0.60, promote this advisory to a low-weight auxiliary signal.
+                # Do NOT add signal logic here until hit-rate is validated on real data.
 
                 # Opportunistic cross-pair logic:
                 # If SOL/USDC shifts to TREND_DOWN and we hold SOL, consider selling SOL for BTC
@@ -1267,13 +1263,6 @@ class HydraAgent:
                             print(f"  [REGIME] Cross-pair opportunity: SOL weakening vs USDC but "
                                   f"SOL/XBT is {xbt_regime} — consider selling SOL for BTC")
 
-                # If SOL/USDC shifts to TREND_UP, consider buying SOL with USDC
-                if pair == "SOL/USDC" and current_regime == "TREND_UP":
-                    # JUNK_CANDIDATE: This log line restates what the regime/strategy output
-                    # already communicates — "SOL trending up → MOMENTUM" is visible in every
-                    # tick's regime header. No cross-pair context added here (unlike the
-                    # SOL/XBT advisory above). Safe to remove if log verbosity is an issue.
-                    print(f"  [REGIME] SOL trending up — MOMENTUM strategy active")
 
             self.prev_regimes[pair] = current_regime
 
@@ -1294,17 +1283,6 @@ class HydraAgent:
                 if sol_per_xbt > 0:
                     prices["XBT"] = prices["SOL"] / sol_per_xbt
         return prices
-
-    # FUTURE_RESEARCH: Conditional unstaking workflows — staked assets (SOL.S, XBT.M, etc.)
-    # are excluded from tradable balance but represent meaningful idle capital. Scenarios:
-    #   (a) On sustained TREND_DOWN + DEFENSIVE regime (3+ consecutive candles), unstake
-    #       flexible assets (SOL instant on Kraken) and reallocate to USDC to avoid drawdown.
-    #   (b) On regime recovery signal, restake after position is closed to resume yield.
-    # Implementation notes:
-    #   - SOL flexible staking: instant unstake via `kraken staking unstake SOL.S <amount>`
-    #   - ETH bonded staking: 7-day unbonding — not suitable for tactical allocation changes
-    #   - Need per-asset unstaking rules dict and a cooldown tracker (prevent thrashing)
-    # Risk: unstaking during volatile regime could miss recovery rally; add hysteresis.
 
     def _compute_balance_usd(self, balance: dict) -> dict:
         """Convert raw Kraken balance to USD breakdown with staked asset handling.

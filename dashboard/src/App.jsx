@@ -164,12 +164,11 @@ function ConnectionStatus({ connected, tick }) {
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
-  // FUTURE_RESEARCH: Per-pair equity history — currently only aggregate balance is tracked
-  // in `history` (total_usd per tick). Individual pair equity curves would expose divergences
-  // (e.g., SOL/USDC losing while XBT/USDC gains). Implementation: replace `history` with a
-  // { [pair]: number[] } map, populate from state.pairs[pair].portfolio.equity in the
-  // ws.onmessage handler, and render a MiniChart per pair panel in addition to the aggregate
-  // balance chart. This would make per-pair drawdown instantly visible on the dashboard.
+  // FUTURE_RESEARCH [NICE-TO-HAVE — ~30 lines of JS]:
+  // Per-pair equity history. Replace `history` with { [pair]: number[] }, populate from
+  // state.pairs[pair].portfolio.equity in ws.onmessage, render a MiniChart per pair panel.
+  // Makes per-pair drawdown instantly visible. Implement after the 4 critical audit bugs
+  // are fixed (no point charting fictional P&L — see FUNCTIONAL_AUDIT.md issues #2 and #3).
   const [history, setHistory] = useState([]);
   const [tradeLog, setTradeLog] = useState([]);
   const wsRef = useRef(null);
@@ -338,13 +337,12 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* FUTURE_RESEARCH: Order book panel — ps.order_book is populated by
-                        the backend every tick (bid_volume, ask_volume, imbalance_ratio,
-                        spread_bps, bid_wall, ask_wall, confidence_modifier) but never
-                        rendered here. A compact stacked bar showing bid vs ask volume
-                        pressure + spread_bps would make the order book confidence modifier
-                        visible. Suggested placement: between the regime badge and Indicators
-                        row. Example display: [████████░░░] 1.8× bid (+0.04 conf) 12bps */}
+                    {/* FUTURE_RESEARCH [NICE-TO-HAVE — ~40 lines of JSX]:
+                        Order book panel. ps.order_book is already populated by the backend
+                        every tick. Render: bid/ask stacked bar + spread_bps + wall flags.
+                        Example: [████████░░░] 1.8× bid (+0.04 conf) 12bps [BID WALL]
+                        Useful for debugging why confidence_modifier swings on thin books.
+                        Implement alongside per-pair equity history above. */}
                     {/* Indicators */}
                     {ind.rsi !== undefined && (
                       <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
