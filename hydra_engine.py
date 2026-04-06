@@ -1254,7 +1254,9 @@ class HydraEngine:
             return 0.0
         avg = sum(returns) / len(returns)
         var = sum((r - avg) ** 2 for r in returns) / (len(returns) - 1)
-        std = math.sqrt(var) if var > 0 else 1.0
+        if var <= 0:
+            return 0.0
+        std = math.sqrt(var)
         # Observed period length — median of candle timestamp deltas.
         # Falls back to nominal candle_interval when observed cadence is
         # synthetic (sub-second) or unavailable (no candles).
@@ -1270,7 +1272,7 @@ class HydraEngine:
         if period_seconds < 1.0:
             period_seconds = float(self.candle_interval) * 60.0
         periods_per_year = (365.25 * 24.0 * 3600.0) / period_seconds
-        return (avg / std) * math.sqrt(periods_per_year) if std > 0 else 0.0
+        return (avg / std) * math.sqrt(periods_per_year)
 
     def get_performance_report(self) -> str:
         """Generate a formatted performance report."""

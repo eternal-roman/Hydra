@@ -759,11 +759,15 @@ class HydraAgent:
             # Phase 2.5: Execute finalized signals on engines (deferred from generate_only)
             # When brain is active, tick() ran with generate_only=True, so we must
             # now execute the final (possibly brain-modified) signals on the engines.
-            # Skip pairs with pending swaps — the swap handler manages their execution.
-            swap_sell_pairs = {s["sell_pair"] for s in pending_swaps} if pending_swaps else set()
+            # Skip pairs involved in pending swaps — the swap handler manages their execution.
+            swap_pairs = set()
+            if pending_swaps:
+                for s in pending_swaps:
+                    swap_pairs.add(s["sell_pair"])
+                    swap_pairs.add(s["buy_pair"])
             if self.brain:
                 for pair in self.pairs:
-                    if pair in swap_sell_pairs:
+                    if pair in swap_pairs:
                         continue
                     state = all_states.get(pair)
                     if not state:
@@ -791,12 +795,12 @@ class HydraAgent:
                         }
 
             # Print status and execute trades (sequential — rate limiting required)
-            # Skip swap sell pairs — the swap handler manages their execution.
+            # Skip swap pairs — the swap handler manages their execution.
             for pair in self.pairs:
                 state = all_states.get(pair)
                 if state:
                     self._print_tick_status(pair, state)
-                    if state.get("last_trade") and pair not in swap_sell_pairs:
+                    if state.get("last_trade") and pair not in swap_pairs:
                         self._execute_trade(pair, state["last_trade"])
 
             # Phase 3: Execute coordinated swaps, then check regime transitions
@@ -1219,12 +1223,16 @@ class HydraAgent:
             reason=f"[SWAP {swap_id}] Buy leg: {reason}",
             strategy=buy_state.get("strategy", "MOMENTUM"),
         )
+        if not buy_trade_obj:
+            print(f"  [SWAP] Engine rejected buy on {buy_pair} (halted or insufficient balance), skipping buy leg")
+            return
 
+        # Use the engine's actual executed amount for the exchange order
         buy_trade = {
             "action": "BUY",
-            "amount": buy_amount,
-            "price": buy_price,
-            "reason": f"[SWAP {swap_id}] Buy leg: {reason}",
+            "amount": buy_trade_obj.amount,
+            "price": buy_trade_obj.price,
+            "reason": buy_trade_obj.reason,
             "confidence": 0.85,
         }
         self._execute_trade(buy_pair, buy_trade)
@@ -1236,8 +1244,8 @@ class HydraAgent:
             "swap_id": swap_id,
             "sell_pair": sell_pair,
             "buy_pair": buy_pair,
-            "sell_amount": sell_amount,
-            "buy_amount": buy_amount,
+            "sell_amount": sell_trade_obj.amount,
+            "buy_amount": buy_trade_obj.amount,
             "reason": reason,
         })
         print(f"  [SWAP] Swap {swap_id} complete")
