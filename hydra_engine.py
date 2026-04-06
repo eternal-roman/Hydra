@@ -952,6 +952,16 @@ class HydraEngine:
         elif signal.action == SignalAction.SELL and self.position.size > 0:
             sell_pct = 1.0 if signal.confidence > 0.7 else 0.5
             sell_amount = self.position.size * sell_pct
+            # Enforce Kraken ordermin: if the position itself is below ordermin,
+            # we can't sell at all. If a partial sell would be below ordermin or
+            # would leave dust below ordermin, force a full close instead.
+            base_asset = self.asset.split("/")[0] if "/" in self.asset else self.asset
+            min_size = self.sizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
+            if self.position.size < min_size:
+                return None  # Entire position is below ordermin — unsellable
+            remaining = self.position.size - sell_amount
+            if sell_amount < min_size or (0 < remaining < min_size):
+                sell_amount = self.position.size  # Force full close
             revenue = sell_amount * current_price
             profit = (current_price - self.position.avg_entry) * sell_amount
             # Capture params before position state is cleared

@@ -106,7 +106,9 @@ position_size = position_value / current_price
 
 **Hard limits:**
 - Never allocate more than 30% of capital to a single trade (conservative) / 50% (competition)
-- Minimum trade value: $0.50
+- Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 XBT)
+- Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 XBT)
+- Sell-side dust prevention: partial sells below ordermin force full close; positions below ordermin are unsellable
 - Confidence threshold to execute: 0.55 (conservative) / 0.50 (competition)
 
 ### Phase 5: Execute Trade
@@ -191,7 +193,7 @@ END LOOP
 2. **Dead Man's Switch**: Always run `kraken order cancel-after 60` before live orders
 3. **Position Limits**: No single position > 30% of portfolio
 4. **Trade Threshold**: Only execute when confidence ≥ 0.55
-5. **Minimum Size**: Skip trades below $50
+5. **Minimum Size**: Enforce Kraken ordermin per asset + costmin per quote currency
 6. **Regime Warmup**: Require 50+ candles before generating signals
 7. **Rate Limiting**: Respect Kraken API limits — minimum 2s between requests
 
