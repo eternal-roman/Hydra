@@ -194,6 +194,8 @@ start_all.bat
 --ws-port          WebSocket port for dashboard (default: 8765)
 --mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
 --paper            Use paper trading — no API keys needed, no real money
+--resume           Restore engine/coordinator state from hydra_session_snapshot.json
+--reset-params     Reset all learned tuning parameters to defaults
 ```
 
 ### Competition Mode

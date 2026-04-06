@@ -759,8 +759,12 @@ class HydraAgent:
             # Phase 2.5: Execute finalized signals on engines (deferred from generate_only)
             # When brain is active, tick() ran with generate_only=True, so we must
             # now execute the final (possibly brain-modified) signals on the engines.
+            # Skip pairs with pending swaps — the swap handler manages their execution.
+            swap_sell_pairs = {s["sell_pair"] for s in pending_swaps} if pending_swaps else set()
             if self.brain:
                 for pair in self.pairs:
+                    if pair in swap_sell_pairs:
+                        continue
                     state = all_states.get(pair)
                     if not state:
                         continue
@@ -781,16 +785,18 @@ class HydraAgent:
                             "amount": round(trade.amount, 8),
                             "value": round(trade.value, value_decimals),
                             "reason": trade.reason,
+                            "confidence": round(trade.confidence, 4),
                             "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
                             "params_at_entry": trade.params_at_entry,
                         }
 
             # Print status and execute trades (sequential — rate limiting required)
+            # Skip swap sell pairs — the swap handler manages their execution.
             for pair in self.pairs:
                 state = all_states.get(pair)
                 if state:
                     self._print_tick_status(pair, state)
-                    if state.get("last_trade"):
+                    if state.get("last_trade") and pair not in swap_sell_pairs:
                         self._execute_trade(pair, state["last_trade"])
 
             # Phase 3: Execute coordinated swaps, then check regime transitions
@@ -1054,6 +1060,9 @@ class HydraAgent:
             status = "FAILED"
         else:
             txid = result.get("txid", result.get("result", {}).get("txid", "unknown"))
+            # Kraken API may return txid as a list — unwrap to string
+            if isinstance(txid, list):
+                txid = txid[0] if txid else "unknown"
             print(f"  [TRADE] SUCCESS: {action.upper()} {amount:.8f} {pair} | txid: {txid}")
             status = "EXECUTED"
             if self.reconciler:
@@ -1181,7 +1190,19 @@ class HydraAgent:
             return
 
         # Size buy based on the sell proceeds (conservative: use 80% of sell value)
+        # sell_trade_obj.price is in the sell pair's quote (e.g. USDC for SOL/USDC)
+        # buy_price is in the buy pair's quote (e.g. XBT for SOL/XBT)
+        # If currencies differ, convert via the XBT/USDC engine price
         sell_value = sell_trade_obj.amount * sell_trade_obj.price
+        sell_quote = sell_pair.split("/")[1] if "/" in sell_pair else ""
+        buy_quote = buy_pair.split("/")[1] if "/" in buy_pair else ""
+        if sell_quote != buy_quote:
+            # Convert sell proceeds to buy quote currency
+            xbt_engine = self.engines.get("XBT/USDC") or self.engines.get("BTC/USDC")
+            if xbt_engine and xbt_engine.prices:
+                xbt_usdc_price = xbt_engine.prices[-1]
+                if xbt_usdc_price > 0:
+                    sell_value = sell_value / xbt_usdc_price  # USDC → XBT
         buy_value = sell_value * 0.8
         buy_amount = buy_value / buy_price
 
