@@ -258,6 +258,13 @@ class RegimeDetector:
         current = prices[-1]
         atr_pct = (atr / current) * 100 if current > 0 else 0
 
+        # FUTURE_RESEARCH: Predictive regime detection — detect impending shifts 1–2 candles
+        # ahead by monitoring MACD line acceleration (second derivative) or BB width
+        # rate-of-change. Reactive detection loses 1–2 candles of edge on regime transitions.
+        # Evidence: regime transitions in test data show consistent MACD divergence 2 candles
+        # before EMA crossover confirms. See also _log_regime_transitions() in hydra_agent.py
+        # for live transition data to validate this hypothesis.
+
         # High volatility overrides trend detection
         if atr_pct > volatile_atr_pct or bb["width"] > volatile_bb_width:
             return Regime.VOLATILE
@@ -510,6 +517,14 @@ class PositionSizer:
         self.min_confidence = min_confidence
         self.max_position_pct = max_position_pct
 
+    # FUTURE_RESEARCH: Win-rate-driven Kelly sizing — replace the fixed 0.25 multiplier
+    # with actual historical win-rate from HydraParamTracker observations.
+    # Full Kelly formula: f* = win_rate - (1 - win_rate) / win_loss_ratio
+    # Current quarter-Kelly uses signal confidence as a proxy edge estimate, but realized
+    # win-rate from hydra_tuner would be a more empirically grounded input.
+    # Risk: requires 50+ completed trades to stabilize; gate on min_observations before
+    # switching multiplier source. Could blend: 0.25 base + 0.25 * realized_kelly_fraction.
+
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using Kelly criterion."""
@@ -555,6 +570,15 @@ class OrderBookAnalyzer:
     Parses Kraken depth data (bids/asks arrays), computes volume imbalance,
     spread, wall detection, and a signal-aware confidence modifier.
     """
+
+    # FUTURE_RESEARCH: Non-linear order book confidence scaling — current linear ±0.07 cap
+    # treats a 3x wall (WALL_MULTIPLIER) the same as a 10x wall in terms of signal weight.
+    # Ideas:
+    #   (a) Log-scaled modifier: modifier = sign * min(log(wall_ratio) / log(10), 1) * MAX_BOOK_MODIFIER
+    #   (b) Flat wall bonus: +0.05 confidence when wall detected in signal direction (on top of imbalance)
+    #   (c) Time-decay: stale order book snapshots (>30s old) should attenuate modifier toward 0
+    # Evidence: large iceberg walls on Kraken consistently precede short-term reversals in
+    # illiquid hours. Linear scaling misses the qualitative jump between a 3x and 10x wall.
 
     # Imbalance thresholds
     BULLISH_THRESHOLD = 1.5   # bid/ask ratio above this = bullish pressure

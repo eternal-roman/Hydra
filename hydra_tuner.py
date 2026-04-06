@@ -105,6 +105,17 @@ class ParameterTracker:
             "timestamp": time.time(),
         })
 
+    # FUTURE_RESEARCH: Monte Carlo backtesting of learned parameters — the tuner currently
+    # learns only from live trades (online Bayesian updating). An offline validation step
+    # would confirm that learned params generalize rather than overfit to recent conditions.
+    # Minimal implementation (no new dependencies — engine is pure stdlib Python):
+    #   1. Fetch last N candles from Kraken REST API (or load from a cached JSON file)
+    #   2. Instantiate a fresh HydraEngine per pair with candidate learned params
+    #   3. Replay candles through engine.tick() in generate_only=True mode
+    #   4. Compare Sharpe ratio and win-rate vs baseline DEFAULT_PARAMS
+    #   5. Only apply learned params if Sharpe improvement > 10% (avoid regression)
+    # Gate: run backtester once per week or on every 3rd tuner update cycle.
+
     def update(self) -> Dict[str, float]:
         """Run Bayesian update if enough observations have accumulated.
 

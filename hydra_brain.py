@@ -136,6 +136,14 @@ class HydraBrain:
     Grok only fires on contested decisions (ADJUST/OVERRIDE or low conviction)."""
 
     STRATEGIST_THRESHOLD = 0.65  # escalate if conviction below this
+    # FUTURE_RESEARCH: Adaptive escalation threshold — fixed 0.65/0.50 fires Grok uniformly
+    # regardless of portfolio health. Dynamic threshold ideas:
+    #   (a) Stress mode: if drawdown > 8% or rolling win-rate (last 20 trades) < 40%, lower
+    #       threshold to 0.75 — escalate more aggressively when the bot is struggling.
+    #   (b) Cruise mode: if win-rate > 60% for 3+ consecutive days, raise to 0.80 — save
+    #       ~$1-2/day in Grok costs when the engine is performing well on its own.
+    #   Formula: threshold = base + 0.15 * clamp(drawdown_pct / max_drawdown_pct, 0, 1)
+    # Requires: drawdown and win-rate stats piped into HydraBrain from the agent each tick.
 
     def __init__(
         self,
