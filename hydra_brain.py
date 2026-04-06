@@ -358,21 +358,25 @@ class HydraBrain:
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_msg}],
-                timeout=10.0,
+                timeout=30.0,
             )
             text = response.content[0].text if response.content and hasattr(response.content[0], "text") else ""
+            # Detect truncated responses — if the model hit max_tokens or was
+            # cut off, the JSON will be incomplete and unparseable.
+            if response.stop_reason == "max_tokens":
+                print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}) — increasing tolerance")
             return text, response.usage.input_tokens, response.usage.output_tokens
 
     def _run_analyst(self, state: Dict) -> tuple:
         """Market Analyst (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
         user_msg = self._build_analyst_prompt(state)
-        text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 300)
+        text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 400)
         return self._parse_json(text), tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:
         """Risk Manager (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
         user_msg = self._build_risk_prompt(state, analyst)
-        text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 250)
+        text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 350)
         return self._parse_json(text), tok_in, tok_out
 
     def _run_strategist(self, state: Dict, analyst: Dict, risk: Dict) -> tuple:
