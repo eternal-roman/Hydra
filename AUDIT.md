@@ -20,7 +20,8 @@
 | WebSocket Broadcast | 3 | 3 | 0 | PASS |
 | Dashboard Components | 15 | 15 | 0 | PASS |
 | Infrastructure | 6 | 5 | 1 (dead man's switch refresh) | PASS |
-| **Total** | **49** | **43** | **6** | **ALL PASS** |
+| **Total (v1.0 audit)** | **49** | **43** | **6** | **ALL PASS** |
+| **Total (v2.4.0)** | **191** | **191** | **0** | **ALL PASS** |
 
 **Bugs found:** 10 (all fixed)
 **Known limitations:** 5 (documented in section 9)
@@ -61,7 +62,7 @@
 - **Location:** `Indicators.atr()` lines 163-176
 - **Test:** True Range computed as max(high-low, |high-prev_close|, |low-prev_close|), averaged over period
 - **Result:** PASS
-- **Notes:** Uses simple average (SMA-style ATR). Wilder's smoothed ATR is an alternative but SMA is standard and acceptable.
+- **Notes:** Uses Wilder's exponential smoothing (SMA seed, then recursive smoothing) — updated in v2.4.0 for consistency with RSI.
 
 ### 1.4 Bollinger Bands
 - **Location:** `Indicators.bollinger_bands()` lines 178-193
@@ -340,15 +341,15 @@
 
 These are documented behaviors, not bugs:
 
-1. **No position reconciliation** — Internal position tracking can diverge from actual exchange holdings if an order partially fills or the agent restarts mid-trade. A future improvement would reconcile via `kraken balance` after each trade.
+1. ~~**No position reconciliation**~~ — **Resolved in v2.4.0.** `OrderReconciler` polls `kraken open-orders` every 5 ticks and detects filled/cancelled orders. Session snapshots (`--resume`) preserve engine state across restarts.
 
 2. **No partial fill handling** — Limit post-only orders may not fill immediately (or at all). The engine records the trade as executed internally regardless. A fill-check mechanism is not yet implemented.
 
-3. **Cross-pair swaps are advisory only** — `_check_cross_pair_swaps()` logs regime-driven rotation opportunities but does not auto-execute them. This is intentional to keep the initial version conservative.
+3. ~~**Cross-pair swaps are advisory only**~~ — **Resolved in v2.1.0.** `_execute_coordinated_swap()` now executes both sell and buy legs via `execute_signal()` + `_execute_trade()`.
 
 4. **DEFENSIVE strategy never buys** — BUY confidence is 0.4 (below the 0.55 execution threshold). This is by design — in a downtrend, the agent preserves capital rather than catching falling knives.
 
-5. **Sharpe ratio requires 30+ ticks** — Returns 0.0 until sufficient data accumulates. Annualization assumes 1-minute candles (525,600 minutes/year).
+5. ~~**Sharpe ratio requires 30+ ticks**~~ — **Resolved in v2.4.0.** Annualization now uses observed candle timestamp deltas (median), not a hardcoded assumption. Still requires 30+ ticks of data.
 
 ---
 

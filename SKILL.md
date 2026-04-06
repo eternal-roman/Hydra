@@ -1,3 +1,8 @@
+<!-- NOTE: This spec was written for v1.0. Core formulas (position sizing, ATR)
+     and trading pairs have been updated inline, but file structure, pseudocode
+     examples, and feature coverage do not reflect v2.x additions (AI brain,
+     self-tuning, order reconciler, session snapshots). See CLAUDE.md for
+     current authoritative reference. -->
 ---
 name: hydra-regime-trader
 description: >
@@ -93,15 +98,16 @@ Each strategy produces a signal: **BUY**, **SELL**, or **HOLD** with a confidenc
 ### Phase 4: Size Position (Quarter-Kelly)
 
 ```
-kelly_fraction = max(0, (confidence * 2 - 1)) * 0.25
-risk_amount = balance * 0.02  # 2% risk per trade
-position_size = (risk_amount * kelly_fraction) / current_price
+edge = max(0, (confidence * 2 - 1))      # 0 at 50% conf, 1 at 100%
+kelly = edge * 0.25                       # Quarter-Kelly fraction
+position_value = kelly * balance          # USD value to trade
+position_size = position_value / current_price
 ```
 
 **Hard limits:**
-- Never allocate more than 30% of capital to a single trade
-- Minimum trade size: $50
-- Confidence threshold to execute: 0.55
+- Never allocate more than 30% of capital to a single trade (conservative) / 50% (competition)
+- Minimum trade value: $0.50
+- Confidence threshold to execute: 0.55 (conservative) / 0.50 (competition)
 
 ### Phase 5: Execute Trade
 
@@ -159,7 +165,7 @@ LOOP every {interval}:
          a. COMPUTE position size via quarter-Kelly
          b. CHECK balance: kraken paper balance -o json
          c. VALIDATE trade size against limits
-         d. EXECUTE: kraken paper {buy|sell} {asset} --type market --volume {size}
+         d. EXECUTE: kraken paper {buy|sell} {asset} --volume {size}
          e. LOG trade with timestamp, price, reason, confidence, strategy
     8. LOG current state: regime, strategy, signal, position, equity
 
@@ -195,7 +201,7 @@ END LOOP
 |-----------|---------|---------|
 | EMA(n)    | close[i] * k + EMA[i-1] * (1-k), k = 2/(n+1) | Trend direction |
 | RSI(14)   | 100 - 100/(1 + avg_gain/avg_loss) | Overbought/oversold |
-| ATR(14)   | SMA of True Range over 14 periods | Volatility measure |
+| ATR(14)   | Wilder's exponential smoothing of True Range | Volatility measure |
 | BB(20,2)  | middle ± 2*stddev(close, 20) | Price bands & regime |
 | MACD      | EMA(12) - EMA(26), signal = EMA(9) of MACD | Momentum |
 

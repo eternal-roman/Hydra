@@ -256,7 +256,8 @@ hydra/
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
 ├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
-├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket
+├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, order reconciler, --resume
+├── hydra_tuner.py          # Self-tuning parameters via Bayesian updating
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
 ├── start_dashboard.bat     # Dashboard with auto-restart
