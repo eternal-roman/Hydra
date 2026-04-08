@@ -355,6 +355,36 @@ class TestEngineBalanceInit:
         agent._set_engine_balances(100.0)
         assert agent.engines["SOL/XBT"].balance == 100.0  # Unchanged (no price to convert)
 
+    def test_xbt_quoted_resumed_with_position_pnl_sane(self):
+        """Resumed SOL/XBT engine with existing position must NOT show insane P&L.
+        Bug: _set_engine_balances set initial_balance to converted cash only,
+        ignoring the position value — causing equity >> initial_balance."""
+        agent = object.__new__(HydraAgent)
+        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.engines = {}
+        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+            engine = HydraEngine(initial_balance=100.0, asset=pair)
+            engine.prices = [price]
+            agent.engines[pair] = engine
+
+        # Simulate resumed position: 0.5 SOL held in SOL/XBT engine
+        agent.engines["SOL/XBT"].position.size = 0.5
+        agent.engines["SOL/XBT"].position.avg_entry = 0.002100
+
+        agent._set_engine_balances(100.0)
+
+        engine = agent.engines["SOL/XBT"]
+        current_price = 0.002167
+        equity = engine.balance + engine.position.size * current_price
+        pnl_pct = ((equity - engine.initial_balance) / engine.initial_balance * 100)
+
+        # P&L must be near 0%, NOT +239000%
+        assert abs(pnl_pct) < 5.0, \
+            f"P&L should be near 0% after balance reset, got {pnl_pct:+.2f}%"
+        # initial_balance must include position value
+        assert engine.initial_balance > engine.balance, \
+            "initial_balance should include position value, not just cash"
+
     def test_equity_history_clean_after_balance_reset(self):
         """Engine that only had candles ingested (no ticks) should have empty equity history."""
         engine = HydraEngine(initial_balance=33.33, asset="SOL/USDC")
