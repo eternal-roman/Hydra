@@ -490,7 +490,6 @@ class HydraAgent:
         self.prev_regimes: Dict[str, str] = {}
 
         # Restore from snapshot if requested
-        self._resumed = False
         if resume:
             self._load_snapshot()
 
@@ -562,7 +561,6 @@ class HydraAgent:
                 if pair in self.coordinator.regime_history:
                     self.coordinator.regime_history[pair] = list(history)
             self.trade_log = list(snapshot.get("trade_log", []))
-            self._resumed = True
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
@@ -630,8 +628,9 @@ class HydraAgent:
         # Convert engine balances from USD to quote currency for non-USD pairs
         # (e.g. SOL/XBT engine needs balance in XBT, not USD).
         # Skip if _set_engine_balances was already called above (live mode with
-        # exchange data), or if --resume loaded a snapshot (already correct currency).
-        if not balances_converted and not self._resumed:
+        # exchange data).  Resumed sessions still need conversion because old
+        # snapshots (pre-multi-currency fix) stored USD values for XBT-quoted pairs.
+        if not balances_converted:
             per_pair_usd = self.initial_balance / len(self.pairs)
             self._set_engine_balances(per_pair_usd)
 
@@ -1270,6 +1269,11 @@ class HydraAgent:
         so SOL/XBT must have its balance in XBT, not USD. Without this conversion,
         position sizes for XBT-quoted pairs are wildly inflated (dividing USD by an
         XBT-denominated price).
+
+        When an engine already holds a position (e.g. from --resume), we set
+        initial_balance = cash + position_value so that P&L starts at 0% from
+        the point of the balance reset, rather than showing a bogus gain from
+        the position being valued against a tiny converted initial balance.
         """
         prices = self._get_asset_prices()
         for pair in self.pairs:
@@ -1277,14 +1281,19 @@ class HydraAgent:
             quote = pair.split("/")[1]
             if quote not in ("USDC", "USD") and quote in prices and prices[quote] > 0:
                 balance_quote = per_pair_usd / prices[quote]
-                engine.initial_balance = balance_quote
                 engine.balance = balance_quote
-                engine.peak_equity = balance_quote
-                print(f"  [HYDRA] {pair}: balance converted ${per_pair_usd:,.2f} -> {balance_quote:.8f} {quote}")
+                # Account for existing position value so P&L doesn't spike
+                current_price = engine.prices[-1] if engine.prices else 0
+                equity = balance_quote + engine.position.size * current_price
+                engine.initial_balance = equity
+                engine.peak_equity = equity
+                print(f"  [HYDRA] {pair}: balance converted ${per_pair_usd:,.2f} -> {balance_quote:.8f} {quote} (equity {equity:.8f})")
             else:
-                engine.initial_balance = per_pair_usd
+                current_price = engine.prices[-1] if engine.prices else 0
+                equity = per_pair_usd + engine.position.size * current_price
                 engine.balance = per_pair_usd
-                engine.peak_equity = per_pair_usd
+                engine.initial_balance = equity
+                engine.peak_equity = equity
 
     def _get_asset_prices(self) -> dict:
         """Get current USD prices for known assets from engine state.
