@@ -490,6 +490,7 @@ class HydraAgent:
         self.prev_regimes: Dict[str, str] = {}
 
         # Restore from snapshot if requested
+        self._resumed = False
         if resume:
             self._load_snapshot()
 
@@ -561,6 +562,7 @@ class HydraAgent:
                 if pair in self.coordinator.regime_history:
                     self.coordinator.regime_history[pair] = list(history)
             self.trade_log = list(snapshot.get("trade_log", []))
+            self._resumed = True
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
@@ -600,6 +602,7 @@ class HydraAgent:
         # Fetch live account balance and initialize engines from real funds
         print("\n  [HYDRA] Checking account balance...")
         bal = KrakenCLI.balance()
+        balances_converted = False
         if "error" not in bal:
             for asset, amount in bal.items():
                 print(f"  [HYDRA]   {asset}: {amount}")
@@ -613,19 +616,24 @@ class HydraAgent:
                 print(f"  [HYDRA] Portfolio: ${total:,.2f} total | ${tradable:,.2f} tradable | ${staked:,.2f} staked")
 
                 if tradable > 0:
-                    per_pair = tradable / len(self.pairs)
-                    for pair in self.pairs:
-                        engine = self.engines[pair]
-                        engine.initial_balance = per_pair
-                        engine.balance = per_pair
-                        engine.peak_equity = per_pair
+                    per_pair_usd = tradable / len(self.pairs)
+                    self._set_engine_balances(per_pair_usd)
+                    balances_converted = True
                     self.initial_balance = tradable
-                    print(f"  [HYDRA] Engine balance set from exchange: ${per_pair:,.2f} per pair")
+                    print(f"  [HYDRA] Engine balance set from exchange: ${per_pair_usd:,.2f} per pair")
                 else:
                     print(f"  [WARN] No tradable balance — using --balance fallback: ${self.initial_balance:,.2f}")
             self._cached_balance = bal
         else:
             print(f"  [WARN] Balance check failed: {bal} — using --balance fallback: ${self.initial_balance:,.2f}")
+
+        # Convert engine balances from USD to quote currency for non-USD pairs
+        # (e.g. SOL/XBT engine needs balance in XBT, not USD).
+        # Skip if _set_engine_balances was already called above (live mode with
+        # exchange data), or if --resume loaded a snapshot (already correct currency).
+        if not balances_converted and not self._resumed:
+            per_pair_usd = self.initial_balance / len(self.pairs)
+            self._set_engine_balances(per_pair_usd)
 
         print(f"\n  [HYDRA] Starting LIVE trading loop")
         print(f"  [HYDRA] Pairs: {', '.join(self.pairs)}")
@@ -1255,6 +1263,29 @@ class HydraAgent:
 
             self.prev_regimes[pair] = current_regime
 
+    def _set_engine_balances(self, per_pair_usd: float):
+        """Set engine balances, converting USD to quote currency for non-USD pairs.
+
+        The engine's internal bookkeeping (balance -= cost) uses the quote currency,
+        so SOL/XBT must have its balance in XBT, not USD. Without this conversion,
+        position sizes for XBT-quoted pairs are wildly inflated (dividing USD by an
+        XBT-denominated price).
+        """
+        prices = self._get_asset_prices()
+        for pair in self.pairs:
+            engine = self.engines[pair]
+            quote = pair.split("/")[1]
+            if quote not in ("USDC", "USD") and quote in prices and prices[quote] > 0:
+                balance_quote = per_pair_usd / prices[quote]
+                engine.initial_balance = balance_quote
+                engine.balance = balance_quote
+                engine.peak_equity = balance_quote
+                print(f"  [HYDRA] {pair}: balance converted ${per_pair_usd:,.2f} -> {balance_quote:.8f} {quote}")
+            else:
+                engine.initial_balance = per_pair_usd
+                engine.balance = per_pair_usd
+                engine.peak_equity = per_pair_usd
+
     def _get_asset_prices(self) -> dict:
         """Get current USD prices for known assets from engine state.
         Returns {canonical_asset: usd_price}."""
@@ -1358,18 +1389,20 @@ class HydraAgent:
         s = state["signal"]
         p = state["portfolio"]
         pos = state["position"]
+        is_usd = pair.endswith("USDC") or pair.endswith("USD")
+        cur = "$" if is_usd else ""
 
         signal_icon = {"BUY": "^", "SELL": "v", "HOLD": "-"}.get(s["action"], "?")
 
-        print(f"  | {pair:<10} | ${state['price']:>10,.4f} | "
+        print(f"  | {pair:<10} | {cur}{state['price']:>10,.4f} | "
               f"{state['regime']:<10} -> {state['strategy']:<15} | "
               f"{signal_icon} {s['action']:<4} ({s['confidence']:.2f}) | "
-              f"Eq: ${p['equity']:>10,.2f} | "
+              f"Eq: {cur}{p['equity']:>10,.{2 if is_usd else 8}f} | "
               f"P&L: {p['pnl_pct']:>+.2f}% | DD: {p['max_drawdown_pct']:.1f}%")
 
         if pos["size"] > 0:
-            print(f"  |            | Pos: {pos['size']:.8f} @ ${pos['avg_entry']:,.4f} | "
-                  f"Unrealized: ${pos['unrealized_pnl']:>+,.2f}")
+            print(f"  |            | Pos: {pos['size']:.8f} @ {cur}{pos['avg_entry']:,.4f} | "
+                  f"Unrealized: {cur}{pos['unrealized_pnl']:>+,.{2 if is_usd else 8}f}")
 
         if state.get("ai_decision") and not state["ai_decision"].get("fallback"):
             ai = state["ai_decision"]
@@ -1423,8 +1456,10 @@ class HydraAgent:
                     print(f"  [SW] {t['time']} | SWAP {t.get('sell_pair','?')} → {t.get('buy_pair','?')} | {t.get('reason','')[:40]}")
                     continue
                 status_icon = "OK" if t.get("status") == "EXECUTED" else "XX"
-                print(f"  [{status_icon}] {t['time']} | {t.get('action','?'):<4} {t.get('amount', 0):.8f} {t.get('pair','?'):<10} "
-                      f"@ ${t.get('price', 0):>10,.4f} | {t.get('status','?')}")
+                t_pair = t.get('pair', '?')
+                t_cur = "$" if t_pair.endswith("USDC") or t_pair.endswith("USD") else ""
+                print(f"  [{status_icon}] {t['time']} | {t.get('action','?'):<4} {t.get('amount', 0):.8f} {t_pair:<10} "
+                      f"@ {t_cur}{t.get('price', 0):>10,.{4 if t_cur else 8}f} | {t.get('status','?')}")
         else:
             print(f"\n  No trades executed during session.")
 
@@ -1449,15 +1484,19 @@ class HydraAgent:
         """Export a competition_results.json for submission proof."""
         elapsed = time.time() - self.start_time if self.start_time else 0
         pair_results = {}
-        total_pnl = 0.0
+        total_pnl_usd = 0.0
         total_trades = 0
+        asset_prices = self._get_asset_prices()
 
         for pair in self.pairs:
             engine = self.engines[pair]
             price = engine.prices[-1] if engine.prices else 0
             equity = engine.balance + engine.position.size * price
             pnl = equity - engine.initial_balance
-            total_pnl += pnl
+            # Convert PnL to USD for cross-pair aggregation
+            quote = pair.split("/")[1]
+            quote_usd = asset_prices.get(quote, 1.0)
+            total_pnl_usd += pnl * quote_usd
             total_trades += engine.total_trades
             win_rate = (engine.win_count / (engine.win_count + engine.loss_count) * 100) if (engine.win_count + engine.loss_count) > 0 else 0
 
@@ -1486,8 +1525,8 @@ class HydraAgent:
             "duration_seconds": round(elapsed, 1),
             "pairs": self.pairs,
             "total_initial_balance": self.initial_balance,
-            "total_net_pnl": round(total_pnl, 4),
-            "total_pnl_pct": round((total_pnl / self.initial_balance) * 100, 4) if self.initial_balance > 0 else 0,
+            "total_net_pnl": round(total_pnl_usd, 4),
+            "total_pnl_pct": round((total_pnl_usd / self.initial_balance) * 100, 4) if self.initial_balance > 0 else 0,
             "total_trades": total_trades,
             "pair_results": pair_results,
             "trade_log": self.trade_log,

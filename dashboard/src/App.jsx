@@ -40,14 +40,17 @@ const signalColor = (s) =>
 const mono = "'JetBrains Mono', monospace";
 const heading = "'Space Grotesk', 'JetBrains Mono', monospace";
 
-const fmtPrice = (p) => {
-  if (!p || p === 0) return "$0";
-  if (p < 0.001) return `$${p.toFixed(8)}`;
-  if (p < 0.01) return `$${p.toFixed(6)}`;
-  if (p < 1) return `$${p.toFixed(4)}`;
-  if (p >= 10000) return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return `$${p.toFixed(2)}`;
+const fmtPrice = (p, prefix = "$") => {
+  if (!p || p === 0) return `${prefix}0`;
+  if (p < 0.001) return `${prefix}${p.toFixed(8)}`;
+  if (p < 0.01) return `${prefix}${p.toFixed(6)}`;
+  if (p < 1) return `${prefix}${p.toFixed(4)}`;
+  if (p >= 10000) return `${prefix}${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${prefix}${p.toFixed(2)}`;
 };
+
+// Determine currency prefix for a pair — "$" for USD-quoted, "" for XBT-quoted
+const pairPrefix = (pair) => (pair && (pair.endsWith("USDC") || pair.endsWith("USD"))) ? "$" : "";
 
 const fmtInd = (v) => {
   if (v === undefined || v === null) return "—";
@@ -206,14 +209,10 @@ export default function App() {
 
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  // P&L: always from engine tracking (reflects session trading performance)
-  const engineEquity = Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  const totalInitial = Object.values(pairs).reduce((s, p) => {
-    const eq = p.portfolio?.equity || 0;
-    const pnl = p.portfolio?.pnl_pct || 0;
-    return s + (pnl !== 0 ? eq / (1 + pnl / 100) : eq);
-  }, 0) || 100;
-  const totalPnl = ((engineEquity - totalInitial) / totalInitial * 100) || 0;
+  // P&L: average of per-pair pnl_pct (each pair gets equal weight since balances
+  // are allocated equally). Direct equity summation would mix USD and XBT.
+  const pairPnls = Object.values(pairs).map(p => p.portfolio?.pnl_pct || 0);
+  const totalPnl = pairPnls.length > 0 ? pairPnls.reduce((s, v) => s + v, 0) / pairPnls.length : 0;
   const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
@@ -282,7 +281,7 @@ export default function App() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
                         <span style={{ fontSize: 16, fontWeight: 700, fontFamily: heading, color: COLORS.text }}>{pair}</span>
-                        <span style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>{fmtPrice(ps.price || 0)}</span>
+                        <span style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>{fmtPrice(ps.price || 0, pairPrefix(pair))}</span>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime), boxShadow: `0 0 8px ${regimeColor(ps.regime)}80` }} />
@@ -313,9 +312,9 @@ export default function App() {
                         {pos.size > 0 ? (
                           <>
                             <div style={{ fontSize: 14, fontWeight: 700, fontFamily: mono }}>{pos.size.toFixed(8)}</div>
-                            <div style={{ fontSize: 10, color: COLORS.textDim, fontFamily: mono }}>@ {fmtPrice(pos.avg_entry || 0)}</div>
+                            <div style={{ fontSize: 10, color: COLORS.textDim, fontFamily: mono }}>@ {fmtPrice(pos.avg_entry || 0, pairPrefix(pair))}</div>
                             <div style={{ fontSize: 12, fontWeight: 700, fontFamily: mono, color: (pos.unrealized_pnl || 0) >= 0 ? COLORS.buy : COLORS.sell, marginTop: 2 }}>
-                              {(pos.unrealized_pnl || 0) >= 0 ? "+" : ""}{(pos.unrealized_pnl || 0).toFixed(2)}
+                              {fmtPrice(Math.abs(pos.unrealized_pnl || 0), (pos.unrealized_pnl || 0) >= 0 ? "+" + pairPrefix(pair) : "-" + pairPrefix(pair))}
                             </div>
                           </>
                         ) : (
@@ -325,7 +324,7 @@ export default function App() {
                       {/* Equity */}
                       <div style={{ minWidth: 110, borderLeft: `1px solid ${COLORS.panelBorder}`, paddingLeft: 16 }}>
                         <div style={{ fontSize: 10, color: COLORS.textDim, textTransform: "uppercase", fontFamily: mono, marginBottom: 4 }}>Balance</div>
-                        <div style={{ fontSize: 14, fontWeight: 700, fontFamily: mono }}>${(port.equity || 0).toFixed(2)}</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, fontFamily: mono }}>{fmtPrice(port.equity || 0, pairPrefix(pair))}</div>
                         <div style={{ fontSize: 11, fontFamily: mono, color: (port.pnl_pct || 0) >= 0 ? COLORS.buy : COLORS.sell }}>
                           {(port.pnl_pct || 0) >= 0 ? "+" : ""}{(port.pnl_pct || 0).toFixed(2)}%
                         </div>
@@ -407,7 +406,7 @@ export default function App() {
                       <span style={{ width: 30, fontWeight: 700, color: t.action === "BUY" ? COLORS.buy : COLORS.sell }}>{t.action}</span>
                       <span style={{ width: 75 }}>{(t.amount || 0).toFixed(6)}</span>
                       <span style={{ width: 65, color: COLORS.textDim }}>{t.pair}</span>
-                      <span style={{ width: 85 }}>{fmtPrice(t.price || 0)}</span>
+                      <span style={{ width: 85 }}>{fmtPrice(t.price || 0, pairPrefix(t.pair))}</span>
                       <span style={{ flex: 1, color: COLORS.textMuted, fontSize: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.reason || ""}</span>
                     </div>
                   ))}
