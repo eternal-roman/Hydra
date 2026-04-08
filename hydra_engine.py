@@ -1314,8 +1314,12 @@ class HydraEngine:
         def sep():
             return "  " + "-" * w
 
-        status = f"HALTED — {self.halt_reason[:40]}" if self.halted else "ACTIVE"
+        status = f"HALTED -- {self.halt_reason[:40]}" if self.halted else "ACTIVE"
         base = self.asset.split("/")[0]
+        quote = self.asset.split("/")[1] if "/" in self.asset else "USDC"
+        is_usd = quote in ("USDC", "USD")
+        cur = "$" if is_usd else ""
+        vd = 2 if is_usd else 8  # value decimals
 
         lines = [
             "",
@@ -1324,10 +1328,10 @@ class HydraEngine:
             "  " + "=" * w,
             row("Asset", self.asset),
             row("Duration", f"{self.tick_count} ticks"),
-            row("Initial Balance", f"${self.initial_balance:,.2f}"),
-            row("Final Balance", f"${equity:,.2f}"),
+            row("Initial Balance", f"{cur}{self.initial_balance:,.{vd}f}" + ("" if is_usd else f" {quote}")),
+            row("Final Balance", f"{cur}{equity:,.{vd}f}" + ("" if is_usd else f" {quote}")),
             sep(),
-            row("Net P&L", f"${pnl:+,.2f}  ({pnl_pct:+.2f}%)"),
+            row("Net P&L", f"{cur}{pnl:+,.{vd}f}  ({pnl_pct:+.2f}%)"),
             row("Max Drawdown", f"{self.max_drawdown:.2f}%"),
             row("Sharpe Ratio", f"{self._calc_sharpe():.4f}"),
             row("Profit Factor", f"{profit_factor:.2f}"),
@@ -1338,9 +1342,9 @@ class HydraEngine:
             row("Win Rate", f"{win_rate:.1f}%"),
             sep(),
             row("Open Position", f"{self.position.size:.6f} {base}"),
-            row("Avg Entry", "$" + _fmt_price(self.position.avg_entry)),
-            row("Unrealized P&L", f"${self.position.unrealized_pnl:+,.2f}"),
-            row("Cash Balance", f"${self.balance:,.2f}"),
+            row("Avg Entry", f"{cur}" + _fmt_price(self.position.avg_entry)),
+            row("Unrealized P&L", f"{cur}{self.position.unrealized_pnl:+,.{vd}f}"),
+            row("Cash Balance", f"{cur}{self.balance:,.{vd}f}"),
             sep(),
             row("Status", status),
             "  " + "=" * w,

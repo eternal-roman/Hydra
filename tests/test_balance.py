@@ -296,6 +296,65 @@ class TestEngineBalanceInit:
         size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
         assert size == 0, "Tiny balance should fail to meet minimum order size"
 
+    def test_xbt_quoted_pair_balance_converted_from_usd(self):
+        """SOL/XBT engine balance must be in XBT, not USD.
+        Without conversion, position sizes are ~60,000x too large because
+        the sizer divides a USD balance by an XBT-denominated price."""
+        agent = object.__new__(HydraAgent)
+        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.engines = {}
+        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+            engine = HydraEngine(initial_balance=100.0, asset=pair)
+            engine.prices = [price]
+            agent.engines[pair] = engine
+
+        per_pair_usd = 100.0
+        agent._set_engine_balances(per_pair_usd)
+
+        # SOL/USDC and XBT/USDC: balance stays in USD
+        assert agent.engines["SOL/USDC"].balance == 100.0
+        assert agent.engines["XBT/USDC"].balance == 100.0
+
+        # SOL/XBT: balance converted from $100 USD to XBT
+        xbt_balance = agent.engines["SOL/XBT"].balance
+        expected_xbt = 100.0 / 60000.0  # ~0.001667 XBT
+        assert abs(xbt_balance - expected_xbt) < 1e-8, \
+            f"SOL/XBT balance should be ~{expected_xbt:.8f} XBT, got {xbt_balance:.8f}"
+
+    def test_xbt_quoted_pair_produces_sane_position_size(self):
+        """After balance conversion, SOL/XBT position size should be reasonable,
+        not the inflated 4000+ SOL that caused the 'api' failures."""
+        agent = object.__new__(HydraAgent)
+        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.engines = {}
+        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+            engine = HydraEngine(initial_balance=100.0, asset=pair)
+            engine.prices = [price]
+            agent.engines[pair] = engine
+
+        agent._set_engine_balances(100.0)
+
+        # Now calculate position size for SOL/XBT
+        engine = agent.engines["SOL/XBT"]
+        size = engine.sizer.calculate(0.58, engine.balance, 0.002167, "SOL/XBT")
+
+        # With ~0.00167 XBT balance, position should be small (< 1 SOL),
+        # NOT the 4000+ SOL that was happening before
+        assert size < 10, f"Position size should be small, got {size:.4f} SOL"
+
+    def test_xbt_quoted_no_conversion_without_xbt_price(self):
+        """If XBT price unavailable, SOL/XBT balance stays in USD (safe fallback)."""
+        agent = object.__new__(HydraAgent)
+        agent.pairs = ["SOL/XBT"]
+        agent.engines = {}
+        engine = HydraEngine(initial_balance=100.0, asset="SOL/XBT")
+        engine.prices = [0.002167]
+        agent.engines["SOL/XBT"] = engine
+
+        # No XBT/USDC or SOL/USDC engines → can't derive XBT price
+        agent._set_engine_balances(100.0)
+        assert agent.engines["SOL/XBT"].balance == 100.0  # Unchanged (no price to convert)
+
     def test_equity_history_clean_after_balance_reset(self):
         """Engine that only had candles ingested (no ticks) should have empty equity history."""
         engine = HydraEngine(initial_balance=33.33, asset="SOL/USDC")
