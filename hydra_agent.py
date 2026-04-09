@@ -1538,6 +1538,31 @@ class HydraAgent:
         print(f"\n  Past performance does not guarantee future results. Not financial advice.")
         print(f"  {'='*80}")
 
+    def _compute_pair_realized_pnl(self, pair: str) -> float:
+        """Compute realized P&L for a pair from trade history.
+
+        Sums sell revenue minus buy cost across all trades in the log.
+        This is accurate across resumes because it uses actual trade prices,
+        not engine balances which get pooled and re-split on each restart.
+        """
+        buy_cost = 0.0
+        sell_revenue = 0.0
+        for t in self.trade_log:
+            if t.get("pair") != pair or t.get("type") == "COORDINATED_SWAP":
+                continue
+            # Count all trades the engine committed (EXECUTED and FAILED-but-committed).
+            # With rollback logic, truly failed trades are rolled back and not in the
+            # engine state. Pre-rollback FAILED trades that were committed remain in
+            # the log and are correct to include (e.g., the SOL/USDC BUY that Kraken
+            # accepted despite returning an API error).
+            amt = t.get("amount", 0)
+            price = t.get("price", 0)
+            if t["action"] == "BUY":
+                buy_cost += amt * price
+            elif t["action"] == "SELL":
+                sell_revenue += amt * price
+        return sell_revenue - buy_cost
+
     def _export_competition_results(self, base_dir: str, ts: int):
         """Export a competition_results.json for submission proof."""
         elapsed = time.time() - self.start_time if self.start_time else 0
@@ -1549,20 +1574,26 @@ class HydraAgent:
         for pair in self.pairs:
             engine = self.engines[pair]
             price = engine.prices[-1] if engine.prices else 0
-            equity = engine.balance + engine.position.size * price
-            pnl = equity - engine.initial_balance
-            # Convert PnL to USD for cross-pair aggregation
             quote = pair.split("/")[1]
             quote_usd = asset_prices.get(quote, 1.0)
-            total_pnl_usd += pnl * quote_usd
+
+            # Per-pair P&L from trade history (accurate across resumes).
+            # Engine balances get pooled and re-split on each --resume, so
+            # equity - initial_balance only reflects the current session.
+            # Trade history gives the true per-pair realized performance.
+            realized_pnl = self._compute_pair_realized_pnl(pair)
+            unrealized_pnl = engine.position.size * (price - engine.position.avg_entry) if engine.position.size > 0 else 0
+            pair_pnl = realized_pnl + unrealized_pnl
+            pair_pnl_usd = pair_pnl * quote_usd
+            total_pnl_usd += pair_pnl_usd
             total_trades += engine.total_trades
             win_rate = (engine.win_count / (engine.win_count + engine.loss_count) * 100) if (engine.win_count + engine.loss_count) > 0 else 0
 
             pair_results[pair] = {
-                "initial_balance": engine.initial_balance,
-                "final_equity": round(equity, 4),
-                "net_pnl": round(pnl, 4),
-                "pnl_pct": round((pnl / engine.initial_balance) * 100, 4) if engine.initial_balance > 0 else 0,
+                "realized_pnl": round(realized_pnl, 8),
+                "unrealized_pnl": round(unrealized_pnl, 8),
+                "net_pnl": round(pair_pnl, 8),
+                "net_pnl_usd": round(pair_pnl_usd, 4),
                 "max_drawdown_pct": round(engine.max_drawdown, 4),
                 "total_trades": engine.total_trades,
                 "wins": engine.win_count,
@@ -1573,10 +1604,7 @@ class HydraAgent:
                 "position_size": round(engine.position.size, 8),
             }
 
-        # Compute cumulative P&L from competition start (survives --resume).
-        # Engine-level P&L only reflects the current session since
-        # _set_engine_balances resets initial_balance on each resume.
-        # The true competition P&L is: current_total_equity - start_balance.
+        # Aggregate cumulative P&L from competition start (survives --resume).
         start_balance = self._competition_start_balance if self._competition_start_balance is not None else self.initial_balance
         current_total_equity_usd = 0.0
         for pair in self.pairs:
