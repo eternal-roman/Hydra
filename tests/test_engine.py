@@ -475,7 +475,6 @@ class TestHydraEngine:
             })
             engine.tick()
         # Engine should have opened a position via mean reversion buy
-        assert engine.total_trades > 0, "Expected at least one buy trade"
         assert engine.position.size > 0, "Expected position to be open"
         assert engine.position.avg_entry > 0, "Expected valid entry price"
         assert engine.balance < 10000, "Expected balance to decrease after buying"
@@ -529,6 +528,205 @@ class TestHydraEngine:
             if state.get("last_trade") and state["last_trade"]["action"] == "SELL":
                 assert state["last_trade"]["profit"] is not None
                 break
+
+
+class TestSnapshotAndRollback:
+    """Tests for snapshot_position/restore_position and win/loss counting."""
+
+    def _make_engine_with_data(self, balance=10000, asset="SOL/USDC"):
+        """Create engine with enough candle data for trading."""
+        engine = HydraEngine(initial_balance=balance, asset=asset)
+        import random
+        rng = random.Random(99)
+        for i in range(55):
+            p = 100.0 + rng.uniform(-0.3, 0.3)
+            engine.ingest_candle({
+                "open": p - 0.1, "high": p + 0.2, "low": p - 0.2,
+                "close": p, "volume": 100, "timestamp": float(i),
+            })
+        return engine
+
+    def test_snapshot_position_roundtrip(self):
+        """snapshot_position + restore_position preserves all trade-relevant state."""
+        engine = self._make_engine_with_data()
+        engine.position.size = 5.0
+        engine.position.avg_entry = 95.0
+        engine.position.realized_pnl = 1.23
+        engine.position.params_at_entry = {"volatile_atr_pct": 2.0}
+        engine.balance = 9500.0
+        engine.total_trades = 7
+        engine.win_count = 3
+        engine.loss_count = 4
+        engine.trades.append("dummy")
+
+        snap = engine.snapshot_position()
+
+        # Mutate everything
+        engine.position.size = 0.0
+        engine.position.avg_entry = 0.0
+        engine.position.realized_pnl = 0.0
+        engine.position.params_at_entry = None
+        engine.balance = 0.0
+        engine.total_trades = 0
+        engine.win_count = 0
+        engine.loss_count = 0
+        engine.trades.append("extra")
+
+        engine.restore_position(snap)
+
+        assert engine.position.size == 5.0
+        assert engine.position.avg_entry == 95.0
+        assert engine.position.realized_pnl == 1.23
+        assert engine.position.params_at_entry == {"volatile_atr_pct": 2.0}
+        assert engine.balance == 9500.0
+        assert engine.total_trades == 7
+        assert engine.win_count == 3
+        assert engine.loss_count == 4
+        assert len(engine.trades) == 1  # trimmed back to snapshot length
+
+    def test_win_loss_counted_on_full_close_only(self):
+        """Win/loss only incremented when position fully closes, not on partials."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        # Manually set position (entry at 90, current price higher = profitable)
+        engine.position.size = 10.0
+        engine.position.avg_entry = 90.0
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9100.0
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+
+        # Partial sell (conf < 0.7 → sell 50%)
+        trade = engine.execute_signal("SELL", 0.60, "test partial", "MOMENTUM")
+        if trade:
+            assert engine.win_count == 0, "Partial sell should not count as win"
+            assert engine.loss_count == 0, "Partial sell should not count as loss"
+            assert engine.position.realized_pnl > 0, "Partial should accumulate realized_pnl"
+
+    def test_winning_round_trip_counted_correctly(self):
+        """Full round trip (BUY → SELL close) with profit counts as WIN."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        # Simulate a profitable trade
+        engine.position.size = 1.0
+        engine.position.avg_entry = 90.0
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9910.0
+        # Full close (conf > 0.7)
+        trade = engine.execute_signal("SELL", 0.75, "close winner", "MOMENTUM")
+        assert trade is not None
+        assert engine.position.size == 0.0
+        assert engine.win_count == 1
+        assert engine.loss_count == 0
+
+    def test_losing_round_trip_counted_correctly(self):
+        """Full close with loss counts as LOSS."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        engine.position.size = 1.0
+        engine.position.avg_entry = 110.0  # entry above current price = loss
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9890.0
+        trade = engine.execute_signal("SELL", 0.75, "close loser", "MOMENTUM")
+        assert trade is not None
+        assert engine.position.size == 0.0
+        assert engine.win_count == 0
+        assert engine.loss_count == 1
+
+    def test_rollback_restores_after_failed_buy(self):
+        """Simulates engine commit + rollback for a failed BUY order."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+
+        # Snapshot before trade
+        snap = engine.snapshot_position()
+        orig_balance = engine.balance
+        orig_pos = engine.position.size
+        orig_trades = engine.total_trades
+
+        # Execute a BUY (engine commits internally)
+        trade = engine.execute_signal("BUY", 0.70, "test buy", "MOMENTUM")
+        if trade:
+            assert engine.position.size > orig_pos
+            assert engine.balance < orig_balance
+            # total_trades only increments on round-trip close, not BUY
+            assert engine.total_trades == orig_trades
+
+            # Simulate Kraken failure → rollback
+            engine.restore_position(snap)
+            assert engine.balance == orig_balance
+            assert engine.position.size == orig_pos
+            assert engine.total_trades == orig_trades
+
+    def test_rollback_restores_after_failed_sell(self):
+        """Simulates engine commit + rollback for a failed SELL order."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        engine.position.size = 5.0
+        engine.position.avg_entry = 95.0
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9525.0
+
+        snap = engine.snapshot_position()
+
+        # Execute a full SELL (conf > 0.7 → 100%)
+        trade = engine.execute_signal("SELL", 0.75, "test sell", "MOMENTUM")
+        if trade:
+            assert engine.position.size == 0.0
+            assert engine.win_count == 1  # profitable trade
+
+            # Simulate failure → rollback
+            engine.restore_position(snap)
+            assert engine.position.size == 5.0
+            assert engine.position.avg_entry == 95.0
+            assert engine.win_count == 0
+            assert engine.balance == 9525.0
+
+    def test_realized_pnl_accumulates_across_partials(self):
+        """Multiple partial sells accumulate realized_pnl; final close uses total."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        engine.position.size = 10.0
+        engine.position.avg_entry = 90.0
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9100.0
+
+        # Partial sell 1 (conf 0.60 → 50%)
+        t1 = engine.execute_signal("SELL", 0.60, "partial 1", "MOMENTUM")
+        assert t1 is not None
+        assert engine.position.size > 0, "Should still have position after partial"
+        pnl_after_partial = engine.position.realized_pnl
+        assert pnl_after_partial > 0, "Partial sell was profitable"
+
+        # Close remaining (this might need dust guard depending on size)
+        t2 = engine.execute_signal("SELL", 0.75, "close", "MOMENTUM")
+        if t2:
+            # If position closed, win should be based on accumulated pnl
+            if engine.position.size == 0:
+                assert engine.win_count == 1
+                assert t2.profit > pnl_after_partial, "Close profit should be accumulated"
 
 
 class TestCompetitionMode:
@@ -754,7 +952,7 @@ def run_tests():
     test_classes = [
         TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
         TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
-        TestHydraEngine, TestCompetitionMode, TestBrain,
+        TestHydraEngine, TestSnapshotAndRollback, TestCompetitionMode, TestBrain,
     ]
 
     for cls in test_classes:

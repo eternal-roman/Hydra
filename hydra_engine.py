@@ -934,7 +934,6 @@ class HydraEngine:
                     self.position.params_at_entry = self.snapshot_params()
 
                 self.balance -= cost
-                self.total_trades += 1
 
                 trade = Trade(
                     action="BUY",
@@ -984,9 +983,10 @@ class HydraEngine:
                 self.total_trades += 1
                 if total_profit > 0:
                     self.win_count += 1
-                elif total_profit < 0:
+                else:
+                    # Break-even (== 0) counts as loss per industry standard:
+                    # zero gain after fees and opportunity cost is not a win.
                     self.loss_count += 1
-                # total_profit == 0 is break-even, don't count as win or loss
                 self.position.params_at_entry = None
                 self.position.realized_pnl = 0.0
 
@@ -1073,6 +1073,32 @@ class HydraEngine:
             self.mean_reversion_rsi_sell = params["mean_reversion_rsi_sell"]
         if "min_confidence_threshold" in params:
             self.sizer.min_confidence = params["min_confidence_threshold"]
+
+    def snapshot_position(self) -> Dict[str, Any]:
+        """Snapshot position/balance state for rollback on failed exchange orders."""
+        return {
+            "balance": self.balance,
+            "position_size": self.position.size,
+            "position_avg_entry": self.position.avg_entry,
+            "position_realized_pnl": self.position.realized_pnl,
+            "position_params_at_entry": self.position.params_at_entry,
+            "total_trades": self.total_trades,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+            "trades_len": len(self.trades),
+        }
+
+    def restore_position(self, snap: Dict[str, Any]) -> None:
+        """Restore position/balance state from snapshot (rollback failed trade)."""
+        self.balance = snap["balance"]
+        self.position.size = snap["position_size"]
+        self.position.avg_entry = snap["position_avg_entry"]
+        self.position.realized_pnl = snap["position_realized_pnl"]
+        self.position.params_at_entry = snap["position_params_at_entry"]
+        self.total_trades = snap["total_trades"]
+        self.win_count = snap["win_count"]
+        self.loss_count = snap["loss_count"]
+        self.trades = self.trades[:snap["trades_len"]]
 
     def snapshot_runtime(self) -> Dict[str, Any]:
         """Serialize full engine runtime state for session persistence."""

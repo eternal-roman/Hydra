@@ -782,6 +782,7 @@ class HydraAgent:
                         continue
                     sig = state.get("signal", {})
                     engine = self.engines[pair]
+                    pre_trade_snap = engine.snapshot_position()
                     trade = engine.execute_signal(
                         action=sig.get("action", "HOLD"),
                         confidence=sig.get("confidence", 0),
@@ -801,6 +802,7 @@ class HydraAgent:
                             "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
                             "params_at_entry": trade.params_at_entry,
                         }
+                        state["_pre_trade_snapshot"] = pre_trade_snap
 
             # Print status and execute trades (sequential — rate limiting required)
             # Skip swap pairs — the swap handler manages their execution.
@@ -809,7 +811,11 @@ class HydraAgent:
                 if state:
                     self._print_tick_status(pair, state)
                     if state.get("last_trade") and pair not in swap_pairs:
-                        self._execute_trade(pair, state["last_trade"])
+                        success = self._execute_trade(pair, state["last_trade"])
+                        if not success and state.get("_pre_trade_snapshot"):
+                            engine = self.engines[pair]
+                            engine.restore_position(state["_pre_trade_snapshot"])
+                            print(f"  [ROLLBACK] {pair}: engine state rolled back after failed order")
 
             # Phase 3: Execute coordinated swaps, then check regime transitions
             if pending_swaps:
@@ -910,8 +916,14 @@ class HydraAgent:
                     "timestamp": aligned_ts,
                 })
 
-        # When brain is active, defer execution until after brain review
-        return engine.tick(generate_only=bool(self.brain))
+        # Snapshot position before tick so we can rollback if exchange order fails.
+        # When generate_only=True (brain active), execute_signal happens later and
+        # snapshots there. When generate_only=False, tick() may execute internally.
+        pre_trade_snap = engine.snapshot_position() if not self.brain else None
+        state = engine.tick(generate_only=bool(self.brain))
+        if pre_trade_snap and state.get("last_trade"):
+            state["_pre_trade_snapshot"] = pre_trade_snap
+        return state
 
     def _apply_brain(self, pair: str, state: dict, all_engine_states: dict) -> dict:
         """Phase 2: Run brain with full cross-pair context. Mutates state in place."""
@@ -1016,8 +1028,12 @@ class HydraAgent:
             },
         }
 
-    def _execute_trade(self, pair: str, trade: dict):
-        """Execute a trade via kraken-cli — paper or live limit post-only."""
+    def _execute_trade(self, pair: str, trade: dict) -> bool:
+        """Execute a trade via kraken-cli — paper or live limit post-only.
+
+        Returns True if the order was accepted by the exchange, False otherwise.
+        The caller should rollback engine state on False to prevent phantom positions.
+        """
         action = trade["action"].lower()
         amount = trade["amount"]
 
@@ -1035,7 +1051,7 @@ class HydraAgent:
                 "price": trade["price"], "status": "TICKER_FAILED",
                 "error": ticker.get("error", "no bid/ask"),
             })
-            return
+            return False
 
         limit_price = ticker["bid"] if action == "buy" else ticker["ask"]
 
@@ -1055,7 +1071,7 @@ class HydraAgent:
                 "price": limit_price, "status": "VALIDATION_FAILED",
                 "error": val_result["error"],
             })
-            return
+            return False
 
         # Re-fetch ticker for fresh bid/ask — price may have moved during validation
         time.sleep(2)
@@ -1072,6 +1088,7 @@ class HydraAgent:
         if "error" in result:
             print(f"  [TRADE] FAILED: {result['error']}")
             status = "FAILED"
+            success = False
         else:
             txid = result.get("txid", result.get("result", {}).get("txid", "unknown"))
             # Kraken API may return txid as a list — unwrap to string
@@ -1079,6 +1096,7 @@ class HydraAgent:
                 txid = txid[0] if txid else "unknown"
             print(f"  [TRADE] SUCCESS: {action.upper()} {amount:.8f} {pair} | txid: {txid}")
             status = "EXECUTED"
+            success = True
             if self.reconciler:
                 self.reconciler.register(txid, pair, action, amount)
 
@@ -1095,8 +1113,9 @@ class HydraAgent:
             "result": result if "error" not in result else None,
             "error": result.get("error"),
         })
+        return success
 
-    def _execute_paper_trade(self, pair: str, action: str, amount: float, trade: dict):
+    def _execute_paper_trade(self, pair: str, action: str, amount: float, trade: dict) -> bool:
         """Execute a paper trade via kraken-cli paper commands."""
         time.sleep(2)
         print(f"  [PAPER] Executing {action.upper()} {amount:.8f} {pair} (paper market)...")
@@ -1108,9 +1127,11 @@ class HydraAgent:
         if "error" in result:
             print(f"  [PAPER] FAILED: {result['error']}")
             status = "PAPER_FAILED"
+            success = False
         else:
             print(f"  [PAPER] SUCCESS: {action.upper()} {amount:.8f} {pair}")
             status = "PAPER_EXECUTED"
+            success = True
 
         self.trade_log.append({
             "time": datetime.now(timezone.utc).isoformat(),
@@ -1125,6 +1146,7 @@ class HydraAgent:
             "result": result if "error" not in result else None,
             "error": result.get("error"),
         })
+        return success
 
     def _run_tuner_update(self):
         """Run Bayesian parameter update across all pair trackers."""
@@ -1173,6 +1195,7 @@ class HydraAgent:
         print(f"  [SWAP] Reason: {reason}")
 
         # Leg 1: Sell — update engine state first, then execute on exchange
+        sell_snap = sell_engine.snapshot_position()
         sell_trade_obj = sell_engine.execute_signal(
             action="SELL", confidence=0.85,
             reason=f"[SWAP {swap_id}] Sell leg: {reason}",
@@ -1189,7 +1212,10 @@ class HydraAgent:
             "reason": sell_trade_obj.reason,
             "confidence": 0.85,
         }
-        self._execute_trade(sell_pair, sell_trade)
+        if not self._execute_trade(sell_pair, sell_trade):
+            sell_engine.restore_position(sell_snap)
+            print(f"  [ROLLBACK] {sell_pair}: engine state rolled back after failed swap sell")
+            return
 
         # Leg 2: Buy on the target pair
         # Use the proceeds to size the buy
@@ -1205,6 +1231,7 @@ class HydraAgent:
 
         # Engine sizes the buy via Kelly criterion — execute_signal handles
         # position sizing, balance check, and minimum order enforcement internally.
+        buy_snap = buy_engine.snapshot_position()
         buy_trade_obj = buy_engine.execute_signal(
             action="BUY", confidence=0.85,
             reason=f"[SWAP {swap_id}] Buy leg: {reason}",
@@ -1222,7 +1249,9 @@ class HydraAgent:
             "reason": buy_trade_obj.reason,
             "confidence": 0.85,
         }
-        self._execute_trade(buy_pair, buy_trade)
+        if not self._execute_trade(buy_pair, buy_trade):
+            buy_engine.restore_position(buy_snap)
+            print(f"  [ROLLBACK] {buy_pair}: engine state rolled back after failed swap buy")
 
         # Log the coordinated swap
         self.trade_log.append({
