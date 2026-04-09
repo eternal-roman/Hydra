@@ -416,6 +416,7 @@ class HydraAgent:
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
+        self._competition_start_balance = None  # Set once on first start, persisted across resumes
         self.interval = interval_seconds
         self.duration = duration_seconds
         self.mode = mode
@@ -530,6 +531,7 @@ class HydraAgent:
             "mode": self.mode,
             "paper": self.paper,
             "pairs": self.pairs,
+            "competition_start_balance": self._competition_start_balance,
             "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
             "coordinator_regime_history": self.coordinator.regime_history,
             "trade_log": self.trade_log[-200:],
@@ -562,6 +564,8 @@ class HydraAgent:
                 if pair in self.coordinator.regime_history:
                     self.coordinator.regime_history[pair] = list(history)
             self.trade_log = list(snapshot.get("trade_log", []))
+            if snapshot.get("competition_start_balance"):
+                self._competition_start_balance = float(snapshot["competition_start_balance"])
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
@@ -619,6 +623,10 @@ class HydraAgent:
                     self._set_engine_balances(per_pair_usd)
                     balances_converted = True
                     self.initial_balance = tradable
+                    # Lock in competition starting balance on first start only —
+                    # on --resume, preserve the original so cumulative P&L is correct.
+                    if self._competition_start_balance is None:
+                        self._competition_start_balance = tradable
                     print(f"  [HYDRA] Engine balance set from exchange: ${per_pair_usd:,.2f} per pair")
                 else:
                     print(f"  [WARN] No tradable balance — using --balance fallback: ${self.initial_balance:,.2f}")
@@ -634,6 +642,10 @@ class HydraAgent:
         if not balances_converted:
             per_pair_usd = self.initial_balance / len(self.pairs)
             self._set_engine_balances(per_pair_usd)
+
+        # Ensure competition start balance is set (fallback/paper path)
+        if self._competition_start_balance is None:
+            self._competition_start_balance = self.initial_balance
 
         print(f"\n  [HYDRA] Starting LIVE trading loop")
         print(f"  [HYDRA] Pairs: {', '.join(self.pairs)}")
@@ -1554,6 +1566,21 @@ class HydraAgent:
                 "position_size": round(engine.position.size, 8),
             }
 
+        # Compute cumulative P&L from competition start (survives --resume).
+        # Engine-level P&L only reflects the current session since
+        # _set_engine_balances resets initial_balance on each resume.
+        # The true competition P&L is: current_total_equity - start_balance.
+        start_balance = self._competition_start_balance or self.initial_balance
+        current_total_equity_usd = 0.0
+        for pair in self.pairs:
+            engine = self.engines[pair]
+            price = engine.prices[-1] if engine.prices else 0
+            equity = engine.balance + engine.position.size * price
+            quote = pair.split("/")[1]
+            quote_usd = asset_prices.get(quote, 1.0)
+            current_total_equity_usd += equity * quote_usd
+        cumulative_pnl_usd = current_total_equity_usd - start_balance
+
         results = {
             "agent": "HYDRA",
             "version": "1.1.0",
@@ -1563,9 +1590,11 @@ class HydraAgent:
             "timestamp_end": datetime.now(timezone.utc).isoformat(),
             "duration_seconds": round(elapsed, 1),
             "pairs": self.pairs,
+            "competition_start_balance": round(start_balance, 4),
+            "current_total_equity": round(current_total_equity_usd, 4),
             "total_initial_balance": self.initial_balance,
-            "total_net_pnl": round(total_pnl_usd, 4),
-            "total_pnl_pct": round((total_pnl_usd / self.initial_balance) * 100, 4) if self.initial_balance > 0 else 0,
+            "total_net_pnl": round(cumulative_pnl_usd, 4),
+            "total_pnl_pct": round((cumulative_pnl_usd / start_balance) * 100, 4) if start_balance > 0 else 0,
             "total_trades": total_trades,
             "pair_results": pair_results,
             "trade_log": self.trade_log,
