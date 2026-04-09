@@ -128,7 +128,8 @@ Think step by step. Then respond ONLY with this JSON:
 
 # Cost per million tokens: (input, output)
 COST_ANTHROPIC = (3.0, 15.0)
-COST_XAI = (2.0, 10.0)
+COST_OPENAI = (2.0, 8.0)
+COST_XAI = (2.0, 6.0)
 
 
 class HydraBrain:
@@ -140,6 +141,7 @@ class HydraBrain:
     def __init__(
         self,
         anthropic_key: str = "",
+        openai_key: str = "",
         xai_key: str = "",
         max_daily_cost: float = 10.0,
         call_interval: int = 1,
@@ -154,8 +156,13 @@ class HydraBrain:
             self.primary_client = anthropic.Anthropic(api_key=anthropic_key)
             self.primary_provider = "anthropic"
             self.primary_model = "claude-sonnet-4-6"
+        elif openai_key and HAS_OPENAI:
+            # OpenAI: same SDK as xAI but default base_url + gpt-4.1
+            self.primary_client = openai.OpenAI(api_key=openai_key)
+            self.primary_provider = "openai"
+            self.primary_model = "gpt-4.1"
         elif xai_key and HAS_OPENAI:
-            # Fallback: use xAI for primary if no Anthropic key
+            # Fallback: use xAI for primary if no Anthropic or OpenAI key
             self.primary_client = openai.OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1")
             self.primary_provider = "xai"
             self.primary_model = "grok-4.20-0309-reasoning"
@@ -169,7 +176,7 @@ class HydraBrain:
             self.has_strategist = True
 
         if not self.primary_client:
-            raise ValueError("No AI provider available — need ANTHROPIC_API_KEY or XAI_API_KEY")
+            raise ValueError("No AI provider available — need ANTHROPIC_API_KEY, OPENAI_API_KEY, or XAI_API_KEY")
 
         self.model = self.primary_model  # for get_stats display
         self.provider = self.primary_provider
@@ -178,8 +185,10 @@ class HydraBrain:
         self.strategist_threshold = strategist_threshold
 
         # Cost tracking
-        self.INPUT_COST_PER_M = COST_ANTHROPIC[0] if self.primary_provider == "anthropic" else COST_XAI[0]
-        self.OUTPUT_COST_PER_M = COST_ANTHROPIC[1] if self.primary_provider == "anthropic" else COST_XAI[1]
+        cost_map = {"anthropic": COST_ANTHROPIC, "openai": COST_OPENAI, "xai": COST_XAI}
+        primary_cost = cost_map[self.primary_provider]
+        self.INPUT_COST_PER_M = primary_cost[0]
+        self.OUTPUT_COST_PER_M = primary_cost[1]
 
         # State
         self.decision_history: Dict[str, List[Dict]] = {}
@@ -339,7 +348,7 @@ class HydraBrain:
         provider = provider or self.primary_provider
         model = model or self.primary_model
 
-        if provider == "xai":
+        if provider in ("xai", "openai"):
             response = client.chat.completions.create(
                 model=model,
                 max_tokens=max_tokens,

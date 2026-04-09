@@ -468,13 +468,14 @@ class HydraAgent:
         self.brain = None
         if HAS_BRAIN:
             anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            openai_key = os.environ.get("OPENAI_API_KEY", "")
             xai_key = os.environ.get("XAI_API_KEY", "")
-            if anthropic_key or xai_key:
+            if anthropic_key or openai_key or xai_key:
                 try:
                     strategist_threshold = 0.50 if self.mode == "competition" else 0.65
                     self.brain = HydraBrain(
-                        anthropic_key=anthropic_key, xai_key=xai_key,
-                        strategist_threshold=strategist_threshold,
+                        anthropic_key=anthropic_key, openai_key=openai_key,
+                        xai_key=xai_key, strategist_threshold=strategist_threshold,
                     )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
