@@ -95,7 +95,7 @@ python tests/test_balance.py       # 38 balance & asset conversion tests
 - **Strategic Advisor** (Grok 4 Reasoning) — called only on contested decisions (ADJUST/OVERRIDE or conviction < 0.65)
 - Only fires on BUY/SELL signals (HOLD is free, no API call — skip logic lives in the agent's `_apply_brain`, not in the brain itself)
 - Falls back to engine-only on API failure, budget exceeded, or missing key
-- Enable by setting `ANTHROPIC_API_KEY` and/or `XAI_API_KEY` in `.env`
+- Enable by setting `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and/or `XAI_API_KEY` in `.env`
 - Cost: ~$3-5/day with Grok escalation on ~20-30% of signals
 - Do not change the JSON response format in system prompts — the parser depends on it
 - Escalation threshold is parameterized (0.65 conservative, 0.50 competition) — it controls when Grok fires
