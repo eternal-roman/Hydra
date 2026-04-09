@@ -564,7 +564,7 @@ class HydraAgent:
                 if pair in self.coordinator.regime_history:
                     self.coordinator.regime_history[pair] = list(history)
             self.trade_log = list(snapshot.get("trade_log", []))
-            if snapshot.get("competition_start_balance"):
+            if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
@@ -855,6 +855,12 @@ class HydraAgent:
             # Run tuner updates every 50 completed trades
             if self._completed_trades_since_update >= 50:
                 self._run_tuner_update()
+
+            # Strip internal rollback data before broadcasting to dashboard
+            for pair in self.pairs:
+                state = all_states.get(pair)
+                if state:
+                    state.pop("_pre_trade_snapshot", None)
 
             # Broadcast state to dashboard (uses cached balance, no extra API call)
             dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
@@ -1264,6 +1270,7 @@ class HydraAgent:
         if not self._execute_trade(buy_pair, buy_trade):
             buy_engine.restore_position(buy_snap)
             print(f"  [ROLLBACK] {buy_pair}: engine state rolled back after failed swap buy")
+            return
 
         # Log the coordinated swap
         self.trade_log.append({
@@ -1570,7 +1577,7 @@ class HydraAgent:
         # Engine-level P&L only reflects the current session since
         # _set_engine_balances resets initial_balance on each resume.
         # The true competition P&L is: current_total_equity - start_balance.
-        start_balance = self._competition_start_balance or self.initial_balance
+        start_balance = self._competition_start_balance if self._competition_start_balance is not None else self.initial_balance
         current_total_equity_usd = 0.0
         for pair in self.pairs:
             engine = self.engines[pair]

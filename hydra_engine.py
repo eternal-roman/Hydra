@@ -1086,6 +1086,11 @@ class HydraEngine:
             "win_count": self.win_count,
             "loss_count": self.loss_count,
             "trades_len": len(self.trades),
+            # tick() updates these before we know if the exchange accepted the order.
+            # Capture them so the non-brain path can restore on failed orders.
+            "equity_history_len": len(self.equity_history),
+            "peak_equity": self.peak_equity,
+            "max_drawdown": self.max_drawdown,
         }
 
     def restore_position(self, snap: Dict[str, Any]) -> None:
@@ -1099,6 +1104,10 @@ class HydraEngine:
         self.win_count = snap["win_count"]
         self.loss_count = snap["loss_count"]
         self.trades = self.trades[:snap["trades_len"]]
+        # Restore analytics state that tick() may have updated before rollback
+        self.equity_history = self.equity_history[:snap["equity_history_len"]]
+        self.peak_equity = snap["peak_equity"]
+        self.max_drawdown = snap["max_drawdown"]
 
     def snapshot_runtime(self) -> Dict[str, Any]:
         """Serialize full engine runtime state for session persistence."""

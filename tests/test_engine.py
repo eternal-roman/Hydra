@@ -643,6 +643,51 @@ class TestSnapshotAndRollback:
         assert engine.win_count == 0
         assert engine.loss_count == 1
 
+    def test_breakeven_counted_as_loss(self):
+        """Break-even trade (P&L == 0) counts as loss per industry standard."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        engine.position.size = 1.0
+        engine.position.avg_entry = 100.0  # same as current price = break-even
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9900.0
+        trade = engine.execute_signal("SELL", 0.75, "close breakeven", "MOMENTUM")
+        assert trade is not None
+        assert engine.position.size == 0.0
+        assert engine.win_count == 0, "Break-even should not be a win"
+        assert engine.loss_count == 1, "Break-even should count as loss"
+        assert engine.total_trades == 1
+        assert engine.total_trades == engine.win_count + engine.loss_count
+
+    def test_rollback_restores_equity_history(self):
+        """Rollback restores equity_history, peak_equity, and max_drawdown."""
+        engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
+        for i in range(60):
+            engine.ingest_candle({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 100, "timestamp": float(i),
+            })
+        snap = engine.snapshot_position()
+        orig_eq_len = len(engine.equity_history)
+        orig_peak = engine.peak_equity
+        orig_dd = engine.max_drawdown
+
+        # Execute a losing sell that would increase drawdown
+        engine.position.size = 5.0
+        engine.position.avg_entry = 110.0
+        engine.balance = 9450.0
+        engine.execute_signal("SELL", 0.75, "losing sell", "MOMENTUM")
+
+        # Restore — equity_history, peak_equity, max_drawdown should revert
+        engine.restore_position(snap)
+        assert len(engine.equity_history) == orig_eq_len
+        assert engine.peak_equity == orig_peak
+        assert engine.max_drawdown == orig_dd
+
     def test_rollback_restores_after_failed_buy(self):
         """Simulates engine commit + rollback for a failed BUY order."""
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
