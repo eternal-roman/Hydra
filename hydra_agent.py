@@ -199,6 +199,20 @@ class KrakenCLI:
         return KrakenCLI._run(["trades-history"])
 
     @staticmethod
+    def spreads(pair: str, since=None) -> dict:
+        """Get recent bid/ask spreads for a pair.
+
+        Returns raw Kraken response (dict with a data-bearing key plus a 'last' cursor),
+        or {"error": ...} on failure. Callers should use the 'last' cursor to
+        incrementally fetch only new rows on subsequent polls.
+        """
+        p = KrakenCLI._resolve_pair(pair)
+        args = ["spreads", p]
+        if since is not None:
+            args.extend(["--since", str(since)])
+        return KrakenCLI._run(args)
+
+    @staticmethod
     def volume(pairs=None) -> dict:
         """Get 30-day trade volume and current fee tier.
 
@@ -510,6 +524,11 @@ class HydraAgent:
         self._fee_tier_cache: dict = {}
         self._fee_tier_fetched_at: float = 0.0
 
+        # Spread history — diagnostic rolling window per pair, polled every 5 ticks.
+        # Not persisted in snapshot; re-fills cheaply on restart.
+        self._spread_history: Dict[str, list] = {pair: [] for pair in pairs}
+        self._spread_last_cursor: Dict[str, object] = {pair: None for pair in pairs}
+
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
@@ -755,6 +774,20 @@ class HydraAgent:
                               f"(mod {book_analysis['confidence_modifier']:+.2f})"
                               f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
                               f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
+
+            # Phase 1.8: Spread history diagnostic (polled every 5 ticks, attached every tick)
+            # Purely observational — does NOT influence signal confidence or sizing.
+            if tick % 5 == 0:
+                for pair in self.pairs:
+                    time.sleep(2)  # Rate limit
+                    sp = KrakenCLI.spreads(pair, since=self._spread_last_cursor.get(pair))
+                    self._record_spreads(pair, sp)
+            # Attach the latest 60-row cached window to each pair's state every tick
+            # (engine.tick() rebuilds state dicts, so we must re-attach even on non-poll ticks)
+            for pair in self.pairs:
+                state = engine_states.get(pair)
+                if state is not None:
+                    state["spread_history"] = list(self._spread_history.get(pair, []))[-60:]
 
             # ── Total modifier cap ──────────────────────────────────
             # External modifiers (cross-pair + order book) can reduce confidence without limit
@@ -1438,6 +1471,41 @@ class HydraAgent:
                     maker_pct = None
             result["pair_fees"][friendly] = {"maker_pct": maker_pct, "taker_pct": taker_pct}
         return result
+
+    def _record_spreads(self, pair: str, response: dict) -> None:
+        """Append new rows from a `kraken spreads` response into the rolling history.
+
+        Updates the 'last' cursor so subsequent polls incrementally fetch only new rows.
+        Silently drops malformed rows and caps the per-pair history at 120 entries.
+        No-ops on error responses (diagnostic, not safety-critical).
+        """
+        if not isinstance(response, dict) or "error" in response:
+            return
+        rows = []
+        for key, val in response.items():
+            if key == "last":
+                try:
+                    self._spread_last_cursor[pair] = int(val)
+                except (TypeError, ValueError):
+                    pass
+                continue
+            if isinstance(val, list) and not rows:
+                rows = val
+        history = self._spread_history.setdefault(pair, [])
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 3:
+                continue
+            try:
+                ts = float(row[0])
+                bid = float(row[1])
+                ask = float(row[2])
+            except (TypeError, ValueError):
+                continue
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+            spread_bps = round((ask - bid) / mid * 10000, 2) if mid > 0 else 0.0
+            history.append({"ts": ts, "bid": bid, "ask": ask, "spread_bps": spread_bps})
+        if len(history) > 120:
+            self._spread_history[pair] = history[-120:]
 
     def _compute_balance_usd(self, balance: dict) -> dict:
         """Convert raw Kraken balance to USD breakdown with staked asset handling.

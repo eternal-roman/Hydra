@@ -346,6 +346,17 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Spread diagnostic (populated every 5 ticks by Phase 1.8) */}
+                    {ps.spread_history && ps.spread_history.length > 0 && (() => {
+                      const latest = ps.spread_history[ps.spread_history.length - 1];
+                      return (
+                        <div style={{ marginTop: 4, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+                          Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(latest.spread_bps || 0).toFixed(1)}</span> bps
+                          <span style={{ marginLeft: 8, color: COLORS.textMuted }}>({ps.spread_history.length} samples)</span>
+                        </div>
+                      );
+                    })()}
+
                     {/* AI Reasoning */}
                     {ps.ai_decision && !ps.ai_decision.fallback && (
                       <div style={{ marginTop: 8, padding: "8px 10px", background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}25`, borderRadius: 6 }}>

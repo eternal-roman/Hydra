@@ -97,6 +97,43 @@ class TestVolumeArgsAndParsing:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.spreads — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+class TestSpreadsArgsAndParsing:
+    def test_spreads_requires_pair(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC"))
+        assert stub.calls[0][0] == "spreads"
+        assert "SOL/USDC" in stub.calls[0]
+
+    def test_spreads_resolves_pair(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/XBT"))
+        assert stub.calls == [["spreads", "SOLXBT"]]
+
+    def test_spreads_without_since_omits_flag(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC"))
+        assert "--since" not in stub.calls[0]
+
+    def test_spreads_with_since_includes_flag(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC", since=1700000000))
+        assert stub.calls == [["spreads", "SOL/USDC", "--since", "1700000000"]]
+
+    def test_spreads_returns_passthrough(self):
+        payload = {"SOLUSDC": [[1700000000, "130.1", "130.2"]], "last": 1700000001}
+        result, _ = _with_stub(payload, lambda: KrakenCLI.spreads("SOL/USDC"))
+        assert result == payload
+
+    def test_spreads_returns_error_dict(self):
+        err = {"error": "EGeneral:Temporary lockout"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.spreads("SOL/USDC"))
+        assert result == err
+
+    def test_spreads_negative_since_still_stringified(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC", since=-1))
+        assert stub.calls == [["spreads", "SOL/USDC", "--since", "-1"]]
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST: HydraAgent._extract_fee_tier — defensive parsing
 # ═══════════════════════════════════════════════════════════════
 
@@ -185,6 +222,103 @@ class TestFeeTierExtraction:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: HydraAgent._record_spreads — rolling history
+# ═══════════════════════════════════════════════════════════════
+
+class TestRecordSpreads:
+    def _make_agent(self):
+        agent = object.__new__(HydraAgent)
+        agent._spread_history = {"SOL/USDC": [], "XBT/USDC": []}
+        agent._spread_last_cursor = {"SOL/USDC": None, "XBT/USDC": None}
+        return agent
+
+    def test_record_spreads_error_response_noop(self):
+        agent = self._make_agent()
+        agent._record_spreads("SOL/USDC", {"error": "boom"})
+        assert agent._spread_history["SOL/USDC"] == []
+        assert agent._spread_last_cursor["SOL/USDC"] is None
+
+    def test_record_spreads_non_dict_noop(self):
+        agent = self._make_agent()
+        agent._record_spreads("SOL/USDC", None)
+        assert agent._spread_history["SOL/USDC"] == []
+
+    def test_record_spreads_appends_rows(self):
+        agent = self._make_agent()
+        response = {
+            "SOLUSDC": [
+                [1700000000, "130.10", "130.20"],
+                [1700000005, "130.15", "130.25"],
+            ],
+            "last": 1700000005,
+        }
+        agent._record_spreads("SOL/USDC", response)
+        assert len(agent._spread_history["SOL/USDC"]) == 2
+
+    def test_record_spreads_updates_cursor(self):
+        agent = self._make_agent()
+        response = {"SOLUSDC": [[1700000000, "130.10", "130.20"]], "last": 1700000500}
+        agent._record_spreads("SOL/USDC", response)
+        assert agent._spread_last_cursor["SOL/USDC"] == 1700000500
+
+    def test_record_spreads_computes_spread_bps(self):
+        agent = self._make_agent()
+        response = {"SOLUSDC": [[1700000000, "100.00", "100.10"]], "last": 1}
+        agent._record_spreads("SOL/USDC", response)
+        row = agent._spread_history["SOL/USDC"][0]
+        # (100.10 - 100.00) / 100.05 * 10000 = ~9.995 bps
+        assert abs(row["spread_bps"] - 9.995) < 0.01
+        assert row["bid"] == 100.00
+        assert row["ask"] == 100.10
+
+    def test_record_spreads_bounds_to_120_entries(self):
+        agent = self._make_agent()
+        # Pre-fill with 115 entries, then push 10 more → should cap at 120
+        agent._spread_history["SOL/USDC"] = [
+            {"ts": float(i), "bid": 1.0, "ask": 1.01, "spread_bps": 99.5} for i in range(115)
+        ]
+        response = {
+            "SOLUSDC": [[1700000000 + i, "1.00", "1.01"] for i in range(10)],
+            "last": 1700000010,
+        }
+        agent._record_spreads("SOL/USDC", response)
+        assert len(agent._spread_history["SOL/USDC"]) == 120
+
+    def test_record_spreads_skips_malformed_rows(self):
+        agent = self._make_agent()
+        response = {
+            "SOLUSDC": [
+                [1700000000, "130.10", "130.20"],   # good
+                "not-a-list",                         # bad
+                [1700000005],                         # too short
+                [1700000006, "bad", "bad"],           # unparseable floats
+                [1700000007, "131.00", "131.05"],   # good
+            ],
+            "last": 1700000007,
+        }
+        agent._record_spreads("SOL/USDC", response)
+        assert len(agent._spread_history["SOL/USDC"]) == 2
+
+    def test_record_spreads_handles_missing_data_key(self):
+        agent = self._make_agent()
+        agent._record_spreads("SOL/USDC", {"last": 1700000000})  # only 'last', no list
+        assert agent._spread_history["SOL/USDC"] == []
+        assert agent._spread_last_cursor["SOL/USDC"] == 1700000000
+
+    def test_record_spreads_malformed_cursor_silently_ignored(self):
+        agent = self._make_agent()
+        agent._record_spreads("SOL/USDC", {"SOLUSDC": [], "last": "garbage"})
+        assert agent._spread_last_cursor["SOL/USDC"] is None
+
+    def test_record_spreads_zero_prices_yield_zero_bps(self):
+        agent = self._make_agent()
+        response = {"SOLUSDC": [[1700000000, "0", "0"]], "last": 1}
+        agent._record_spreads("SOL/USDC", response)
+        row = agent._spread_history["SOL/USDC"][0]
+        assert row["spread_bps"] == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -196,7 +330,9 @@ def run_tests():
 
     test_classes = [
         TestVolumeArgsAndParsing,
+        TestSpreadsArgsAndParsing,
         TestFeeTierExtraction,
+        TestRecordSpreads,
     ]
 
     for cls in test_classes:
