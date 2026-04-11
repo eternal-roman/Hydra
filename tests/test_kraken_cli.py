@@ -134,6 +134,89 @@ class TestSpreadsArgsAndParsing:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: HF-001 — KrakenCLI._format_price pair-aware precision
+# ═══════════════════════════════════════════════════════════════
+
+class TestPriceFormat:
+    """Regression tests for HF-001 (pair-aware price precision).
+
+    Kraken rejects orders whose price has more meaningful decimals than
+    the pair's native precision. _format_price rounds to the correct
+    number of decimals per pair before the .8f format. See
+    hydra_agent.py PRICE_DECIMALS dict."""
+
+    def test_solusdc_rounds_to_2_decimals(self):
+        # 80.4745 would fail live Kraken with "price can only be specified up to 2 decimals"
+        assert KrakenCLI._format_price("SOL/USDC", 80.4745) == "80.47000000"
+
+    def test_solusdc_exact_2dp_preserved(self):
+        assert KrakenCLI._format_price("SOL/USDC", 84.71) == "84.71000000"
+
+    def test_solusdc_rounds_up_unambiguous(self):
+        # 80.476 is unambiguously above .475, avoids float-representation of 80.475
+        # (which is actually ~80.4749999... in float, so banker's rounding goes down)
+        assert KrakenCLI._format_price("SOL/USDC", 80.476) == "80.48000000"
+
+    def test_xbtusdc_rounds_to_1_decimal(self):
+        assert KrakenCLI._format_price("XBT/USDC", 73031.94) == "73031.90000000"
+
+    def test_xbtusdc_exact_1dp_preserved(self):
+        assert KrakenCLI._format_price("XBT/USDC", 72858.7) == "72858.70000000"
+
+    def test_solxbt_rounds_to_7_decimals(self):
+        # 0.00116523 has 8 meaningful decimals → must round to 7
+        assert KrakenCLI._format_price("SOL/XBT", 0.00116523) == "0.00116520"
+
+    def test_solxbt_exact_7dp_preserved(self):
+        assert KrakenCLI._format_price("SOL/XBT", 0.0011629) == "0.00116290"
+
+    def test_unknown_pair_falls_back_to_8dp(self):
+        assert KrakenCLI._format_price("UNKNOWN/PAIR", 1.234567890123) == "1.23456789"
+
+    def test_slashless_form_accepted(self):
+        # "SOLUSDC" should resolve to the same 2-decimal precision as "SOL/USDC"
+        assert KrakenCLI._format_price("SOLUSDC", 80.4745) == "80.47000000"
+
+    def test_integer_price_preserved(self):
+        assert KrakenCLI._format_price("SOL/USDC", 100) == "100.00000000"
+
+    def test_zero_price_preserved(self):
+        assert KrakenCLI._format_price("SOL/USDC", 0.0) == "0.00000000"
+
+    def test_order_buy_uses_rounded_price(self):
+        # Integration: order_buy on SOL/USDC with a 4-decimal price should
+        # end up with 2-decimal precision in the --price arg.
+        _, stub = _with_stub({"txid": ["ABC"]},
+                              lambda: KrakenCLI.order_buy("SOL/USDC", 0.02, price=80.4745))
+        call = stub.calls[0]
+        assert "--price" in call
+        price_idx = call.index("--price")
+        assert call[price_idx + 1] == "80.47000000", f"got {call[price_idx+1]!r}"
+
+    def test_order_sell_uses_rounded_price(self):
+        _, stub = _with_stub({"txid": ["ABC"]},
+                              lambda: KrakenCLI.order_sell("XBT/USDC", 0.00005, price=73031.94))
+        call = stub.calls[0]
+        price_idx = call.index("--price")
+        assert call[price_idx + 1] == "73031.90000000"
+
+    def test_order_amend_with_pair_uses_rounded_price(self):
+        _, stub = _with_stub({"txid": ["ABC"]},
+                              lambda: KrakenCLI.order_amend("TX1", limit_price=80.4745, pair="SOL/USDC"))
+        call = stub.calls[0]
+        price_idx = call.index("--limit-price")
+        assert call[price_idx + 1] == "80.47000000"
+
+    def test_order_amend_without_pair_falls_back(self):
+        # When pair is not provided, old .8f behavior kicks in (caller's responsibility)
+        _, stub = _with_stub({"txid": ["ABC"]},
+                              lambda: KrakenCLI.order_amend("TX1", limit_price=100.0))
+        call = stub.calls[0]
+        price_idx = call.index("--limit-price")
+        assert call[price_idx + 1] == "100.00000000"
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST: KrakenCLI.order_amend — argument construction
 # ═══════════════════════════════════════════════════════════════
 
@@ -410,6 +493,7 @@ def run_tests():
     test_classes = [
         TestVolumeArgsAndParsing,
         TestSpreadsArgsAndParsing,
+        TestPriceFormat,
         TestOrderAmendArgs,
         TestFeeTierExtraction,
         TestRecordSpreads,

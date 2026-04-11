@@ -20,6 +20,7 @@ import argparse
 import signal as sig
 import asyncio
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
@@ -75,6 +76,29 @@ class KrakenCLI:
         'ZUSD': 'USD', 'ZUSDC': 'USDC',
     }
 
+    # HF-001 fix: Kraken rejects orders whose price has more meaningful decimals
+    # than the pair's native precision. Previously, f"{price:.8f}" was used
+    # regardless of pair, which was safe only when the price came directly from
+    # ticker["bid"]/ticker["ask"] (Kraken's own precision preserved through the
+    # float round-trip). Any derived price (drift->amend, maker-fee shading,
+    # midpoint) would hit "EOrder:Invalid price:PAIR price can only be specified
+    # up to N decimals." Verified against Kraken's pairs endpoint.
+    #
+    # Entries are duplicated for every form Hydra may pass in: friendly
+    # (SOL/USDC), slashless (SOLUSDC), and PAIR_MAP-resolved. _format_price
+    # also has a slashless-match fallback in case new pairs get added without
+    # updating every form.
+    PRICE_DECIMALS = {
+        'SOL/USDC': 2, 'SOLUSDC': 2,
+        'XBT/USDC': 1, 'XBTUSDC': 1,
+        'BTC/USDC': 1, 'BTCUSDC': 1,
+        'SOL/XBT': 7, 'SOLXBT': 7,
+        'SOL/BTC': 7, 'SOLBTC': 7,
+        'BTC/USD': 1, 'BTCUSD': 1,
+        'XBT/USD': 1, 'XBTUSD': 1,
+    }
+    PRICE_DECIMALS_DEFAULT = 8  # conservative fallback for unknown pairs
+
     @staticmethod
     def _is_staked(asset: str) -> bool:
         """Check if an asset name represents a staked/bonded/locked position."""
@@ -117,6 +141,26 @@ class KrakenCLI:
     @staticmethod
     def _resolve_pair(pair: str) -> str:
         return KrakenCLI.PAIR_MAP.get(pair, pair)
+
+    @staticmethod
+    def _format_price(pair: str, price: float) -> str:
+        """HF-001 fix: format a price at the pair's native precision.
+
+        Looks up the pair in PRICE_DECIMALS (accepting the friendly form with
+        slash, the slashless form, or the PAIR_MAP-resolved form). Falls back
+        to PRICE_DECIMALS_DEFAULT (8) for unknown pairs. Rounds the price to
+        the allowed number of decimals and formats with trailing zeros to 8dp
+        (Kraken accepts trailing zeros as insignificant but rejects meaningful
+        decimals beyond the pair's precision).
+        """
+        decimals = (
+            KrakenCLI.PRICE_DECIMALS.get(pair)
+            or KrakenCLI.PRICE_DECIMALS.get(pair.replace("/", ""))
+            or KrakenCLI.PRICE_DECIMALS.get(KrakenCLI._resolve_pair(pair))
+            or KrakenCLI.PRICE_DECIMALS_DEFAULT
+        )
+        rounded = round(float(price), decimals)
+        return f"{rounded:.8f}"
 
     # ─── Public Market Data ───
 
@@ -239,7 +283,7 @@ class KrakenCLI:
         p = KrakenCLI._resolve_pair(pair)
         args = ["order", "buy", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
-            args.extend(["--price", f"{price:.8f}"])
+            args.extend(["--price", KrakenCLI._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
         if validate:
@@ -254,7 +298,7 @@ class KrakenCLI:
         p = KrakenCLI._resolve_pair(pair)
         args = ["order", "sell", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
-            args.extend(["--price", f"{price:.8f}"])
+            args.extend(["--price", KrakenCLI._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
         if validate:
@@ -263,14 +307,17 @@ class KrakenCLI:
 
     @staticmethod
     def order_amend(txid, limit_price=None, order_qty=None,
-                    post_only: bool = True) -> dict:
+                    post_only: bool = True, pair: str = None) -> dict:
         """Amend a live limit order in place (preserves queue priority and txid).
 
         At least one of limit_price / order_qty must be provided, and txid must
-        be non-empty. post_only rejects the amend if the new price would cross the
-        book — safer than a silent taker flip. Returns raw Kraken response or
-        {"error": ...}. Note: this method has no caller yet; it is groundwork for
-        a future drift-detect repricing loop.
+        be non-empty. post_only rejects the amend if the new price would cross
+        the book — safer than a silent taker flip.
+
+        HF-001: pair is an optional arg used ONLY for price precision rounding
+        via PRICE_DECIMALS. If omitted, falls back to 8 decimals (unsafe for
+        low-precision pairs like SOL/USDC which accept only 2). Any caller that
+        computes a derived limit_price MUST pass pair to get correct rounding.
         """
         if txid is None or txid == "":
             return {"error": "order_amend requires txid"}
@@ -278,7 +325,10 @@ class KrakenCLI:
             return {"error": "order_amend requires limit_price or order_qty"}
         args = ["order", "amend", "--txid", str(txid)]
         if limit_price is not None:
-            args.extend(["--limit-price", f"{float(limit_price):.8f}"])
+            if pair:
+                args.extend(["--limit-price", KrakenCLI._format_price(pair, limit_price)])
+            else:
+                args.extend(["--limit-price", f"{float(limit_price):.8f}"])
         if order_qty is not None:
             args.extend(["--order-qty", f"{float(order_qty):.8f}"])
         if post_only:
@@ -719,258 +769,283 @@ class HydraAgent:
 
         tick = 0
         while self.running and (self.duration == 0 or (time.time() - self.start_time) < self.duration):
-            tick += 1
-            elapsed = time.time() - self.start_time
-            remaining = "∞" if self.duration == 0 else f"{self.duration - elapsed:.0f}s"
+            # HF-004 fix: wrap the tick body in try/except so an unhandled
+            # exception does not kill the run() loop. When start_hydra.bat
+            # restarts the agent after a crash, in-memory trade_log entries
+            # since the last snapshot are lost. Log the traceback and continue.
+            trade_log_size_start = len(self.trade_log)
+            try:
+                tick += 1
+                elapsed = time.time() - self.start_time
+                remaining = "∞" if self.duration == 0 else f"{self.duration - elapsed:.0f}s"
 
-            ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-            print(f"\n  === Tick {tick} | {ts} | Elapsed: {elapsed:.0f}s | Remaining: {remaining} ===")
+                ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+                print(f"\n  === Tick {tick} | {ts} | Elapsed: {elapsed:.0f}s | Remaining: {remaining} ===")
 
-            # Refresh dead man's switch every tick (live mode only)
-            if not self.paper:
-                KrakenCLI.cancel_after(self._dms_timeout)
-                time.sleep(2)  # Rate limit
-
-            # Phase 1: Fetch data and run all engines (regimes, signals, positions)
-            engine_states = {}
-            for pair in self.pairs:
-                engine_states[pair] = self._fetch_and_tick(pair)
-                time.sleep(2)  # Rate limit after OHLC fetch
-
-            # Capture engine's original signal before any external modifiers
-            original_signals = {}
-            for pair, state in engine_states.items():
-                if state:
-                    original_signals[pair] = {
-                        "action": state["signal"]["action"],
-                        "confidence": state["signal"]["confidence"],
-                    }
-
-            # Phase 1.5: Cross-pair regime coordination
-            # Update coordinator with latest regimes, then apply overrides
-            for pair, state in engine_states.items():
-                if state:
-                    self.coordinator.update(pair, state.get("regime", "RANGING"))
-
-            cross_overrides = self.coordinator.get_overrides(engine_states)
-            pending_swaps = []
-            for pair, override in cross_overrides.items():
-                state = engine_states.get(pair)
-                if not state:
-                    continue
-                print(f"  [CROSS] {pair}: {override['action']} → {override['signal']} "
-                      f"(conf {override['confidence_adj']:.2f}) — {override['reason']}")
-                state["signal"]["action"] = override["signal"]
-                state["signal"]["confidence"] = override["confidence_adj"]
-                state["signal"]["reason"] = f"[CROSS-PAIR] {override['reason']}"
-                state["cross_pair_override"] = override
-                # Collect swap opportunities for execution after trades
-                if override.get("swap"):
-                    pending_swaps.append(override["swap"])
-
-            # If coordinator changed signal direction, reset baseline for cap
-            for pair in self.pairs:
-                orig = original_signals.get(pair)
-                state = engine_states.get(pair)
-                if orig and state and state["signal"]["action"] != orig["action"]:
-                    original_signals[pair]["confidence"] = state["signal"]["confidence"]
-
-            # Phase 1.75: Order book intelligence
-            # Fetch depth data and apply confidence modifiers before brain runs
-            for pair in self.pairs:
-                state = engine_states.get(pair)
-                if not state:
-                    continue
-                time.sleep(2)  # Rate limit
-                depth = KrakenCLI.depth(pair, count=10)
-                if isinstance(depth, dict) and "error" not in depth:
-                    signal_action = state["signal"].get("action", "HOLD")
-                    book_analysis = OrderBookAnalyzer.analyze(depth, signal_action)
-                    state["order_book"] = book_analysis
-                    # Apply modifier to signal confidence
-                    old_conf = state["signal"]["confidence"]
-                    new_conf = max(0.0, min(1.0, old_conf + book_analysis["confidence_modifier"]))
-                    if book_analysis["confidence_modifier"] != 0:
-                        state["signal"]["confidence"] = new_conf
-                        print(f"  [BOOK] {pair}: imbalance {book_analysis['imbalance_ratio']:.2f}, "
-                              f"spread {book_analysis['spread_bps']:.1f}bps, "
-                              f"conf {old_conf:.2f} → {new_conf:.2f} "
-                              f"(mod {book_analysis['confidence_modifier']:+.2f})"
-                              f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
-                              f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
-
-            # Phase 1.8: Spread history diagnostic (polled every 5 ticks, attached every tick)
-            # Purely observational — does NOT influence signal confidence or sizing.
-            if tick % 5 == 0:
-                for pair in self.pairs:
+                # Refresh dead man's switch every tick (live mode only)
+                if not self.paper:
+                    KrakenCLI.cancel_after(self._dms_timeout)
                     time.sleep(2)  # Rate limit
-                    sp = KrakenCLI.spreads(pair, since=self._spread_last_cursor.get(pair))
-                    self._record_spreads(pair, sp)
-            # Attach the latest 60-row cached window to each pair's state every tick
-            # (engine.tick() rebuilds state dicts, so we must re-attach even on non-poll ticks)
-            for pair in self.pairs:
-                state = engine_states.get(pair)
-                if state is not None:
-                    state["spread_history"] = list(self._spread_history.get(pair, []))[-60:]
 
-            # ── Total modifier cap ──────────────────────────────────
-            # External modifiers (cross-pair + order book) can reduce confidence without limit
-            # but cannot boost it more than +0.15 above the engine's original signal.
-            # This prevents stacking modifiers from inflating weak signals into high-conviction
-            # trades that get oversized via Kelly criterion.
-            MAX_TOTAL_MODIFIER_BOOST = 0.15
-            for pair in self.pairs:
-                state = engine_states.get(pair)
-                orig = original_signals.get(pair)
-                if not state or not orig:
-                    continue
-                orig_conf = orig["confidence"]
-                if state["signal"]["confidence"] > orig_conf + MAX_TOTAL_MODIFIER_BOOST:
-                    state["signal"]["confidence"] = orig_conf + MAX_TOTAL_MODIFIER_BOOST
-                if state["signal"]["confidence"] < 0.0:
-                    state["signal"]["confidence"] = 0.0
-
-            # Phase 2: Run brain with full cross-pair context (parallel across pairs)
-            all_states = {}
-            brain_pairs = []
-            for pair in self.pairs:
-                state = engine_states.get(pair)
-                if state:
-                    if state["signal"]["action"] != "HOLD" and self.brain:
-                        brain_pairs.append((pair, state))
-                    else:
-                        all_states[pair] = state
-
-            if brain_pairs:
-                with ThreadPoolExecutor(max_workers=len(brain_pairs)) as executor:
-                    futures = {
-                        executor.submit(self._apply_brain, pair, state, engine_states): pair
-                        for pair, state in brain_pairs
-                    }
-                    for future in as_completed(futures):
-                        pair = futures[future]
-                        try:
-                            all_states[pair] = future.result(timeout=60)
-                        except Exception as e:
-                            print(f"  [WARN] Brain failed for {pair}: {e}")
-                            all_states[pair] = engine_states[pair]
-
-            # Phase 2.5: Execute finalized signals on engines (deferred from generate_only)
-            # When brain is active, tick() ran with generate_only=True, so we must
-            # now execute the final (possibly brain-modified) signals on the engines.
-            # Skip pairs involved in pending swaps — the swap handler manages their execution.
-            swap_pairs = set()
-            if pending_swaps:
-                for s in pending_swaps:
-                    swap_pairs.add(s["sell_pair"])
-                    swap_pairs.add(s["buy_pair"])
-            if self.brain:
+                # Phase 1: Fetch data and run all engines (regimes, signals, positions)
+                engine_states = {}
                 for pair in self.pairs:
-                    if pair in swap_pairs:
-                        continue
-                    state = all_states.get(pair)
+                    engine_states[pair] = self._fetch_and_tick(pair)
+                    time.sleep(2)  # Rate limit after OHLC fetch
+
+                # Capture engine's original signal before any external modifiers
+                original_signals = {}
+                for pair, state in engine_states.items():
+                    if state:
+                        original_signals[pair] = {
+                            "action": state["signal"]["action"],
+                            "confidence": state["signal"]["confidence"],
+                        }
+
+                # Phase 1.5: Cross-pair regime coordination
+                # Update coordinator with latest regimes, then apply overrides
+                for pair, state in engine_states.items():
+                    if state:
+                        self.coordinator.update(pair, state.get("regime", "RANGING"))
+
+                cross_overrides = self.coordinator.get_overrides(engine_states)
+                pending_swaps = []
+                for pair, override in cross_overrides.items():
+                    state = engine_states.get(pair)
                     if not state:
                         continue
-                    sig = state.get("signal", {})
-                    engine = self.engines[pair]
-                    pre_trade_snap = engine.snapshot_position()
-                    trade = engine.execute_signal(
-                        action=sig.get("action", "HOLD"),
-                        confidence=sig.get("confidence", 0),
-                        reason=sig.get("reason", ""),
-                        strategy=state.get("strategy", "MOMENTUM"),
-                    )
-                    if trade:
-                        is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
-                        value_decimals = 2 if is_usd_pair else 8
-                        state["last_trade"] = {
-                            "action": trade.action,
-                            "price": round(trade.price, 8),
-                            "amount": round(trade.amount, 8),
-                            "value": round(trade.value, value_decimals),
-                            "reason": trade.reason,
-                            "confidence": round(trade.confidence, 4),
-                            "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
-                            "params_at_entry": trade.params_at_entry,
+                    print(f"  [CROSS] {pair}: {override['action']} → {override['signal']} "
+                          f"(conf {override['confidence_adj']:.2f}) — {override['reason']}")
+                    state["signal"]["action"] = override["signal"]
+                    state["signal"]["confidence"] = override["confidence_adj"]
+                    state["signal"]["reason"] = f"[CROSS-PAIR] {override['reason']}"
+                    state["cross_pair_override"] = override
+                    # Collect swap opportunities for execution after trades
+                    if override.get("swap"):
+                        pending_swaps.append(override["swap"])
+
+                # If coordinator changed signal direction, reset baseline for cap
+                for pair in self.pairs:
+                    orig = original_signals.get(pair)
+                    state = engine_states.get(pair)
+                    if orig and state and state["signal"]["action"] != orig["action"]:
+                        original_signals[pair]["confidence"] = state["signal"]["confidence"]
+
+                # Phase 1.75: Order book intelligence
+                # Fetch depth data and apply confidence modifiers before brain runs
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if not state:
+                        continue
+                    time.sleep(2)  # Rate limit
+                    depth = KrakenCLI.depth(pair, count=10)
+                    if isinstance(depth, dict) and "error" not in depth:
+                        signal_action = state["signal"].get("action", "HOLD")
+                        book_analysis = OrderBookAnalyzer.analyze(depth, signal_action)
+                        state["order_book"] = book_analysis
+                        # Apply modifier to signal confidence
+                        old_conf = state["signal"]["confidence"]
+                        new_conf = max(0.0, min(1.0, old_conf + book_analysis["confidence_modifier"]))
+                        if book_analysis["confidence_modifier"] != 0:
+                            state["signal"]["confidence"] = new_conf
+                            print(f"  [BOOK] {pair}: imbalance {book_analysis['imbalance_ratio']:.2f}, "
+                                  f"spread {book_analysis['spread_bps']:.1f}bps, "
+                                  f"conf {old_conf:.2f} → {new_conf:.2f} "
+                                  f"(mod {book_analysis['confidence_modifier']:+.2f})"
+                                  f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
+                                  f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
+
+                # Phase 1.8: Spread history diagnostic (polled every 5 ticks, attached every tick)
+                # Purely observational — does NOT influence signal confidence or sizing.
+                if tick % 5 == 0:
+                    for pair in self.pairs:
+                        time.sleep(2)  # Rate limit
+                        sp = KrakenCLI.spreads(pair, since=self._spread_last_cursor.get(pair))
+                        self._record_spreads(pair, sp)
+                # Attach the latest 60-row cached window to each pair's state every tick
+                # (engine.tick() rebuilds state dicts, so we must re-attach even on non-poll ticks)
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if state is not None:
+                        state["spread_history"] = list(self._spread_history.get(pair, []))[-60:]
+
+                # ── Total modifier cap ──────────────────────────────────
+                # External modifiers (cross-pair + order book) can reduce confidence without limit
+                # but cannot boost it more than +0.15 above the engine's original signal.
+                # This prevents stacking modifiers from inflating weak signals into high-conviction
+                # trades that get oversized via Kelly criterion.
+                MAX_TOTAL_MODIFIER_BOOST = 0.15
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    orig = original_signals.get(pair)
+                    if not state or not orig:
+                        continue
+                    orig_conf = orig["confidence"]
+                    if state["signal"]["confidence"] > orig_conf + MAX_TOTAL_MODIFIER_BOOST:
+                        state["signal"]["confidence"] = orig_conf + MAX_TOTAL_MODIFIER_BOOST
+                    if state["signal"]["confidence"] < 0.0:
+                        state["signal"]["confidence"] = 0.0
+
+                # Phase 2: Run brain with full cross-pair context (parallel across pairs)
+                all_states = {}
+                brain_pairs = []
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if state:
+                        if state["signal"]["action"] != "HOLD" and self.brain:
+                            brain_pairs.append((pair, state))
+                        else:
+                            all_states[pair] = state
+
+                if brain_pairs:
+                    with ThreadPoolExecutor(max_workers=len(brain_pairs)) as executor:
+                        futures = {
+                            executor.submit(self._apply_brain, pair, state, engine_states): pair
+                            for pair, state in brain_pairs
                         }
-                        state["_pre_trade_snapshot"] = pre_trade_snap
+                        for future in as_completed(futures):
+                            pair = futures[future]
+                            try:
+                                all_states[pair] = future.result(timeout=60)
+                            except Exception as e:
+                                print(f"  [WARN] Brain failed for {pair}: {e}")
+                                all_states[pair] = engine_states[pair]
 
-            # Print status and execute trades (sequential — rate limiting required)
-            # Skip swap pairs — the swap handler manages their execution.
-            for pair in self.pairs:
-                state = all_states.get(pair)
-                if state:
-                    self._print_tick_status(pair, state)
-                    if state.get("last_trade") and pair not in swap_pairs:
-                        success = self._execute_trade(pair, state["last_trade"])
-                        if not success and state.get("_pre_trade_snapshot"):
-                            engine = self.engines[pair]
-                            engine.restore_position(state["_pre_trade_snapshot"])
-                            print(f"  [ROLLBACK] {pair}: engine state rolled back after failed order")
+                # Phase 2.5: Execute finalized signals on engines (deferred from generate_only)
+                # When brain is active, tick() ran with generate_only=True, so we must
+                # now execute the final (possibly brain-modified) signals on the engines.
+                # Skip pairs involved in pending swaps — the swap handler manages their execution.
+                swap_pairs = set()
+                if pending_swaps:
+                    for s in pending_swaps:
+                        swap_pairs.add(s["sell_pair"])
+                        swap_pairs.add(s["buy_pair"])
+                if self.brain:
+                    for pair in self.pairs:
+                        if pair in swap_pairs:
+                            continue
+                        state = all_states.get(pair)
+                        if not state:
+                            continue
+                        sig = state.get("signal", {})
+                        engine = self.engines[pair]
+                        pre_trade_snap = engine.snapshot_position()
+                        trade = engine.execute_signal(
+                            action=sig.get("action", "HOLD"),
+                            confidence=sig.get("confidence", 0),
+                            reason=sig.get("reason", ""),
+                            strategy=state.get("strategy", "MOMENTUM"),
+                        )
+                        if trade:
+                            is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
+                            value_decimals = 2 if is_usd_pair else 8
+                            state["last_trade"] = {
+                                "action": trade.action,
+                                "price": round(trade.price, 8),
+                                "amount": round(trade.amount, 8),
+                                "value": round(trade.value, value_decimals),
+                                "reason": trade.reason,
+                                "confidence": round(trade.confidence, 4),
+                                "profit": round(trade.profit, value_decimals) if trade.profit is not None else None,
+                                "params_at_entry": trade.params_at_entry,
+                            }
+                            state["_pre_trade_snapshot"] = pre_trade_snap
 
-            # Phase 3: Execute coordinated swaps, then check regime transitions
-            if pending_swaps:
-                for swap in pending_swaps:
-                    self._execute_coordinated_swap(swap, all_states)
-            self._log_regime_transitions(all_states)
+                # Print status and execute trades (sequential — rate limiting required)
+                # Skip swap pairs — the swap handler manages their execution.
+                for pair in self.pairs:
+                    state = all_states.get(pair)
+                    if state:
+                        self._print_tick_status(pair, state)
+                        if state.get("last_trade") and pair not in swap_pairs:
+                            success = self._execute_trade(pair, state["last_trade"])
+                            if not success and state.get("_pre_trade_snapshot"):
+                                engine = self.engines[pair]
+                                engine.restore_position(state["_pre_trade_snapshot"])
+                                print(f"  [ROLLBACK] {pair}: engine state rolled back after failed order")
 
-            # Phase 4: Record trade outcomes for self-tuning
-            # Only record when a position is fully closed so the tuner learns
-            # from the total accumulated P&L, not individual partial-sell legs.
-            for pair in self.pairs:
-                state = all_states.get(pair)
-                if not state or not state.get("last_trade"):
-                    continue
-                trade = state["last_trade"]
-                engine = self.engines[pair]
-                if trade["action"] == "SELL" and trade.get("profit") is not None and engine.position.size == 0:
-                    params_at_entry = trade.get("params_at_entry") or engine.snapshot_params()
-                    outcome = "win" if trade["profit"] > 0 else "loss"
-                    self.trackers[pair].record_trade(
-                        params_at_entry, "SELL", outcome, trade["profit"],
-                    )
-                    self._completed_trades_since_update += 1
+                # Phase 3: Execute coordinated swaps, then check regime transitions
+                if pending_swaps:
+                    for swap in pending_swaps:
+                        self._execute_coordinated_swap(swap, all_states)
+                self._log_regime_transitions(all_states)
 
-            # Run tuner updates every 50 completed trades
-            if self._completed_trades_since_update >= 50:
-                self._run_tuner_update()
+                # Phase 4: Record trade outcomes for self-tuning
+                # Only record when a position is fully closed so the tuner learns
+                # from the total accumulated P&L, not individual partial-sell legs.
+                for pair in self.pairs:
+                    state = all_states.get(pair)
+                    if not state or not state.get("last_trade"):
+                        continue
+                    trade = state["last_trade"]
+                    engine = self.engines[pair]
+                    if trade["action"] == "SELL" and trade.get("profit") is not None and engine.position.size == 0:
+                        params_at_entry = trade.get("params_at_entry") or engine.snapshot_params()
+                        outcome = "win" if trade["profit"] > 0 else "loss"
+                        self.trackers[pair].record_trade(
+                            params_at_entry, "SELL", outcome, trade["profit"],
+                        )
+                        self._completed_trades_since_update += 1
 
-            # Strip internal rollback data before broadcasting to dashboard
-            for pair in self.pairs:
-                state = all_states.get(pair)
-                if state:
-                    state.pop("_pre_trade_snapshot", None)
+                # Run tuner updates every 50 completed trades
+                if self._completed_trades_since_update >= 50:
+                    self._run_tuner_update()
 
-            # Broadcast state to dashboard (uses cached balance, no extra API call)
-            dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
-            self.broadcaster.broadcast(dashboard_state)
+                # Strip internal rollback data before broadcasting to dashboard
+                for pair in self.pairs:
+                    state = all_states.get(pair)
+                    if state:
+                        state.pop("_pre_trade_snapshot", None)
 
-            # Reconcile tracked orders against exchange state (live mode only)
-            if self.reconciler and self.reconciler.known_orders and tick % self.reconciler.poll_every_ticks == 0:
-                time.sleep(2)  # Rate limit before Kraken API call
-            if self.reconciler:
-                for ev in self.reconciler.maybe_reconcile(tick):
-                    if ev["type"] == "order_disappeared":
-                        print(f"  [RECON] {ev['pair']} {ev['side'].upper()} {ev['txid']} "
-                              f"no longer on exchange (filled/cancelled)")
-                    elif ev["type"] == "poll_failed":
-                        print(f"  [RECON] Poll failed: {ev.get('error')}")
+                # Broadcast state to dashboard (uses cached balance, no extra API call)
+                dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
+                self.broadcaster.broadcast(dashboard_state)
 
-            # Rolling save — persist trade log every tick so no data is lost on crash
-            if self.trade_log:
-                rolling_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_trades_live.json")
+                # Reconcile tracked orders against exchange state (live mode only)
+                if self.reconciler and self.reconciler.known_orders and tick % self.reconciler.poll_every_ticks == 0:
+                    time.sleep(2)  # Rate limit before Kraken API call
+                if self.reconciler:
+                    for ev in self.reconciler.maybe_reconcile(tick):
+                        if ev["type"] == "order_disappeared":
+                            print(f"  [RECON] {ev['pair']} {ev['side'].upper()} {ev['txid']} "
+                                  f"no longer on exchange (filled/cancelled)")
+                        elif ev["type"] == "poll_failed":
+                            print(f"  [RECON] Poll failed: {ev.get('error')}")
+
+                # Rolling save — persist trade log every tick so no data is lost on crash
+                if self.trade_log:
+                    rolling_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_trades_live.json")
+                    try:
+                        with open(rolling_file, "w") as f:
+                            json.dump(self.trade_log, f, indent=2)
+                    except Exception as e:
+                        # HF-003 fix: previously "except Exception: pass" silently
+                        # swallowed write failures (permission, disk, lock, etc.),
+                        # making logging outages invisible. Log the failure so it's
+                        # visible in stdout and in hydra_errors.log via the outer
+                        # tick-body exception handler.
+                        print(f"  [WARN] rolling log write failed: {type(e).__name__}: {e}")
+
+                # Cap trade log to prevent unbounded memory growth
+                if len(self.trade_log) > self.TRADE_LOG_CAP:
+                    self.trade_log = self.trade_log[-self.TRADE_LOG_CAP:]
+
+
+            except Exception as e:
+                print(f"  [ERROR] Tick {tick} crashed: {type(e).__name__}: {e}")
                 try:
-                    with open(rolling_file, "w") as f:
-                        json.dump(self.trade_log, f, indent=2)
+                    err_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_errors.log")
+                    with open(err_file, "a", encoding="utf-8") as f:
+                        f.write(f"\n=== Tick {tick} @ {datetime.now(timezone.utc).isoformat()} ===\n")
+                        f.write(traceback.format_exc())
                 except Exception:
-                    pass
+                    pass  # if error log write fails, at least we printed to stdout
 
-            # Cap trade log to prevent unbounded memory growth
-            if len(self.trade_log) > self.TRADE_LOG_CAP:
-                self.trade_log = self.trade_log[-self.TRADE_LOG_CAP:]
-
-            # Periodic session snapshot for --resume
-            if tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
+            # HF-004 fix: snapshot immediately if trade_log grew this tick, so a
+            # subsequent crash does not lose the newly-appended entries. Also save
+            # on the periodic cadence for engine state that changes without trades.
+            trade_log_grew = len(self.trade_log) > trade_log_size_start
+            if trade_log_grew or tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
                 self._save_snapshot()
 
             # Sleep until next tick
@@ -978,7 +1053,6 @@ class HydraAgent:
             sleep_time = next_tick_time - time.time()
             if sleep_time > 0 and self.running:
                 time.sleep(sleep_time)
-
         # Final tuner update on shutdown
         self._run_tuner_update()
 
