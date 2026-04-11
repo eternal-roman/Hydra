@@ -42,6 +42,11 @@ jobs:
       - name: Run Kraken CLI wrapper tests
         run: python tests/test_kraken_cli.py
 
+      - name: Run live-execution harness (smoke + mock)
+        run: |
+          python tests/live_harness/harness.py --mode smoke
+          python tests/live_harness/harness.py --mode mock
+
       - name: Run engine synthetic demo
         run: python hydra_engine.py
 
