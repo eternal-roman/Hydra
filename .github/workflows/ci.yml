@@ -39,6 +39,9 @@ jobs:
       - name: Run balance and asset conversion tests
         run: python tests/test_balance.py
 
+      - name: Run Kraken CLI wrapper tests
+        run: python tests/test_kraken_cli.py
+
       - name: Run engine synthetic demo
         run: python hydra_engine.py
 

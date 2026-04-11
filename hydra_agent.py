@@ -198,6 +198,23 @@ class KrakenCLI:
         """Get trade history."""
         return KrakenCLI._run(["trades-history"])
 
+    @staticmethod
+    def volume(pairs=None) -> dict:
+        """Get 30-day trade volume and current fee tier.
+
+        pairs: optional list of friendly pair symbols (e.g. ["SOL/USDC","XBT/USDC"])
+        or a pre-formatted comma-separated string. Returns raw Kraken response dict,
+        or {"error": ...} on failure.
+        """
+        args = ["volume"]
+        if pairs:
+            if isinstance(pairs, (list, tuple)):
+                resolved = ",".join(KrakenCLI._resolve_pair(p) for p in pairs)
+            else:
+                resolved = pairs
+            args.extend(["--pair", resolved])
+        return KrakenCLI._run(args)
+
     # ─── Order Execution ───
 
     @staticmethod
@@ -487,6 +504,11 @@ class HydraAgent:
 
         # Order reconciler — detects filled/cancelled orders (live mode only)
         self.reconciler = OrderReconciler(poll_every_ticks=5) if not paper else None
+
+        # Fee tier cache — refreshed at most once per hour from `kraken volume`.
+        # Shape: {"volume_30d_usd": float|None, "pair_fees": {pair: {"maker_pct","taker_pct"}}}
+        self._fee_tier_cache: dict = {}
+        self._fee_tier_fetched_at: float = 0.0
 
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
@@ -1362,6 +1384,61 @@ class HydraAgent:
                     prices["XBT"] = prices["SOL"] / sol_per_xbt
         return prices
 
+    def _extract_fee_tier(self, vol_response: dict) -> dict:
+        """Normalize a `kraken volume` response into a compact fee-tier dict.
+
+        Returns {"volume_30d_usd": float|None, "pair_fees": {friendly_pair: {"maker_pct","taker_pct"}}}.
+        Defensive: any missing / malformed sub-field is silently coerced to None
+        instead of raising, so a transient Kraken shape change cannot crash the tick.
+        """
+        result = {"volume_30d_usd": None, "pair_fees": {}}
+        if not isinstance(vol_response, dict):
+            return result
+        try:
+            v = vol_response.get("volume")
+            if v is not None:
+                result["volume_30d_usd"] = float(v)
+        except (TypeError, ValueError):
+            pass
+        fees_taker = vol_response.get("fees") or {}
+        fees_maker = vol_response.get("fees_maker") or {}
+        if not isinstance(fees_taker, dict):
+            fees_taker = {}
+        if not isinstance(fees_maker, dict):
+            fees_maker = {}
+        # Kraken may return fee keys in several forms ("SOLUSDC", "SOL/USDC", "XBTUSDC",
+        # "XXBTZUSD" historically). Build a forgiving reverse map that accepts both the
+        # PAIR_MAP-resolved form and the slashless form of the original friendly pair.
+        pair_reverse = {}
+        for p in getattr(self, "pairs", []):
+            resolved = KrakenCLI._resolve_pair(p)
+            pair_reverse[resolved] = p
+            pair_reverse[p.replace("/", "")] = p  # slashless fallback ("SOLUSDC" → "SOL/USDC")
+            pair_reverse[p] = p                   # passthrough
+        seen_keys = set(fees_taker.keys()) | set(fees_maker.keys())
+        for raw_key in seen_keys:
+            friendly = pair_reverse.get(raw_key, raw_key)
+            taker_entry = fees_taker.get(raw_key) or {}
+            maker_entry = fees_maker.get(raw_key) or {}
+            taker_pct = None
+            maker_pct = None
+            if isinstance(taker_entry, dict):
+                try:
+                    val = taker_entry.get("fee")
+                    if val is not None:
+                        taker_pct = float(val)
+                except (TypeError, ValueError):
+                    taker_pct = None
+            if isinstance(maker_entry, dict):
+                try:
+                    val = maker_entry.get("fee")
+                    if val is not None:
+                        maker_pct = float(val)
+                except (TypeError, ValueError):
+                    maker_pct = None
+            result["pair_fees"][friendly] = {"maker_pct": maker_pct, "taker_pct": taker_pct}
+        return result
+
     def _compute_balance_usd(self, balance: dict) -> dict:
         """Convert raw Kraken balance to USD breakdown with staked asset handling.
 
@@ -1417,6 +1494,21 @@ class HydraAgent:
             time.sleep(2)  # Rate limit
         bal = getattr(self, '_cached_balance', {})
 
+        # Fee tier refresh — at most once per hour, live mode only (paper has no fee data).
+        # On failure we leave the cache stale and do NOT advance _fee_tier_fetched_at,
+        # so the next tick will retry. Diagnostic-only: has no effect on trading.
+        if not self.paper:
+            now = time.time()
+            if now - self._fee_tier_fetched_at > 3600:
+                time.sleep(2)  # Rate limit
+                vol = KrakenCLI.volume(self.pairs)
+                if isinstance(vol, dict) and "error" not in vol:
+                    self._fee_tier_cache = self._extract_fee_tier(vol)
+                    self._fee_tier_fetched_at = now
+                else:
+                    err = vol.get("error") if isinstance(vol, dict) else str(vol)
+                    print(f"  [FEES] volume fetch failed: {err}")
+
         # Compute USD-equivalent balance breakdown
         balance_usd = self._compute_balance_usd(bal) if bal else {
             "total_usd": 0, "tradable_usd": 0, "staked_usd": 0, "assets": []
@@ -1434,6 +1526,7 @@ class HydraAgent:
             "remaining": 0 if self.duration == 0 else round(self.duration - elapsed, 1),
             "balance": bal if "error" not in bal else {},
             "balance_usd": balance_usd,
+            "fee_tier": self._fee_tier_cache,
             "pairs": pairs_data,
             "trade_log": self.trade_log[-20:],
             "running": self.running,

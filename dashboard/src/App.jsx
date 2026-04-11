@@ -333,11 +333,16 @@ export default function App() {
 
                     {/* Indicators */}
                     {ind.rsi !== undefined && (
-                      <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+                      <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim, flexWrap: "wrap" }}>
                         <span>RSI <span style={{ color: ind.rsi > 70 ? COLORS.sell : ind.rsi < 30 ? COLORS.buy : COLORS.text, fontWeight: 600 }}>{ind.rsi}</span></span>
                         <span>MACD <span style={{ color: (ind.macd_histogram || 0) > 0 ? COLORS.buy : COLORS.sell, fontWeight: 600 }}>{fmtInd(ind.macd_histogram)}</span></span>
                         <span>BB <span style={{ color: COLORS.text }}>[{fmtInd(ind.bb_lower)} — {fmtInd(ind.bb_upper)}]</span></span>
                         <span>Width <span style={{ color: (ind.bb_width || 0) > 0.06 ? COLORS.volatile : COLORS.text, fontWeight: 600 }}>{((ind.bb_width || 0) * 100).toFixed(2)}%</span></span>
+                        {state?.fee_tier?.pair_fees?.[pair] && (
+                          <span>Fee M/T <span style={{ color: COLORS.text, fontWeight: 600 }}>
+                            {(state.fee_tier.pair_fees[pair].maker_pct ?? 0).toFixed(2)}/{(state.fee_tier.pair_fees[pair].taker_pct ?? 0).toFixed(2)}%
+                          </span></span>
+                        )}
                       </div>
                     )}
 
