@@ -14,6 +14,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import time
 from typing import Dict, List, Optional, Any
@@ -131,8 +132,11 @@ class ParameterTracker:
         changes: Dict[str, tuple] = {}  # param -> (old, new)
 
         for param_name in DEFAULT_PARAMS:
-            # Collect parameter values from winning trades
-            win_values = [o["params"].get(param_name, self._defaults[param_name])
+            # Collect parameter values from winning trades. Observations missing
+            # this parameter (e.g. recorded before the param existed) are skipped
+            # entirely rather than defaulted — defaulting would fabricate fake
+            # datapoints and bias the learned mean toward the default value.
+            win_values = [o["params"][param_name]
                           for o in wins if param_name in o.get("params", {})]
 
             if not win_values:
@@ -143,6 +147,12 @@ class ParameterTracker:
 
             # Shift 10% toward winning mean
             new_val = old_val + SHIFT_RATE * (win_mean - old_val)
+
+            # Reject non-finite intermediates (defensive: a corrupted observation
+            # or hand-edited params file could introduce NaN/Inf, which would
+            # propagate through max/min and poison the tuner silently).
+            if not math.isfinite(new_val):
+                continue
 
             # Clamp to hard bounds
             lo, hi = PARAM_BOUNDS[param_name]
@@ -182,8 +192,16 @@ class ParameterTracker:
                 saved = data.get("params", {})
                 for key in DEFAULT_PARAMS:
                     if key in saved:
+                        try:
+                            val = float(saved[key])
+                        except (TypeError, ValueError):
+                            continue
+                        # Reject non-finite values before clamping — max/min
+                        # propagate NaN silently and would poison the tuner.
+                        if not math.isfinite(val):
+                            continue
                         lo, hi = PARAM_BOUNDS[key]
-                        params[key] = max(lo, min(hi, float(saved[key])))
+                        params[key] = max(lo, min(hi, val))
                 self.update_count = data.get("update_count", 0)
                 return params
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
@@ -201,8 +219,11 @@ class ParameterTracker:
         try:
             with open(self.save_path, "w") as f:
                 json.dump(data, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            # Mirrors HF-003 fix in hydra_agent.py: previously silently swallowed.
+            # Surfacing the failure means the outer tick-body try/except in
+            # hydra_agent.py will log the traceback to hydra_errors.log.
+            print(f"  [WARN] tuner save failed for {self.pair}: {type(e).__name__}: {e}")
 
     def reset(self):
         """Reset parameters to defaults and delete saved file."""
@@ -212,5 +233,5 @@ class ParameterTracker:
         try:
             if os.path.exists(self.save_path):
                 os.remove(self.save_path)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [WARN] tuner reset failed to remove {self.save_path}: {type(e).__name__}: {e}")

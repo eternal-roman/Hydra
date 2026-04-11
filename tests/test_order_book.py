@@ -98,13 +98,17 @@ class TestParsing:
 
     def test_top_10_only(self):
         """Should only use top 10 levels even if more are provided."""
+        # Top 10 levels carry volume 10.0, levels 11-20 carry volume 999.0.
+        # If the analyzer took all 20 levels the sum would be 10090; if it
+        # took the top 10 it is exactly 100. An equal-volume test would pass
+        # even if the cap were broken, so we make the levels distinguishable.
         bid_prices = [100.0 - i * 0.1 for i in range(20)]
         ask_prices = [100.1 + i * 0.1 for i in range(20)]
-        bid_vols = [10.0] * 20
-        ask_vols = [10.0] * 20
+        bid_vols = [10.0] * 10 + [999.0] * 10
+        ask_vols = [10.0] * 10 + [999.0] * 10
         depth = make_depth(bid_prices, bid_vols, ask_prices, ask_vols)
         result = OrderBookAnalyzer.analyze(depth)
-        assert result["bid_volume"] == 100.0  # 10 * 10
+        assert result["bid_volume"] == 100.0  # 10 * 10, not 10090
         assert result["ask_volume"] == 100.0
 
 

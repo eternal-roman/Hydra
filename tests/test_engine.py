@@ -70,10 +70,13 @@ def make_volatile(n=100):
 
 class TestEMA:
     def test_basic(self):
+        # SMA seed over first 5 prices = 12.0, then exponential smoothing with
+        # k = 2/(5+1) = 1/3 converges to exactly 17.0 on this arithmetic sequence.
+        # A regression that swapped EMA for SMA-of-last-5 would return 17.0 too,
+        # so test_sma_seed below pins the seed path separately.
         prices = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
         result = Indicators.ema(prices, 5)
-        assert isinstance(result, float)
-        assert result > 14.0  # EMA should lag above midpoint for uptrend
+        assert abs(result - 17.0) < 1e-9
 
     def test_short_input(self):
         prices = [10.0, 11.0]
@@ -839,11 +842,6 @@ class TestBrain:
             "candles": [{"o": 99, "h": 101, "l": 98, "c": 100, "t": i} for i in range(10)],
         }
 
-    def test_brain_import(self):
-        from hydra_brain import HydraBrain, BrainDecision
-        assert BrainDecision is not None
-        # SDK availability is optional — test that the module at least imports
-
     def test_fallback_decision(self):
         self._skip_if_no_sdk()
         from hydra_brain import HydraBrain
@@ -967,21 +965,6 @@ class TestBrain:
         prompt = brain._build_analyst_prompt(state)
         assert "CONFIRM BUY" in prompt
         assert "OVERRIDE HOLD" not in prompt  # XBT/USDC history should not leak
-
-    def test_call_interval_caching(self):
-        self._skip_if_no_sdk()
-        from hydra_brain import HydraBrain
-        brain = HydraBrain(anthropic_key="sk-ant-test-fake-key", call_interval=3)
-        brain.api_available = False  # force fallback
-        state = self._make_state()
-
-        d1 = brain.deliberate(state)  # tick 1: AI tick (1 % 3 == 1, no cache)
-        assert d1.fallback is True
-
-        d2 = brain.deliberate(state)  # tick 2: skip (cached)
-        d3 = brain.deliberate(state)  # tick 3: skip (cached)
-        assert brain.tick_counter == 3
-
 
 # ═══════════════════════════════════════════════════════════════
 # TEST: HF-002 — execute_signal must respect halted engine

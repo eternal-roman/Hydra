@@ -5,7 +5,8 @@ import "./App.css";
 // HYDRA Live Dashboard — Connects to hydra_agent.py WebSocket
 // ═══════════════════════════════════════════════════════════════
 
-const WS_URL = "ws://localhost:8765";
+// Override at build time with VITE_HYDRA_WS_URL for non-localhost deployments.
+const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
 
 const COLORS = {
   bg: "#0a0a0f",
