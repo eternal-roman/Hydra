@@ -333,13 +333,40 @@ export default function App() {
 
                     {/* Indicators */}
                     {ind.rsi !== undefined && (
-                      <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+                      <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 11, fontFamily: mono, color: COLORS.textDim, flexWrap: "wrap" }}>
                         <span>RSI <span style={{ color: ind.rsi > 70 ? COLORS.sell : ind.rsi < 30 ? COLORS.buy : COLORS.text, fontWeight: 600 }}>{ind.rsi}</span></span>
                         <span>MACD <span style={{ color: (ind.macd_histogram || 0) > 0 ? COLORS.buy : COLORS.sell, fontWeight: 600 }}>{fmtInd(ind.macd_histogram)}</span></span>
                         <span>BB <span style={{ color: COLORS.text }}>[{fmtInd(ind.bb_lower)} — {fmtInd(ind.bb_upper)}]</span></span>
                         <span>Width <span style={{ color: (ind.bb_width || 0) > 0.06 ? COLORS.volatile : COLORS.text, fontWeight: 600 }}>{((ind.bb_width || 0) * 100).toFixed(2)}%</span></span>
+                        {(() => {
+                          const fees = state?.fee_tier?.pair_fees?.[pair];
+                          if (!fees) return null;
+                          const m = fees.maker_pct;
+                          const t = fees.taker_pct;
+                          // Only render when at least one side has a real numeric value —
+                          // otherwise null would silently collapse to "0.00%" via `?? 0`,
+                          // misleading the user into thinking fees are zero.
+                          if (m == null && t == null) return null;
+                          const fmt = (v) => (v == null ? "—" : v.toFixed(2));
+                          return (
+                            <span>Fee M/T <span style={{ color: COLORS.text, fontWeight: 600 }}>
+                              {fmt(m)}/{fmt(t)}%
+                            </span></span>
+                          );
+                        })()}
                       </div>
                     )}
+
+                    {/* Spread diagnostic (populated every 5 ticks by Phase 1.8) */}
+                    {ps.spread_history && ps.spread_history.length > 0 && (() => {
+                      const latest = ps.spread_history[ps.spread_history.length - 1];
+                      return (
+                        <div style={{ marginTop: 4, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+                          Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(latest.spread_bps || 0).toFixed(1)}</span> bps
+                          <span style={{ marginLeft: 8, color: COLORS.textMuted }}>({ps.spread_history.length} samples)</span>
+                        </div>
+                      );
+                    })()}
 
                     {/* AI Reasoning */}
                     {ps.ai_decision && !ps.ai_decision.fallback && (

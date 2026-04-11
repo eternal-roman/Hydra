@@ -910,7 +910,16 @@ class HydraEngine:
         return self._build_state(regime, strategy, signal, trade)
 
     def _maybe_execute(self, signal: Signal) -> Optional[Trade]:
-        """Execute trade if signal is actionable."""
+        """Execute trade if signal is actionable.
+
+        HF-002 fix: refuse to execute on a halted engine. Previously, only
+        tick() checked the halted flag (early return at line 866-868); callers
+        that invoked execute_signal() directly (e.g., the swap handler at
+        hydra_agent.py:1337) would bypass the halt check. This adds defense-
+        in-depth so every execution path respects halt state.
+        """
+        if self.halted:
+            return None
         if not self.prices:
             return None
 
@@ -1110,7 +1119,12 @@ class HydraEngine:
         self.max_drawdown = snap["max_drawdown"]
 
     def snapshot_runtime(self) -> Dict[str, Any]:
-        """Serialize full engine runtime state for session persistence."""
+        """Serialize full engine runtime state for session persistence.
+
+        HF-004 fix: trades list is now included. Prior versions omitted it,
+        causing trades_list_len=0 while total_trades>0 on every --resume,
+        breaking per-pair P&L and tuner analytics that iterate over trades.
+        """
         return {
             "asset": self.asset,
             "initial_balance": self.initial_balance,
@@ -1132,6 +1146,22 @@ class HydraEngine:
             "halted": self.halted,
             "halt_reason": self.halt_reason,
             "equity_history": self.equity_history[-500:],
+            "trades": [
+                {
+                    "action": t.action,
+                    "asset": t.asset,
+                    "price": t.price,
+                    "amount": t.amount,
+                    "value": t.value,
+                    "reason": t.reason,
+                    "confidence": t.confidence,
+                    "strategy": t.strategy,
+                    "timestamp": t.timestamp,
+                    "profit": t.profit,
+                    "params_at_entry": t.params_at_entry,
+                }
+                for t in self.trades[-500:]  # Bounded to prevent unbounded snapshot growth
+            ],
             "candles": [
                 {"open": c.open, "high": c.high, "low": c.low,
                  "close": c.close, "volume": c.volume, "timestamp": c.timestamp}
@@ -1163,6 +1193,28 @@ class HydraEngine:
         self.halted = bool(snapshot.get("halted", False))
         self.halt_reason = str(snapshot.get("halt_reason", ""))
         self.equity_history = list(snapshot.get("equity_history", []))
+        # HF-004 fix: restore trades list. Defensive: tolerate legacy snapshots
+        # (no trades key), malformed rows, and missing optional fields.
+        self.trades = []
+        for raw in snapshot.get("trades", []):
+            if not isinstance(raw, dict):
+                continue
+            try:
+                self.trades.append(Trade(
+                    action=str(raw.get("action", "")),
+                    asset=str(raw.get("asset", self.asset)),
+                    price=float(raw.get("price", 0.0)),
+                    amount=float(raw.get("amount", 0.0)),
+                    value=float(raw.get("value", 0.0)),
+                    reason=str(raw.get("reason", "")),
+                    confidence=float(raw.get("confidence", 0.0)),
+                    strategy=str(raw.get("strategy", "MOMENTUM")),
+                    timestamp=float(raw.get("timestamp", time.time())),
+                    profit=raw.get("profit"),
+                    params_at_entry=raw.get("params_at_entry"),
+                ))
+            except (TypeError, ValueError, KeyError):
+                continue  # silently drop malformed rows; don't crash tick loop
         self.candles = []
         self.prices = []
         for raw in snapshot.get("candles", []):

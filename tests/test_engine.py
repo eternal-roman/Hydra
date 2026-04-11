@@ -984,6 +984,221 @@ class TestBrain:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: HF-002 — execute_signal must respect halted engine
+# ═══════════════════════════════════════════════════════════════
+
+class TestHaltedEngineExecuteSignal:
+    """Regression tests for HF-002 (execute_signal bypasses halt check).
+
+    Before the fix, only tick() checked the halted flag. Any caller that
+    invoked execute_signal() directly (e.g., swap handler at
+    hydra_agent.py:1337) would bypass the halt check. The fix adds an
+    early return in _maybe_execute, so all execution paths respect halt.
+    """
+
+    def _halted_engine(self):
+        from hydra_engine import HydraEngine
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        # Seed enough candles to pass warmup
+        for i in range(60):
+            price = 100.0 + i * 0.1
+            eng.ingest_candle({
+                "open": price, "high": price, "low": price,
+                "close": price, "volume": 100.0,
+                "timestamp": float(1700000000 + i * 300),
+            })
+        eng.halted = True
+        eng.halt_reason = "test: simulated circuit breaker"
+        return eng
+
+    def test_execute_signal_buy_returns_none_when_halted(self):
+        eng = self._halted_engine()
+        result = eng.execute_signal("BUY", 0.75, "test")
+        assert result is None, f"expected None from halted execute_signal, got {result!r}"
+
+    def test_execute_signal_sell_returns_none_when_halted(self):
+        eng = self._halted_engine()
+        # Even with a position, halted engine must refuse
+        eng.position.size = 0.1
+        eng.position.avg_entry = 95.0
+        result = eng.execute_signal("SELL", 0.80, "test")
+        assert result is None, f"expected None from halted execute_signal, got {result!r}"
+
+    def test_halted_engine_no_position_change(self):
+        eng = self._halted_engine()
+        pre_balance = eng.balance
+        pre_position = eng.position.size
+        _ = eng.execute_signal("BUY", 0.75, "test")
+        assert eng.balance == pre_balance, "halted execute_signal must not change balance"
+        assert eng.position.size == pre_position, "halted execute_signal must not change position"
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: HF-004 — snapshot_runtime/restore_runtime round-trip for trades
+# ═══════════════════════════════════════════════════════════════
+
+class TestSnapshotTradesRoundTrip:
+    """Regression tests for HF-004 (trades list lost on --resume).
+
+    Before the fix, snapshot_runtime omitted self.trades, so restore_runtime
+    started every resumed session with an empty trades list even though
+    total_trades/win_count/loss_count were restored correctly. This broke
+    per-pair P&L calculations that iterate over engine.trades.
+    """
+
+    def _make_engine_with_trades(self):
+        from hydra_engine import HydraEngine, Trade
+        import time as _time
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        # Seed candles for price history
+        for i in range(10):
+            price = 100.0 + i
+            eng.ingest_candle({
+                "open": price, "high": price, "low": price,
+                "close": price, "volume": 100.0,
+                "timestamp": float(1700000000 + i * 300),
+            })
+        # Manually append trades
+        eng.trades.append(Trade(
+            action="BUY", asset="SOL/USDC", price=100.0, amount=0.5,
+            value=50.0, reason="test buy", confidence=0.75, strategy="MOMENTUM",
+            timestamp=1700000000.0,
+        ))
+        eng.trades.append(Trade(
+            action="SELL", asset="SOL/USDC", price=110.0, amount=0.5,
+            value=55.0, reason="test sell", confidence=0.80, strategy="MOMENTUM",
+            timestamp=1700000300.0, profit=5.0,
+        ))
+        eng.trades.append(Trade(
+            action="BUY", asset="SOL/USDC", price=108.0, amount=0.3,
+            value=32.4, reason="second buy", confidence=0.65, strategy="MEAN_REVERSION",
+            timestamp=1700000600.0, params_at_entry={"ema_short": 20, "ema_long": 50},
+        ))
+        eng.total_trades = 1
+        eng.win_count = 1
+        eng.loss_count = 0
+        return eng
+
+    def test_snapshot_includes_trades(self):
+        eng = self._make_engine_with_trades()
+        snap = eng.snapshot_runtime()
+        assert "trades" in snap, "snapshot must include 'trades' key (HF-004)"
+        assert len(snap["trades"]) == 3, f"expected 3 trades, got {len(snap['trades'])}"
+
+    def test_snapshot_trades_fields_serialized(self):
+        eng = self._make_engine_with_trades()
+        snap = eng.snapshot_runtime()
+        t0 = snap["trades"][0]
+        # Every Trade field must be present
+        for key in ("action", "asset", "price", "amount", "value", "reason",
+                     "confidence", "strategy", "timestamp", "profit", "params_at_entry"):
+            assert key in t0, f"trade dict missing key {key!r}"
+        assert t0["action"] == "BUY"
+        assert t0["price"] == 100.0
+        assert t0["amount"] == 0.5
+
+    def test_restore_runtime_rebuilds_trades(self):
+        from hydra_engine import HydraEngine
+        eng = self._make_engine_with_trades()
+        snap = eng.snapshot_runtime()
+
+        # Create a fresh engine and restore from snapshot
+        fresh = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        assert len(fresh.trades) == 0  # fresh engine has no trades
+        fresh.restore_runtime(snap)
+        assert len(fresh.trades) == 3, f"expected 3 restored trades, got {len(fresh.trades)}"
+
+        # Verify the first trade's fields round-tripped correctly
+        t = fresh.trades[0]
+        assert t.action == "BUY"
+        assert t.asset == "SOL/USDC"
+        assert t.price == 100.0
+        assert t.amount == 0.5
+        assert t.confidence == 0.75
+        assert t.strategy == "MOMENTUM"
+
+    def test_restore_runtime_preserves_profit_field(self):
+        from hydra_engine import HydraEngine
+        eng = self._make_engine_with_trades()
+        snap = eng.snapshot_runtime()
+        fresh = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        fresh.restore_runtime(snap)
+        # Second trade had profit=5.0
+        assert fresh.trades[1].profit == 5.0
+
+    def test_restore_runtime_preserves_params_at_entry(self):
+        from hydra_engine import HydraEngine
+        eng = self._make_engine_with_trades()
+        snap = eng.snapshot_runtime()
+        fresh = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        fresh.restore_runtime(snap)
+        # Third trade had params_at_entry set
+        assert fresh.trades[2].params_at_entry == {"ema_short": 20, "ema_long": 50}
+
+    def test_restore_runtime_tolerates_legacy_snapshot_without_trades(self):
+        """A snapshot from before the HF-004 fix has no 'trades' key. Restore
+        must silently fall back to an empty list without crashing."""
+        from hydra_engine import HydraEngine
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        # Simulate a legacy snapshot (no "trades" key)
+        legacy_snap = {
+            "asset": "SOL/USDC",
+            "initial_balance": 100.0,
+            "balance": 90.0,
+            "position": {"asset": "SOL/USDC", "size": 0.1, "avg_entry": 100.0,
+                          "unrealized_pnl": 0.0, "realized_pnl": 0.0,
+                          "params_at_entry": None},
+            "peak_equity": 100.0,
+            "max_drawdown": 0.0,
+            "win_count": 0, "loss_count": 0, "total_trades": 0, "tick_count": 10,
+            "halted": False, "halt_reason": "",
+            "equity_history": [],
+            "candles": [],
+        }
+        eng.restore_runtime(legacy_snap)
+        assert eng.trades == [], "legacy snapshot restore should leave trades empty"
+
+    def test_restore_runtime_skips_non_dict_entries(self):
+        """restore_runtime must silently skip non-dict entries (string, None, list).
+        Valid dicts with missing optional fields get defaults."""
+        from hydra_engine import HydraEngine
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        snap = {
+            "trades": [
+                {"action": "BUY", "asset": "SOL/USDC", "price": 100.0, "amount": 0.5,
+                 "value": 50.0, "reason": "ok", "confidence": 0.75, "strategy": "MOMENTUM",
+                 "timestamp": 1700000000.0},
+                "not-a-dict",  # skipped
+                None,  # skipped
+                ["not", "a", "dict"],  # skipped
+                {"action": "BUY", "asset": "SOL/USDC", "price": 110.0, "amount": 0.3,
+                 "value": 33.0, "reason": "ok2", "confidence": 0.65, "strategy": "MOMENTUM",
+                 "timestamp": 1700000300.0},
+            ],
+        }
+        eng.restore_runtime(snap)
+        assert len(eng.trades) == 2, f"expected 2 good trades after skipping non-dicts, got {len(eng.trades)}"
+
+    def test_restore_runtime_handles_unparseable_numeric_fields(self):
+        """A dict whose 'price' isn't a number should be skipped via the
+        try/except in the restore loop, not crash the whole restore."""
+        from hydra_engine import HydraEngine
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        snap = {
+            "trades": [
+                {"action": "BUY", "asset": "SOL/USDC", "price": "not-a-number",
+                 "amount": 0.5, "value": 50.0, "reason": "bad", "confidence": 0.75,
+                 "strategy": "MOMENTUM", "timestamp": 1700000000.0},
+                {"action": "BUY", "asset": "SOL/USDC", "price": 100.0, "amount": 0.5,
+                 "value": 50.0, "reason": "ok", "confidence": 0.75,
+                 "strategy": "MOMENTUM", "timestamp": 1700000000.0},
+            ],
+        }
+        eng.restore_runtime(snap)
+        assert len(eng.trades) == 1, f"expected 1 good trade after skipping unparseable, got {len(eng.trades)}"
+
+
+# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -998,6 +1213,7 @@ def run_tests():
         TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
         TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
         TestHydraEngine, TestSnapshotAndRollback, TestCompetitionMode, TestBrain,
+        TestHaltedEngineExecuteSignal, TestSnapshotTradesRoundTrip,
     ]
 
     for cls in test_classes:
