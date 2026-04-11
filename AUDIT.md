@@ -4,7 +4,12 @@
 **Scope:** Full end-to-end audit of all components — engine, agent, dashboard, infrastructure
 **Status:** All critical issues resolved. System verified operational.
 
-> **Note:** Line numbers reference the codebase as of this audit date and may drift with future changes.
+> **Note:** This is a v1.0-era point-in-time audit. Line numbers reference the
+> codebase as of the audit date and drift with subsequent changes. For
+> post-audit findings and regression coverage, see the findings tracker in
+> `tests/live_harness/README.md` (HF-### IDs) and `CHANGELOG.md` for
+> version-by-version fix history. Current test count and suite breakdown are
+> in `CLAUDE.md` (deliberately not restated here to avoid drift).
 
 ---
 
@@ -20,11 +25,14 @@
 | WebSocket Broadcast | 3 | 3 | 0 | PASS |
 | Dashboard Components | 15 | 15 | 0 | PASS |
 | Infrastructure | 6 | 5 | 1 (dead man's switch refresh) | PASS |
-| **Total (v1.0 audit)** | **49** | **43** | **6** | **ALL PASS** |
-| **Total (v2.4.0)** | **191** | **191** | **0** | **ALL PASS** |
+| **Total (v1.0 audit, 2026-04-01)** | **49** | **43** | **6** | **ALL PASS** |
 
-**Bugs found:** 10 (all fixed)
-**Known limitations:** 5 (documented in section 9)
+**Bugs found during v1.0 audit:** 10 (all fixed — see section 10)
+**Known limitations at audit time:** 5 (documented in section 9)
+
+Subsequent test suites and fix history are tracked in `CHANGELOG.md`.
+Post-audit bugs surfaced by the live-execution harness are tracked as
+`HF-###` entries in `tests/live_harness/README.md`.
 
 ---
 

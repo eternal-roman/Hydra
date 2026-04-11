@@ -6,6 +6,89 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.5.0] — 2026-04-11
+
+### Added
+- **KrakenCLI wrappers** — `volume()`, `spreads()`, and `order_amend()`
+  thin passthroughs over the kraken CLI commands of the same name. `volume`
+  is called once per hour from `_build_dashboard_state` to cache the 30-day
+  fee tier; `spreads` is polled every 5 ticks in a new Phase 1.8 to maintain
+  a 120-entry rolling history per pair; `order_amend` is groundwork for a
+  future drift-detect repricing loop (no caller yet).
+- **Fee tier + spread diagnostics on the dashboard** — compact `Fee M/T`
+  pill in each pair's Indicators row showing current maker/taker fee, and
+  a `Spread X.X bps (N samples)` readout below it. Inline styles, no new
+  components.
+- **`KrakenCLI._format_price(pair, price)`** — pair-aware price rounding
+  that looks up native precision in a new `PRICE_DECIMALS` dict (SOL/USDC=2,
+  XBT/USDC=1, SOL/XBT=7, etc.) and rounds before the `.8f` format. Applied
+  to `order_buy`, `order_sell`, and `order_amend`. Required for any future
+  code path that computes a derived price (drift→amend, maker-fee shading).
+- **Live-execution test harness** (`tests/live_harness/`) — drives
+  `HydraAgent._execute_trade` across 34 scenarios (happy, failure, edge,
+  schema, rollback, historical regression, real Kraken) in four modes:
+  `smoke`, `mock` (default, ~1.5s), `validate`, `live`. Fast mock mode
+  achieved by monkey-patching `time.sleep` to no-op. Runs in CI on every
+  PR as a regression gate. Surfaced HF-001 through HF-004 on its first run.
+- **Findings tracker** — stable `HF-###` IDs with severity (S1-S4), status,
+  fix commit, and regression test. Documented in the harness README.
+- **`hydra_errors.log`** — any exception caught by the new tick-body
+  try/except writes a full traceback here with timestamp. Previously
+  unhandled exceptions would silently kill `run()` and force a
+  `start_hydra.bat` restart with lost in-memory state.
+- **61 new tests in `test_kraken_cli.py`** — TestVolumeArgsAndParsing (8),
+  TestSpreadsArgsAndParsing (7), TestPriceFormat (14), TestOrderAmendArgs (9),
+  TestFeeTierExtraction (9), TestRecordSpreads (11), plus the `_StubRun`
+  helper and Kraken response builders reused by the harness.
+- **11 new tests in `test_engine.py`** — TestHaltedEngineExecuteSignal (3)
+  for HF-002, TestSnapshotTradesRoundTrip (8) for HF-004.
+
+### Fixed
+- **HF-004 (S1, active production bug)** — `trade_log` silently frozen
+  across tick crashes. Two-part root cause: (a) `HydraEngine.snapshot_runtime()`
+  did not include `self.trades`, so every `--resume` started with
+  `engine.trades == []` while counters were restored correctly — per-pair
+  P&L from trade history was silently broken; (b) the tick loop body had
+  no top-level try/except, so any unhandled exception killed `run()` and
+  `start_hydra.bat` restarted from the stale snapshot (saved only every
+  12 ticks ≈ 1h), losing all new entries since the last successful save.
+  Fix: serialize `trades[-500:]` in `snapshot_runtime`; wrap tick body in
+  try/except that logs tracebacks to `hydra_errors.log` and continues to
+  the next iteration; save snapshot immediately after any tick that
+  appends to `trade_log`, not just on the N-tick cadence.
+- **HF-003** — `except Exception: pass` in the rolling log writer
+  silently swallowed every write failure. Replaced with a logged warning
+  so failures become visible.
+- **HF-001** — `KrakenCLI` hardcoded `.8f` price precision regardless of
+  pair. Production was safe today because `_execute_trade` only passed
+  `ticker["bid"]`/`ticker["ask"]` unmodified, but any derived price would
+  have hit Kraken's per-pair precision rejection. Fixed via
+  `_format_price` helper (see Added).
+- **HF-002** — `HydraEngine.execute_signal` did not check the `halted`
+  flag. Only `tick()` did, so halt was enforced via a non-local invariant
+  ("`tick()` always runs first") rather than at the boundary. Any future
+  caller of `execute_signal` on a halted engine would silently trade.
+  Fix: `if self.halted: return None` at the top of `_maybe_execute`.
+- **Dashboard fee pill null-collapse** — when `_extract_fee_tier` couldn't
+  parse a fee, it stored `null`; dashboard's `(null ?? 0).toFixed(2)`
+  silently rendered `"0.00%"` (misleading "zero fees" display). Fixed
+  via IIFE gate that hides the pill when both sides are null and shows
+  `—` for individually-null sides.
+- **`order_amend` txid validation** — previously accepted `None`/`""`
+  silently and burned an API slot producing an obscure Kraken error. Now
+  returns a clean local error dict matching the fail-fast pattern used
+  for missing `limit_price`/`order_qty`.
+
+### Changed
+- Snapshot cadence: was strictly every `SNAPSHOT_EVERY_N_TICKS` ticks
+  (default 12). Now also triggers immediately after any tick whose
+  `trade_log` grew, so a subsequent crash can lose at most one unsaved
+  append instead of up to an hour's worth.
+- CI adds a `Run live-execution harness (smoke + mock)` step to the
+  `engine-tests` job (~3 seconds added to total CI time).
+
+---
+
 ## [2.4.0] — 2026-04-05
 
 ### Added
