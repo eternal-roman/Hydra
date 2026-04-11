@@ -26,8 +26,8 @@ Volatility is checked first — it overrides trend detection. This prevents fals
 ## Architecture
 
 ```
-HYDRA Agent Loop (30s tick)
-===========================
+HYDRA Agent Loop (5-min candles, ~305s tick)
+============================================
 
   Kraken CLI OHLC ──> Regime Detector ──> Strategy Selector
                                           TREND_UP  → MOMENTUM
@@ -36,7 +36,7 @@ HYDRA Agent Loop (30s tick)
        │                                  VOLATILE  → GRID
        │
   Position Sizer ──> Trade Executor ──> kraken order buy
-  (Quarter-Kelly)                        --type limit
+  (Quarter/Half-Kelly)                   --type limit
                                          --oflags post
        │
   WebSocket ──> React Dashboard (localhost:3000)
@@ -62,21 +62,25 @@ All indicators are implemented in pure Python with no external dependencies.
 | **Bollinger Bands(20, 2)** | Population std dev, width normalized by mean | Price bands and regime classification |
 | **MACD(12, 26, 9)** | Full historical MACD series with 9-EMA signal line | Momentum confirmation |
 
-## Position Sizing: Quarter-Kelly Criterion
+## Position Sizing: Kelly Criterion
 
-Every trade is sized using a conservative quarter-Kelly formula:
+Every trade is sized using a Kelly fraction, with two modes:
 
 ```
 edge = max(0, confidence × 2 - 1)       # 0 at 50% confidence, 1 at 100%
-kelly_quarter = edge × 0.25
-position_value = kelly_quarter × balance
+kelly = edge × multiplier                # 0.25 (conservative) or 0.50 (competition)
+position_value = kelly × balance
 ```
 
-**Hard limits:**
-- Maximum single position: **30% of balance**
-- Minimum confidence to trade: **55%** (below this, no trade)
-- Minimum trade value: **$0.50** (Kraken costmin)
-- Kraken minimum order sizes enforced per asset (SOL: 0.02, XBT: 0.00005)
+| Mode | Multiplier | Min confidence | Max position |
+|---|---|---|---|
+| **Conservative** *(default)* | 0.25 quarter-Kelly | 55% | 30% of balance |
+| **Competition** | 0.50 half-Kelly | 50% | 40% of balance |
+
+**Exchange minimums enforced on both buy and sell paths:**
+- Pair-aware Kraken `ordermin` (SOL: 0.02, XBT: 0.00005, ETH: 0.001)
+- Pair-aware Kraken `costmin` (USDC/USD: 0.5, XBT: 0.00002)
+- Partial sells below ordermin are auto-upgraded to full close to prevent dust
 
 ## Order Execution
 
@@ -263,10 +267,24 @@ hydra/
 ├── start_hydra.bat         # Agent with auto-restart
 ├── start_dashboard.bat     # Dashboard with auto-restart
 ├── create_shortcut.ps1     # Windows Startup shortcut creator
+├── tests/
+│   ├── test_engine.py       # Core engine tests
+│   ├── test_cross_pair.py   # Cross-pair coordinator tests
+│   ├── test_order_book.py   # Order book analyzer tests
+│   ├── test_tuner.py        # Self-tuning parameter tests
+│   ├── test_balance.py      # Balance & asset conversion tests
+│   ├── test_kraken_cli.py   # KrakenCLI wrapper tests (args, precision, fees)
+│   └── live_harness/        # Live-execution test harness (34 scenarios)
+│       ├── harness.py       # Harness class, CLI entry, harness_execute wrapper
+│       ├── scenarios.py     # All scenarios + ALL_SCENARIOS registry
+│       ├── schemas.py       # Per-status trade log entry schemas
+│       ├── state_comparator.py  # 13-field rollback comparator
+│       ├── stubs.py         # StubRun + Kraken response builders
+│       └── README.md        # Catalog, findings tracker, authoring guide
 └── dashboard/
     ├── index.html           # Entry point
-    ├── package.json         # React 19 + Vite 8
-    ├── vite.config.js       # Dev server config
+    ├── package.json         # React 19 + Vite
+    ├── vite.config.js       # Dev server config (port 3000, strictPort)
     ├── public/
     │   └── favicon.svg      # Three-headed Hydra icon
     └── src/
@@ -292,7 +310,7 @@ HYDRA tracks and reports per pair:
 
 2. **Limit post-only orders** — Never cross the spread. All orders sit on the book at bid (buy) or ask (sell). Lower fees, no slippage.
 
-3. **Quarter-Kelly sizing** — Full Kelly is mathematically optimal but practically dangerous. Quarter-Kelly sacrifices some expected return for dramatically lower variance and ruin probability.
+3. **Kelly fraction sizing** — Full Kelly is mathematically optimal but practically dangerous. Conservative mode uses quarter-Kelly (0.25) for low variance and ruin probability; competition mode uses half-Kelly (0.50) for higher returns with acceptable risk in short-horizon tournament play.
 
 4. **Circuit breaker at 15%** — No exceptions. An autonomous agent that can't stop itself is a liability.
 
@@ -302,27 +320,39 @@ HYDRA tracks and reports per pair:
 
 7. **Dead man's switch** — If the agent crashes, all open orders cancel within 60 seconds. Refreshed every tick.
 
-## Testing & Audit
-
-See **[AUDIT.md](AUDIT.md)** for the full technical audit report covering:
-
-- All 5 indicator implementations (EMA, RSI, ATR, BB, MACD) — correctness verified
-- Regime detection logic and priority ordering
-- Signal generation for all 4 strategies against specification
-- Position sizing formula and hard limits
-- Order execution (limit post-only, validation, rate limiting)
-- WebSocket broadcast and dashboard component verification
-- Infrastructure (auto-restart, startup, pair mapping)
-- 10 bugs found and fixed during audit
-- 5 known limitations documented
-
-To run the engine's built-in synthetic test (no API keys needed):
+## Testing
 
 ```bash
-python hydra_engine.py
+python tests/test_engine.py        # Indicators, regime, signals, sizing, circuit breaker
+python tests/test_cross_pair.py    # Cross-pair coordinator rules
+python tests/test_order_book.py    # Depth analyzer, imbalance, walls
+python tests/test_tuner.py         # Self-tuning Bayesian updates
+python tests/test_balance.py       # Staked asset, USD conversion, balance init
+python tests/test_kraken_cli.py    # KrakenCLI wrappers, price precision, fee parsing
+python hydra_engine.py             # Synthetic 300-tick demo (no API keys needed)
 ```
 
-This executes 300 ticks of random-walk price data through the full pipeline and prints a performance report.
+### Live-execution test harness
+
+`tests/live_harness/` drives `HydraAgent._execute_trade` across 34 scenarios
+(happy, failure, edge, schema, rollback, historical regression, real Kraken).
+It is the canonical validation tool for any change to the execution path.
+
+```bash
+python tests/live_harness/harness.py --mode smoke    # ~1.5s, import + agent
+python tests/live_harness/harness.py --mode mock     # ~1.5s, 26 scenarios (default)
+python tests/live_harness/harness.py --mode validate # ~10s, real Kraken read-only
+python tests/live_harness/harness.py --mode live --i-understand-this-places-real-orders
+```
+
+`smoke` and `mock` run in CI on every PR. See
+[tests/live_harness/README.md](tests/live_harness/README.md) for the scenario
+catalog, findings tracker (HF-### IDs), and authoring guide.
+
+See **[AUDIT.md](AUDIT.md)** for the v1.0-era technical audit report
+(indicators, regime detection, signal generation, position sizing,
+order execution, dashboard components, infrastructure) and
+**[CHANGELOG.md](CHANGELOG.md)** for version-by-version history.
 
 ## Troubleshooting
 
@@ -330,7 +360,7 @@ This executes 300 ticks of random-walk price data through the full pipeline and 
 |-------|----------|
 | `kraken: command not found` | Install kraken-cli in WSL: `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/krakenfx/kraken-cli/releases/latest/download/kraken-cli-installer.sh \| sh` |
 | `wsl: not found` or WSL errors | Ensure WSL is installed with Ubuntu: `wsl --install -d Ubuntu` |
-| Port 3000 in use | Dashboard auto-picks next port, or kill the process: `npx kill-port 3000` |
+| Port 3000 in use | `strictPort: true` in `vite.config.js` — Vite will fail instead of auto-picking. Kill the blocking process: `npx kill-port 3000` or change the port in vite.config.js |
 | Port 8765 in use | Stop any running agent, or change port: `--ws-port 8766` |
 | `websockets` not installed | `pip install websockets` |
 | Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |

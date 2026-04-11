@@ -105,7 +105,7 @@ position_size = position_value / current_price
 ```
 
 **Hard limits:**
-- Never allocate more than 30% of capital to a single trade (conservative) / 50% (competition)
+- Never allocate more than 30% of capital to a single trade (conservative) / 40% (competition)
 - Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 XBT)
 - Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 XBT)
 - Sell-side dust prevention: partial sells below ordermin force full close; positions below ordermin are unsellable
