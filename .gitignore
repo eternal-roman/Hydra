@@ -40,3 +40,7 @@ hydra_session_snapshot.json.tmp
 
 # Claude Code
 .claude/
+
+# Local agent memory (project-scoped, not tracked)
+HYDRA_MEMORY.md
+.hydra-memory/
