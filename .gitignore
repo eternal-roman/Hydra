@@ -31,12 +31,17 @@ Desktop.ini
 
 # Logs & runtime
 *.log
+hydra_order_journal.json
+hydra_order_journal.json.tmp
+hydra_order_journal.json.harness_stash
 hydra_trades_*.json
 hydra_trades_live.json
+hydra_trades_live.json.harness_stash
 competition_results_*.json
 hydra_params_*.json
 hydra_session_snapshot.json
 hydra_session_snapshot.json.tmp
+hydra_session_snapshot.json.harness_stash
 
 # Claude Code
 .claude/
