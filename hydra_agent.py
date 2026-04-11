@@ -17,6 +17,7 @@ import time
 import sys
 import os
 import argparse
+import queue
 import signal as sig
 import asyncio
 import threading
@@ -40,6 +41,7 @@ if os.path.exists(_env_path):
 
 from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
 from hydra_tuner import ParameterTracker
+from hydra_journal_migrator import migrate_legacy_trade_log_file
 
 try:
     from hydra_brain import HydraBrain
@@ -278,14 +280,21 @@ class KrakenCLI:
     @staticmethod
     def order_buy(pair: str, volume: float, price: float = None,
                   order_type: str = "limit", post_only: bool = True,
-                  validate: bool = False) -> dict:
-        """Place a buy order. Defaults to limit post-only (maker)."""
+                  validate: bool = False, userref: int = None) -> dict:
+        """Place a buy order. Defaults to limit post-only (maker).
+
+        `userref` is the numeric client tag that flows back to us via
+        `order_userref` on the WS executions stream — our primary
+        correlation key between a local journal entry and the exchange.
+        """
         p = KrakenCLI._resolve_pair(pair)
         args = ["order", "buy", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
             args.extend(["--price", KrakenCLI._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
+        if userref is not None:
+            args.extend(["--userref", str(int(userref))])
         if validate:
             args.append("--validate")
         return KrakenCLI._run(args)
@@ -293,14 +302,21 @@ class KrakenCLI:
     @staticmethod
     def order_sell(pair: str, volume: float, price: float = None,
                    order_type: str = "limit", post_only: bool = True,
-                   validate: bool = False) -> dict:
-        """Place a sell order. Defaults to limit post-only (maker)."""
+                   validate: bool = False, userref: int = None) -> dict:
+        """Place a sell order. Defaults to limit post-only (maker).
+
+        `userref` is the numeric client tag that flows back to us via
+        `order_userref` on the WS executions stream — our primary
+        correlation key between a local journal entry and the exchange.
+        """
         p = KrakenCLI._resolve_pair(pair)
         args = ["order", "sell", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
             args.extend(["--price", KrakenCLI._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
+        if userref is not None:
+            args.extend(["--userref", str(int(userref))])
         if validate:
             args.append("--validate")
         return KrakenCLI._run(args)
@@ -438,55 +454,391 @@ class DashboardBroadcaster:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ORDER RECONCILER
+# EXECUTION STREAM — kraken ws executions push reconciler
 # ═══════════════════════════════════════════════════════════════
 
-class OrderReconciler:
-    """Polls Kraken open-orders and detects orders that disappeared from the
-    exchange (filled, cancelled by dead-man's-switch, rejected).  Prevents
-    silent divergence between the agent's local order registry and reality."""
+class ExecutionStream:
+    """Consumes `kraken ws executions` and delivers push-based lifecycle
+    events to the agent tick loop.
 
-    def __init__(self, poll_every_ticks: int = 5):
-        self.poll_every_ticks = poll_every_ticks
-        self.known_orders: Dict[str, dict] = {}  # txid → {pair, side, amount, registered_at}
+    Architecture:
+        start()  - spawn the CLI subprocess (wsl -d Ubuntu -- bash -c "...")
+                   and a daemon reader thread that parses stdout line-by-line
+                   into an internal queue.
+        register(order_id, userref, journal_index, pair, side,
+                 placed_amount, engine_ref, pre_trade_snapshot)
+                 - correlate a freshly placed order with its in-memory
+                   journal entry and engine rollback handle.
+        drain_events() -> List[dict]
+                 - called every tick by the agent. Pops queued WS events,
+                   aggregates fills by order_id, emits one terminal event
+                   per order (FILLED / PARTIALLY_FILLED / CANCELLED_UNFILLED
+                   / REJECTED), hands them to the caller.
+        stop()   - terminate subprocess, join reader thread.
+        healthy  - True iff subprocess + reader alive AND a heartbeat was
+                   seen within HEARTBEAT_TIMEOUT_S.
 
-    def register(self, txid: str, pair: str, side: str, amount: float):
-        """Track a newly placed order by its Kraken txid."""
-        if txid and txid != "unknown":
-            self.known_orders[txid] = {
-                "pair": pair, "side": side, "amount": amount,
+    Correlation keys: order_id (from REST placement response) is primary;
+    order_userref (numeric tag we passed on placement) is fallback. Both
+    are checked — whichever arrives first resolves the match.
+
+    Numeric fields on incoming WS events are real JSON floats/ints in CLI
+    v0.2.3 (confirmed by spike on 2026-04-11) — no string coercion needed.
+
+    Paper mode uses paper=True which short-circuits start() and lets the
+    place_order helper emit synthetic terminal events directly into the
+    event queue. No subprocess is spawned.
+    """
+
+    HEARTBEAT_TIMEOUT_S = 15.0
+    READER_JOIN_TIMEOUT_S = 5.0
+
+    def __init__(self, paper: bool = False):
+        self.paper = paper
+        self._proc: Optional[subprocess.Popen] = None
+        self._reader_thread: Optional[threading.Thread] = None
+        self._event_queue: "queue.Queue[tuple]" = queue.Queue()
+        # Correlation maps — primary by order_id, secondary by userref
+        self._known_orders: Dict[str, dict] = {}
+        self._userref_to_order_id: Dict[int, str] = {}
+        self._last_heartbeat: float = 0.0
+        self._last_sequence: Optional[int] = None
+        self._lock = threading.Lock()
+        self._shutdown = threading.Event()
+
+    # ───────── lifecycle ─────────
+
+    def start(self) -> bool:
+        """Spawn the subprocess and reader thread. Returns True on success.
+
+        Paper mode is a no-op (returns True). In live mode, if spawning or
+        reader-start fails, returns False and leaves self.healthy==False —
+        the caller should log and proceed (placements still work, the
+        journal just won't get terminal events until the stream recovers).
+        """
+        if self.paper:
+            self._last_heartbeat = time.time()
+            return True
+        cmd = [
+            "wsl", "-d", "Ubuntu", "--", "bash", "-c",
+            "source ~/.cargo/env && kraken ws executions -o json "
+            "--snap-orders true --snap-trades true",
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=1, text=True,
+            )
+        except Exception as e:
+            print(f"  [EXECSTREAM] failed to spawn subprocess: {type(e).__name__}: {e}")
+            return False
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, name="ExecutionStream-reader", daemon=True,
+        )
+        self._reader_thread.start()
+        self._last_heartbeat = time.time()
+        print("  [EXECSTREAM] kraken ws executions stream started")
+        return True
+
+    def stop(self) -> None:
+        """Terminate subprocess, join reader thread. Idempotent."""
+        self._shutdown.set()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            self._proc = None
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=self.READER_JOIN_TIMEOUT_S)
+            self._reader_thread = None
+
+    @property
+    def healthy(self) -> bool:
+        if self.paper:
+            return True
+        if self._proc is None:
+            return False
+        if self._proc.poll() is not None:
+            return False  # subprocess exited
+        if self._reader_thread is None or not self._reader_thread.is_alive():
+            return False
+        if time.time() - self._last_heartbeat > self.HEARTBEAT_TIMEOUT_S:
+            return False
+        return True
+
+    # ───────── reader thread ─────────
+
+    def _reader_loop(self) -> None:
+        """Daemon thread body. Line-iterates subprocess stdout, parses each
+        line as JSON, dispatches to the internal queue."""
+        assert self._proc is not None
+        try:
+            for raw in self._proc.stdout:  # type: ignore[union-attr]
+                if self._shutdown.is_set():
+                    break
+                line = raw.rstrip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    # CLI diagnostic noise — log but keep reading.
+                    print(f"  [EXECSTREAM] non-JSON line: {line[:120]}")
+                    continue
+                self._dispatch(msg)
+        except Exception as e:
+            if not self._shutdown.is_set():
+                print(f"  [EXECSTREAM] reader thread error: {type(e).__name__}: {e}")
+
+    def _dispatch(self, msg: Dict[str, Any]) -> None:
+        """Classify an incoming WS message and enqueue data events."""
+        channel = msg.get("channel")
+        if channel == "heartbeat":
+            self._last_heartbeat = time.time()
+            return
+        if channel == "status":
+            # Connection status update; informational only
+            return
+        if msg.get("method") == "subscribe":
+            if not msg.get("success"):
+                print(f"  [EXECSTREAM] subscribe failed: {msg}")
+            return
+        if channel != "executions":
+            return
+        # Bump the heartbeat on any executions traffic — it's a liveness signal
+        self._last_heartbeat = time.time()
+        # Sequence gap detection (warn only — subsequent snapshot recovers)
+        seq = msg.get("sequence")
+        if isinstance(seq, int):
+            if self._last_sequence is not None and seq != self._last_sequence + 1:
+                print(
+                    f"  [EXECSTREAM] sequence gap {self._last_sequence}->{seq} "
+                    f"(executions may have been dropped; waiting for next snapshot)"
+                )
+            self._last_sequence = seq
+        msg_type = msg.get("type")  # "snapshot" | "update"
+        data = msg.get("data") or []
+        if not isinstance(data, list):
+            return
+        for entry in data:
+            if isinstance(entry, dict):
+                self._event_queue.put((msg_type or "update", entry))
+
+    # ───────── registration ─────────
+
+    def register(self, *, order_id: str, userref: Optional[int],
+                 journal_index: int, pair: str, side: str,
+                 placed_amount: float, engine_ref: Any,
+                 pre_trade_snapshot: Any) -> None:
+        """Correlate an in-flight placement with its journal entry and
+        rollback handle. Skips registration when order_id is 'unknown'
+        (REST returned no txid) — such orders can't be tracked by id and
+        won't finalize via this stream; the placement helper should log
+        a warning in that case."""
+        if not order_id or order_id == "unknown":
+            return
+        with self._lock:
+            self._known_orders[order_id] = {
+                "order_id": order_id,
+                "userref": userref,
+                "journal_index": journal_index,
+                "pair": pair,
+                "side": side,
+                "placed_amount": float(placed_amount),
+                "engine_ref": engine_ref,
+                "pre_trade_snapshot": pre_trade_snapshot,
                 "registered_at": time.time(),
+                "vol_exec_running": 0.0,
+                "cost_running": 0.0,
+                "fee_running": 0.0,
+                "exec_ids": [],
+            }
+            if userref is not None:
+                self._userref_to_order_id[int(userref)] = order_id
+
+    def inject_event(self, entry: Dict[str, Any], *, kind: str = "update") -> None:
+        """Test/paper hook: push an execution entry straight into the queue
+        without going through the subprocess. Used by paper mode to synthesize
+        fill events and by FakeExecutionStream in tests."""
+        self._event_queue.put((kind, entry))
+
+    # ───────── consumption ─────────
+
+    # Terminal Kraken order_status values
+    _TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected"}
+
+    def drain_events(self) -> List[Dict[str, Any]]:
+        """Called once per tick. Pops every queued WS entry, updates the
+        per-order aggregator, and emits one terminal event per order that
+        finished this drain. Non-terminal updates (pending_new, new,
+        interim partial fills) update internal state silently.
+
+        Returned event shape (flat dict, agent applies directly to journal
+        + engine state):
+
+            {
+                "order_id":          str,
+                "journal_index":     int,
+                "engine_ref":        HydraEngine,
+                "pre_trade_snapshot": dict,
+                "placed_amount":     float,
+                "pair":              str,
+                "side":              "BUY" | "SELL",
+                "state":             "FILLED" | "PARTIALLY_FILLED" |
+                                     "CANCELLED_UNFILLED" | "REJECTED",
+                "vol_exec":          float,
+                "avg_fill_price":    Optional[float],
+                "fee_quote":         float,
+                "terminal_reason":   Optional[str],
+                "exec_ids":          List[str],
+                "timestamp":         Optional[str],
+            }
+        """
+        events: List[Dict[str, Any]] = []
+        while True:
+            try:
+                _kind, entry = self._event_queue.get_nowait()
+            except queue.Empty:
+                break
+            term = self._apply_entry(entry)
+            if term is not None:
+                events.append(term)
+        return events
+
+    def _apply_entry(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Fold one WS execution entry into the per-order aggregate. Returns
+        a terminal event if the order finalized on this entry, else None."""
+        order_id = entry.get("order_id")
+        userref = entry.get("order_userref")
+        with self._lock:
+            known: Optional[dict] = None
+            if isinstance(order_id, str) and order_id in self._known_orders:
+                known = self._known_orders[order_id]
+            elif isinstance(userref, int) and userref in self._userref_to_order_id:
+                resolved_id = self._userref_to_order_id[userref]
+                known = self._known_orders.get(resolved_id)
+                if known is not None:
+                    order_id = resolved_id
+            if known is None:
+                # Not one of ours (snapshot of historical fills, manual trade,
+                # or an order that hasn't been register()'d yet due to a race).
+                return None
+
+            order_status = entry.get("order_status")
+
+            # Fold trade/fill events into the running totals. Don't gate on
+            # exec_type — it's purely labeling (observed "trade" in the v2
+            # snapshot). Trust last_qty + last_price to detect a real fill.
+            last_qty = entry.get("last_qty")
+            last_price = entry.get("last_price")
+            if isinstance(last_qty, (int, float)) and last_qty > 0:
+                last_qty_f = float(last_qty)
+                last_price_f = float(last_price) if isinstance(last_price, (int, float)) else 0.0
+                cost_raw = entry.get("cost")
+                cost_f = float(cost_raw) if isinstance(cost_raw, (int, float)) else (last_qty_f * last_price_f)
+                fees = entry.get("fees") or []
+                fee_delta = 0.0
+                if isinstance(fees, list):
+                    for fee in fees:
+                        if isinstance(fee, dict):
+                            q = fee.get("qty")
+                            if isinstance(q, (int, float)):
+                                fee_delta += float(q)
+                known["vol_exec_running"] += last_qty_f
+                known["cost_running"] += cost_f
+                known["fee_running"] += fee_delta
+                exec_id = entry.get("exec_id")
+                if isinstance(exec_id, str) and exec_id:
+                    known["exec_ids"].append(exec_id)
+
+            # Only emit a terminal event once the order reaches a terminal
+            # order_status. exec_type alone is not enough — a "trade" exec
+            # can be interim on a partially-filled order still open.
+            if order_status not in self._TERMINAL_STATUSES:
+                return None
+
+            vol_exec = known["vol_exec_running"]
+            placed = known["placed_amount"]
+            eps = max(1e-9, placed * 1e-6)
+            avg_price = (known["cost_running"] / vol_exec) if vol_exec > 0 else None
+
+            if order_status == "filled":
+                if abs(vol_exec - placed) <= eps:
+                    state = "FILLED"
+                else:
+                    state = "PARTIALLY_FILLED"
+                terminal_reason: Optional[str] = None
+            elif order_status in ("canceled", "expired"):
+                reason = entry.get("reason") or order_status
+                terminal_reason = str(reason)
+                if vol_exec <= eps:
+                    state = "CANCELLED_UNFILLED"
+                else:
+                    state = "PARTIALLY_FILLED"
+            elif order_status == "rejected":
+                state = "REJECTED"
+                terminal_reason = str(entry.get("reason") or "rejected")
+            else:
+                return None  # unreachable given _TERMINAL_STATUSES guard
+
+            term = {
+                "order_id": known["order_id"],
+                "journal_index": known["journal_index"],
+                "engine_ref": known["engine_ref"],
+                "pre_trade_snapshot": known["pre_trade_snapshot"],
+                "placed_amount": placed,
+                "pair": known["pair"],
+                "side": known["side"],
+                "state": state,
+                "vol_exec": vol_exec,
+                "avg_fill_price": avg_price,
+                "fee_quote": known["fee_running"],
+                "terminal_reason": terminal_reason,
+                "exec_ids": list(known["exec_ids"]),
+                "timestamp": entry.get("timestamp"),
             }
 
-    def maybe_reconcile(self, tick: int) -> List[dict]:
-        """Poll open-orders every N ticks. Returns events for disappeared orders."""
-        if tick % self.poll_every_ticks != 0 or not self.known_orders:
-            return []
-        try:
-            result = KrakenCLI.open_orders()
-            if isinstance(result, dict) and "error" in result:
-                return [{"type": "poll_failed", "error": result["error"]}]
-            # Extract live txids from Kraken response
-            live_txids: set = set()
-            if isinstance(result, dict):
-                opens = result.get("open", result.get("result", result))
-                if isinstance(opens, dict):
-                    live_txids = set(opens.keys())
-            # Detect disappeared orders
-            events: List[dict] = []
-            for txid in list(self.known_orders.keys()):
-                if txid not in live_txids:
-                    info = self.known_orders.pop(txid)
-                    events.append({
-                        "type": "order_disappeared",
-                        "txid": txid,
-                        "pair": info["pair"],
-                        "side": info["side"],
-                        "amount": info["amount"],
-                    })
-            return events
-        except Exception as e:
-            return [{"type": "poll_failed", "error": str(e)}]
+            # Drop from known maps — terminal means done.
+            self._known_orders.pop(known["order_id"], None)
+            uref = known.get("userref")
+            if isinstance(uref, int):
+                self._userref_to_order_id.pop(uref, None)
+            return term
+
+
+class FakeExecutionStream(ExecutionStream):
+    """Test/harness double: identical interface, no subprocess, no thread.
+
+    Tests push synthetic WS execution entries via `inject_event(...)` and
+    then call `drain_events()` to collect terminal events. Used by the
+    live harness in mock mode so scenario runs stay fast and hermetic."""
+
+    def __init__(self):
+        super().__init__(paper=False)
+        # Override so healthy reports True without a subprocess
+        self._fake_healthy = True
+        self._last_heartbeat = time.time()
+
+    def start(self) -> bool:
+        # No-op — tests drive events via inject_event.
+        return True
+
+    def stop(self) -> None:
+        self._shutdown.set()
+
+    @property
+    def healthy(self) -> bool:
+        return self._fake_healthy
+
+    def set_healthy(self, value: bool) -> None:
+        self._fake_healthy = value
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -503,7 +855,7 @@ class HydraAgent:
     PRIMARY_PAIR = "SOL/USDC"       # Main trading pair
     CROSS_PAIR = "SOL/XBT"          # Opportunistic regime-driven swaps
     BTC_PAIR = "XBT/USDC"           # For BTC/USDC when we can afford it
-    TRADE_LOG_CAP = 2000            # Bound in-memory trade log
+    ORDER_JOURNAL_CAP = 2000        # Bound in-memory order journal
     SNAPSHOT_EVERY_N_TICKS = 12     # ~1h at 5-min candles
 
     def __init__(
@@ -529,10 +881,14 @@ class HydraAgent:
         self.candle_interval = candle_interval
         self.running = True
         self.start_time = None
-        self.trade_log = []
+        self.order_journal: List[Dict[str, Any]] = []
         self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
+        # Monotonic client tag seeded from wall-clock to avoid collisions
+        # across restarts; flows into Kraken as --userref and comes back on
+        # the WS executions stream as order_userref for correlation.
+        self._userref_counter = int(time.time()) & 0x7FFFFFFF
 
         # Sizing config based on mode
         sizing = SIZING_COMPETITION if mode == "competition" else SIZING_CONSERVATIVE
@@ -590,8 +946,11 @@ class HydraAgent:
         self.coordinator = CrossPairCoordinator(pairs)
         self._swap_counter = 0  # Monotonic swap ID generator
 
-        # Order reconciler — detects filled/cancelled orders (live mode only)
-        self.reconciler = OrderReconciler(poll_every_ticks=5) if not paper else None
+        # Execution stream — push-based reconciler backed by `kraken ws
+        # executions`. Paper mode short-circuits the subprocess and uses
+        # synthetic fill events (inject_event) so the same code path
+        # handles both real and paper flows.
+        self.execution_stream = ExecutionStream(paper=paper)
 
         # Fee tier cache — refreshed at most once per hour from `kraken volume`.
         # Shape: {"volume_30d_usd": float|None, "pair_fees": {pair: {"maker_pct","taker_pct"}}}
@@ -606,16 +965,26 @@ class HydraAgent:
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
+        # Run the one-shot legacy trade_log -> order_journal migration
+        # before touching any on-disk state. Idempotent; no-op after the
+        # first run. Lives in hydra_journal_migrator so it can be invoked
+        # standalone as well.
+        try:
+            migrate_legacy_trade_log_file(self._snapshot_dir, verbose=False)
+        except Exception as e:
+            print(f"  [MIGRATE] legacy journal migration skipped: {e}")
+
         # Restore from snapshot if requested
         if resume:
             self._load_snapshot()
 
-        # Merge on-disk rolling trade log into self.trade_log, regardless of --resume.
-        # The snapshot only holds the last 200 entries; the rolling file is the
-        # long-horizon record. Prior versions would overwrite the rolling file on
-        # the first tick after restart, truncating history — this merges it in first
-        # so restarts preserve full depth (bounded by TRADE_LOG_CAP).
-        self._merge_rolling_trade_log()
+        # Merge the on-disk rolling journal into self.order_journal regardless
+        # of --resume. The snapshot only holds the last 200 entries; the
+        # rolling file is the long-horizon record. Prior versions would
+        # overwrite the rolling file on the first tick after restart,
+        # truncating history — this merges it in first so restarts preserve
+        # full depth (bounded by ORDER_JOURNAL_CAP).
+        self._merge_order_journal()
 
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
@@ -634,6 +1003,11 @@ class HydraAgent:
                     print("  [HYDRA] All open orders cancelled.")
             except Exception as e:
                 print(f"  [HYDRA] Cancel-all failed: {e}")
+        # Tear down the execution stream subprocess + reader thread
+        try:
+            self.execution_stream.stop()
+        except Exception as e:
+            print(f"  [HYDRA] ExecutionStream stop failed: {e}")
         # Flush session snapshot for --resume
         try:
             self._save_snapshot()
@@ -646,7 +1020,7 @@ class HydraAgent:
         return os.path.join(self._snapshot_dir, "hydra_session_snapshot.json")
 
     def _save_snapshot(self):
-        """Atomically save session state to disk (.tmp → os.replace)."""
+        """Atomically save session state to disk (.tmp -> os.replace)."""
         snapshot = {
             "version": 1,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -656,7 +1030,7 @@ class HydraAgent:
             "competition_start_balance": self._competition_start_balance,
             "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
             "coordinator_regime_history": self.coordinator.regime_history,
-            "trade_log": self.trade_log[-200:],
+            "order_journal": self.order_journal[-200:],
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -685,66 +1059,85 @@ class HydraAgent:
             for pair, history in snapshot.get("coordinator_regime_history", {}).items():
                 if pair in self.coordinator.regime_history:
                     self.coordinator.regime_history[pair] = list(history)
-            self.trade_log = list(snapshot.get("trade_log", []))
+            self.order_journal = list(snapshot.get("order_journal", []))
             if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
 
-    def _merge_rolling_trade_log(self):
-        """Merge any existing on-disk hydra_trades_live.json into self.trade_log.
+    def _merge_order_journal(self):
+        """Merge the on-disk hydra_order_journal.json into self.order_journal.
 
-        Rationale: _save_snapshot caps trade_log at [-200:] for compactness, so
-        _load_snapshot can only ever restore the last 200 entries. The rolling
-        file (hydra_trades_live.json) is the authoritative long-horizon record —
-        but prior versions of the tick loop would overwrite it on the first tick
-        after a restart, destroying any history older than the in-memory log.
-        This method loads the rolling file at startup and unions it with
-        whatever was restored from the snapshot, so restart never truncates
-        historical depth. Bounded by TRADE_LOG_CAP.
+        Rationale: _save_snapshot caps order_journal at [-200:] for
+        compactness, so _load_snapshot can only ever restore the last 200
+        entries. The rolling file (hydra_order_journal.json) is the
+        authoritative long-horizon record — a prior bug would overwrite it
+        on the first tick after a restart, destroying any history older
+        than the in-memory journal. This method loads the rolling file at
+        startup and unions it with whatever was restored from the snapshot
+        so restart never truncates historical depth. Bounded by
+        ORDER_JOURNAL_CAP.
 
-        Dedup key is (time, txid) when a Kraken txid is available, else
-        (time, pair, action, amount) — precise enough because Hydra timestamps
-        have microsecond resolution.
+        Dedup key is (placed_at, order_id) when a Kraken order_id is
+        available, else (placed_at, pair, side, intent.amount) — precise
+        enough because placed_at has microsecond resolution.
+
+        Conflict policy: on duplicate key, the ROLLING FILE wins. Both
+        files are saved from the same in-memory journal during normal
+        operation, so divergence only happens via manual data repair or
+        external tooling — and in those cases the rolling file is what
+        gets edited (see PR #40 data repair). After the merge, the next
+        _save_snapshot rewrites the snapshot to match.
         """
-        rolling_file = os.path.join(self._snapshot_dir, "hydra_trades_live.json")
+        rolling_file = os.path.join(self._snapshot_dir, "hydra_order_journal.json")
         if not os.path.exists(rolling_file):
             return
         try:
             with open(rolling_file, "r") as f:
                 on_disk = json.load(f)
         except Exception as e:
-            print(f"  [TRADE LOG] Could not read rolling file for merge: {e}")
+            print(f"  [JOURNAL] Could not read rolling file for merge: {e}")
             return
         if not isinstance(on_disk, list):
             return
 
         def _key(entry):
-            t = entry.get("time", "")
-            result = entry.get("result") or {}
-            txids = result.get("txid") if isinstance(result, dict) else None
-            if isinstance(txids, list) and txids:
-                return (t, txids[0])
-            if isinstance(txids, str):
-                return (t, txids)
-            return (t, entry.get("pair", ""), entry.get("action", ""), entry.get("amount", 0))
+            t = entry.get("placed_at", "")
+            ref = entry.get("order_ref") or {}
+            order_id = ref.get("order_id") if isinstance(ref, dict) else None
+            if order_id:
+                return (t, order_id)
+            intent = entry.get("intent") or {}
+            return (t, entry.get("pair", ""), entry.get("side", ""),
+                    intent.get("amount", 0) if isinstance(intent, dict) else 0)
 
-        seen = {_key(e): e for e in self.trade_log}
+        seen = {_key(e): e for e in self.order_journal}
         merged_count = 0
+        overwritten_count = 0
         for e in on_disk:
             k = _key(e)
             if k not in seen:
                 seen[k] = e
                 merged_count += 1
+            else:
+                # Rolling file wins on conflict — see docstring.
+                if seen[k] is not e:
+                    seen[k] = e
+                    overwritten_count += 1
 
-        merged = sorted(seen.values(), key=lambda e: e.get("time", ""))
-        if len(merged) > self.TRADE_LOG_CAP:
-            merged = merged[-self.TRADE_LOG_CAP:]
-        self.trade_log = merged
-        if merged_count:
-            print(f"  [TRADE LOG] Merged {merged_count} historical entries from "
-                  f"{os.path.basename(rolling_file)}; total = {len(self.trade_log)}")
+        merged = sorted(seen.values(), key=lambda e: e.get("placed_at", ""))
+        if len(merged) > self.ORDER_JOURNAL_CAP:
+            merged = merged[-self.ORDER_JOURNAL_CAP:]
+        self.order_journal = merged
+        if merged_count or overwritten_count:
+            parts = []
+            if merged_count:
+                parts.append(f"merged {merged_count} new")
+            if overwritten_count:
+                parts.append(f"overwrote {overwritten_count} stale")
+            print(f"  [JOURNAL] {' + '.join(parts)} from "
+                  f"{os.path.basename(rolling_file)}; total = {len(self.order_journal)}")
 
     def run(self):
         """Main agent loop."""
@@ -823,6 +1216,13 @@ class HydraAgent:
         if self._competition_start_balance is None:
             self._competition_start_balance = self.initial_balance
 
+        # Start the execution stream (kraken ws executions subprocess +
+        # background reader). Paper mode no-ops. Failure leaves healthy=False
+        # which we surface each tick; placement still works, lifecycle
+        # finalization just won't happen until the stream recovers.
+        if not self.execution_stream.start():
+            print("  [WARN] ExecutionStream failed to start — placements will not auto-finalize")
+
         print(f"\n  [HYDRA] Starting LIVE trading loop")
         print(f"  [HYDRA] Pairs: {', '.join(self.pairs)}")
         print(f"  [HYDRA] Interval: {self.interval}s | Duration: {self.duration}s")
@@ -832,9 +1232,10 @@ class HydraAgent:
         while self.running and (self.duration == 0 or (time.time() - self.start_time) < self.duration):
             # HF-004 fix: wrap the tick body in try/except so an unhandled
             # exception does not kill the run() loop. When start_hydra.bat
-            # restarts the agent after a crash, in-memory trade_log entries
-            # since the last snapshot are lost. Log the traceback and continue.
-            trade_log_size_start = len(self.trade_log)
+            # restarts the agent after a crash, in-memory order_journal
+            # entries since the last snapshot are lost. Log the traceback
+            # and continue.
+            journal_size_start = len(self.order_journal)
             try:
                 tick += 1
                 elapsed = time.time() - self.start_time
@@ -1012,18 +1413,18 @@ class HydraAgent:
                             }
                             state["_pre_trade_snapshot"] = pre_trade_snap
 
-                # Print status and execute trades (sequential — rate limiting required)
+                # Print status and place orders (sequential — rate limiting required)
                 # Skip swap pairs — the swap handler manages their execution.
                 for pair in self.pairs:
                     state = all_states.get(pair)
                     if state:
                         self._print_tick_status(pair, state)
                         if state.get("last_trade") and pair not in swap_pairs:
-                            success = self._execute_trade(pair, state["last_trade"])
+                            success = self._place_order(pair, state["last_trade"], state)
                             if not success and state.get("_pre_trade_snapshot"):
                                 engine = self.engines[pair]
                                 engine.restore_position(state["_pre_trade_snapshot"])
-                                print(f"  [ROLLBACK] {pair}: engine state rolled back after failed order")
+                                print(f"  [ROLLBACK] {pair}: engine state rolled back after failed placement")
 
                 # Phase 3: Execute coordinated swaps, then check regime transitions
                 if pending_swaps:
@@ -1062,26 +1463,26 @@ class HydraAgent:
                 dashboard_state = self._build_dashboard_state(tick, all_states, elapsed)
                 self.broadcaster.broadcast(dashboard_state)
 
-                # Reconcile tracked orders against exchange state (live mode only)
-                if self.reconciler and self.reconciler.known_orders and tick % self.reconciler.poll_every_ticks == 0:
-                    time.sleep(2)  # Rate limit before Kraken API call
-                if self.reconciler:
-                    for ev in self.reconciler.maybe_reconcile(tick):
-                        if ev["type"] == "order_disappeared":
-                            print(f"  [RECON] {ev['pair']} {ev['side'].upper()} {ev['txid']} "
-                                  f"no longer on exchange (filled/cancelled)")
-                        elif ev["type"] == "poll_failed":
-                            print(f"  [RECON] Poll failed: {ev.get('error')}")
+                # Drain queued WS execution events and apply them to the
+                # journal + engine state. Pushes, not polls — the stream
+                # has been delivering events in the background since tick
+                # start. In paper mode this drains any synthetic fills
+                # _place_paper_order injected during this tick.
+                if not self.execution_stream.paper and not self.execution_stream.healthy:
+                    print("  [WARN] execution stream unhealthy — lifecycle finalization stalled")
+                for term in self.execution_stream.drain_events():
+                    self._apply_execution_event(term)
 
-                # Rolling save — persist trade log every tick so no data is lost on crash.
-                # Atomic write (.tmp + os.replace) so a crash mid-write cannot corrupt
-                # the file into half-valid JSON. Mirrors _save_snapshot's pattern.
-                if self.trade_log:
-                    rolling_file = os.path.join(self._snapshot_dir, "hydra_trades_live.json")
+                # Rolling save — persist the order journal every tick so
+                # no data is lost on crash. Atomic write (.tmp + os.replace)
+                # so a crash mid-write cannot corrupt the file into
+                # half-valid JSON. Mirrors _save_snapshot's pattern.
+                if self.order_journal:
+                    rolling_file = os.path.join(self._snapshot_dir, "hydra_order_journal.json")
                     rolling_tmp = rolling_file + ".tmp"
                     try:
                         with open(rolling_tmp, "w") as f:
-                            json.dump(self.trade_log, f, indent=2)
+                            json.dump(self.order_journal, f, indent=2)
                         os.replace(rolling_tmp, rolling_file)
                     except Exception as e:
                         # HF-003 fix: previously "except Exception: pass" silently
@@ -1089,11 +1490,11 @@ class HydraAgent:
                         # making logging outages invisible. Log the failure so it's
                         # visible in stdout and in hydra_errors.log via the outer
                         # tick-body exception handler.
-                        print(f"  [WARN] rolling log write failed: {type(e).__name__}: {e}")
+                        print(f"  [WARN] rolling journal write failed: {type(e).__name__}: {e}")
 
-                # Cap trade log to prevent unbounded memory growth
-                if len(self.trade_log) > self.TRADE_LOG_CAP:
-                    self.trade_log = self.trade_log[-self.TRADE_LOG_CAP:]
+                # Cap order journal to prevent unbounded memory growth
+                if len(self.order_journal) > self.ORDER_JOURNAL_CAP:
+                    self.order_journal = self.order_journal[-self.ORDER_JOURNAL_CAP:]
 
 
             except Exception as e:
@@ -1106,11 +1507,12 @@ class HydraAgent:
                 except Exception:
                     pass  # if error log write fails, at least we printed to stdout
 
-            # HF-004 fix: snapshot immediately if trade_log grew this tick, so a
-            # subsequent crash does not lose the newly-appended entries. Also save
-            # on the periodic cadence for engine state that changes without trades.
-            trade_log_grew = len(self.trade_log) > trade_log_size_start
-            if trade_log_grew or tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
+            # HF-004 fix: snapshot immediately if the journal grew this tick,
+            # so a subsequent crash does not lose the newly-appended entries.
+            # Also save on the periodic cadence for engine state that
+            # changes without placements.
+            journal_grew = len(self.order_journal) > journal_size_start
+            if journal_grew or tick % self.SNAPSHOT_EVERY_N_TICKS == 0:
                 self._save_snapshot()
 
             # Sleep until next tick
@@ -1264,125 +1666,294 @@ class HydraAgent:
             },
         }
 
-    def _execute_trade(self, pair: str, trade: dict) -> bool:
-        """Execute a trade via kraken-cli — paper or live limit post-only.
+    # ─── Order placement (writes the journal, registers with the stream) ───
 
-        Returns True if the order was accepted by the exchange, False otherwise.
-        The caller should rollback engine state on False to prevent phantom positions.
+    def _next_userref(self) -> int:
+        """Monotonic client tag used for --userref on placement so WS
+        executions can correlate back to the local journal entry."""
+        self._userref_counter += 1
+        # Kraken userref is int32. Wrap defensively.
+        if self._userref_counter > 0x7FFFFFFF:
+            self._userref_counter = int(time.time()) & 0x7FFFFFFF
+        return self._userref_counter
+
+    def _build_journal_entry(self, pair: str, trade: dict, state: dict) -> Dict[str, Any]:
+        """Construct a new-shape order journal entry from a tick's trade
+        intent + decision context. Lifecycle is filled in by the caller
+        once placement completes (initial state = PLACED on success,
+        PLACEMENT_FAILED on any pre-exchange failure).
+
+        Decision context is pulled from `state` — this is the bot's
+        private view of why it's placing the order, and the one thing
+        Kraken cannot reconstruct.
         """
-        action = trade["action"].lower()
-        amount = trade["amount"]
+        action_upper = trade["action"].upper()
+        confidence = trade.get("confidence")
+        # Brain verdict summary if the brain fired this tick
+        ai = state.get("ai_decision") if isinstance(state, dict) else None
+        brain_verdict = None
+        if isinstance(ai, dict) and not ai.get("fallback"):
+            brain_verdict = {
+                "action": ai.get("action"),
+                "final_signal": ai.get("final_signal"),
+                "summary": ai.get("summary"),
+            }
+        book = state.get("order_book") if isinstance(state, dict) else None
+        book_mod = book.get("confidence_modifier") if isinstance(book, dict) else None
+        return {
+            "placed_at": datetime.now(timezone.utc).isoformat(),
+            "pair": pair,
+            "side": action_upper,
+            "intent": {
+                "amount": trade["amount"],
+                "limit_price": trade.get("price"),
+                "post_only": not self.paper,
+                "order_type": "market" if self.paper else "limit",
+                "paper": self.paper,
+            },
+            "decision": {
+                "strategy": state.get("strategy") if isinstance(state, dict) else None,
+                "regime": state.get("regime") if isinstance(state, dict) else None,
+                "reason": trade.get("reason"),
+                "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+                "params_at_entry": trade.get("params_at_entry"),
+                "cross_pair_override": state.get("cross_pair_override") if isinstance(state, dict) else None,
+                "book_confidence_modifier": book_mod,
+                "brain_verdict": brain_verdict,
+                "swap_id": trade.get("swap_id"),
+            },
+            "order_ref": {"order_userref": None, "order_id": None},
+            "lifecycle": {
+                "state": "PLACED",
+                "vol_exec": 0.0,
+                "avg_fill_price": None,
+                "fee_quote": 0.0,
+                "final_at": None,
+                "terminal_reason": None,
+                "exec_ids": [],
+            },
+        }
 
+    def _place_order(self, pair: str, trade: dict, state: dict) -> bool:
+        """Place an order via kraken-cli and write the initial journal entry.
+
+        On success: returns True, writes a PLACED-state entry, and registers
+        the order with self.execution_stream so subsequent WS events
+        finalize its lifecycle asynchronously via _apply_execution_event.
+
+        On any pre-exchange failure (ticker/validate/placement rejected):
+        returns False, writes a terminal PLACEMENT_FAILED entry, and the
+        caller rolls back the engine's pre-trade snapshot.
+
+        Post-placement failures (post-only reject, DMS cancel, partial
+        fills) are handled asynchronously by the execution stream — NOT
+        here — on subsequent ticks.
+        """
         if self.paper:
-            return self._execute_paper_trade(pair, action, amount, trade)
+            return self._place_paper_order(pair, trade, state)
 
-        # ─── Live: limit post-only ───
+        amount = trade["amount"]
+        action_upper = trade["action"].upper()
+        action = action_upper.lower()
+        entry = self._build_journal_entry(pair, trade, state)
+        pre_trade_snap = state.get("_pre_trade_snapshot") if isinstance(state, dict) else None
+
+        # ─── Ticker fetch ───
         time.sleep(2)
         ticker = KrakenCLI.ticker(pair)
         if "error" in ticker or "bid" not in ticker:
             print(f"  [TRADE] Cannot fetch ticker for {pair}, skipping")
-            self.trade_log.append({
-                "time": datetime.now(timezone.utc).isoformat(),
-                "pair": pair, "action": trade["action"], "amount": amount,
-                "price": trade["price"], "status": "TICKER_FAILED",
-                "error": ticker.get("error", "no bid/ask"),
-            })
+            self._finalize_failed_entry(
+                entry, terminal_reason=f"ticker_failed:{ticker.get('error', 'no bid/ask')}",
+            )
             return False
 
         limit_price = ticker["bid"] if action == "buy" else ticker["ask"]
+        entry["intent"]["limit_price"] = limit_price
 
-        # Validate
+        # ─── Validate ───
         time.sleep(2)
-        print(f"  [TRADE] Validating {action.upper()} {amount:.8f} {pair} @ {limit_price} (post-only limit)...")
+        print(f"  [TRADE] Validating {action_upper} {amount:.8f} {pair} @ {limit_price} (post-only limit)...")
         if action == "buy":
             val_result = KrakenCLI.order_buy(pair, amount, price=limit_price, validate=True)
         else:
             val_result = KrakenCLI.order_sell(pair, amount, price=limit_price, validate=True)
-
         if "error" in val_result:
             print(f"  [TRADE] Validation failed: {val_result['error']}")
-            self.trade_log.append({
-                "time": datetime.now(timezone.utc).isoformat(),
-                "pair": pair, "action": trade["action"], "amount": amount,
-                "price": limit_price, "status": "VALIDATION_FAILED",
-                "error": val_result["error"],
-            })
+            self._finalize_failed_entry(
+                entry, terminal_reason=f"validation_failed:{val_result['error']}",
+            )
             return False
 
-        # Re-fetch ticker for fresh bid/ask — price may have moved during validation
+        # ─── Re-fetch ticker (price may have drifted during validate) ───
         time.sleep(2)
         fresh_ticker = KrakenCLI.ticker(pair)
         if "error" not in fresh_ticker and "bid" in fresh_ticker:
             limit_price = fresh_ticker["bid"] if action == "buy" else fresh_ticker["ask"]
+            entry["intent"]["limit_price"] = limit_price
 
-        print(f"  [TRADE] Executing {action.upper()} {amount:.8f} {pair} @ {limit_price} (limit post-only)...")
+        # ─── Place for real ───
+        userref = self._next_userref()
+        print(f"  [TRADE] Placing {action_upper} {amount:.8f} {pair} @ {limit_price} "
+              f"(limit post-only, userref={userref})...")
         if action == "buy":
-            result = KrakenCLI.order_buy(pair, amount, price=limit_price)
+            result = KrakenCLI.order_buy(pair, amount, price=limit_price, userref=userref)
         else:
-            result = KrakenCLI.order_sell(pair, amount, price=limit_price)
+            result = KrakenCLI.order_sell(pair, amount, price=limit_price, userref=userref)
 
         if "error" in result:
             print(f"  [TRADE] FAILED: {result['error']}")
-            status = "FAILED"
-            success = False
-        else:
-            txid = result.get("txid", result.get("result", {}).get("txid", "unknown"))
-            # Kraken API may return txid as a list — unwrap to string
-            if isinstance(txid, list):
-                txid = txid[0] if txid else "unknown"
-            print(f"  [TRADE] SUCCESS: {action.upper()} {amount:.8f} {pair} | txid: {txid}")
-            status = "EXECUTED"
-            success = True
-            if self.reconciler:
-                self.reconciler.register(txid, pair, action, amount)
+            self._finalize_failed_entry(
+                entry, terminal_reason=f"placement_error:{result['error']}",
+            )
+            return False
 
-        self.trade_log.append({
-            "time": datetime.now(timezone.utc).isoformat(),
-            "pair": pair,
-            "action": trade["action"],
-            "amount": amount,
-            "price": limit_price,
-            "order_type": "limit post-only",
-            "reason": trade["reason"],
-            "confidence": trade.get("confidence"),
-            "status": status,
-            "result": result if "error" not in result else None,
-            "error": result.get("error"),
-        })
-        return success
+        # ─── Accepted: extract order_id, register with stream, append PLACED ───
+        order_id = result.get("txid", result.get("result", {}).get("txid", "unknown"))
+        if isinstance(order_id, list):
+            order_id = order_id[0] if order_id else "unknown"
+        print(f"  [TRADE] PLACED: {action_upper} {amount:.8f} {pair} | order_id: {order_id}")
 
-    def _execute_paper_trade(self, pair: str, action: str, amount: float, trade: dict) -> bool:
-        """Execute a paper trade via kraken-cli paper commands."""
+        entry["order_ref"] = {"order_userref": userref, "order_id": order_id}
+        self.order_journal.append(entry)
+        journal_index = len(self.order_journal) - 1
+
+        # Register with the execution stream so WS events can finalize this
+        # order's lifecycle on subsequent ticks. Orders that come back as
+        # order_id='unknown' cannot be correlated by id; register() is a
+        # no-op in that case and the entry will stay at PLACED until manual
+        # audit (rare — Kraken almost always returns a txid on success).
+        self.execution_stream.register(
+            order_id=order_id, userref=userref, journal_index=journal_index,
+            pair=pair, side=action_upper, placed_amount=amount,
+            engine_ref=self.engines[pair],
+            pre_trade_snapshot=pre_trade_snap,
+        )
+        return True
+
+    def _place_paper_order(self, pair: str, trade: dict, state: dict) -> bool:
+        """Place a paper-mode order via `kraken paper`. Writes a journal
+        entry that skips the WS-stream lifecycle entirely — paper trades
+        synthesize their own terminal fill event which the next tick's
+        drain_events() applies exactly like a real fill. This keeps the
+        single code path between live and paper.
+        """
+        amount = trade["amount"]
+        action_upper = trade["action"].upper()
+        action = action_upper.lower()
+        entry = self._build_journal_entry(pair, trade, state)
+
         time.sleep(2)
-        print(f"  [PAPER] Executing {action.upper()} {amount:.8f} {pair} (paper market)...")
+        print(f"  [PAPER] Placing {action_upper} {amount:.8f} {pair} (paper market)...")
         if action == "buy":
             result = KrakenCLI.paper_buy(pair, amount)
         else:
             result = KrakenCLI.paper_sell(pair, amount)
-
         if "error" in result:
             print(f"  [PAPER] FAILED: {result['error']}")
-            status = "PAPER_FAILED"
-            success = False
-        else:
-            print(f"  [PAPER] SUCCESS: {action.upper()} {amount:.8f} {pair}")
-            status = "PAPER_EXECUTED"
-            success = True
+            self._finalize_failed_entry(
+                entry, terminal_reason=f"paper_failed:{result['error']}",
+            )
+            return False
 
-        self.trade_log.append({
-            "time": datetime.now(timezone.utc).isoformat(),
-            "pair": pair,
-            "action": trade["action"],
-            "amount": amount,
-            "price": trade["price"],
-            "order_type": "paper market",
-            "reason": trade["reason"],
-            "confidence": trade.get("confidence"),
-            "status": status,
-            "result": result if "error" not in result else None,
-            "error": result.get("error"),
-        })
-        return success
+        # Success — paper fills at the requested limit_price. Append the
+        # entry as PLACED first (so it has a journal index), then synthesize
+        # a FILLED execution event for the stream to emit on drain.
+        print(f"  [PAPER] PLACED: {action_upper} {amount:.8f} {pair}")
+        # Build a deterministic pseudo order_id for paper correlation.
+        paper_order_id = f"PAPER-{int(time.time() * 1e6)}"
+        paper_userref = self._next_userref()
+        entry["order_ref"] = {"order_userref": paper_userref, "order_id": paper_order_id}
+        self.order_journal.append(entry)
+        journal_index = len(self.order_journal) - 1
+        self.execution_stream.register(
+            order_id=paper_order_id, userref=paper_userref, journal_index=journal_index,
+            pair=pair, side=action_upper, placed_amount=amount,
+            engine_ref=self.engines[pair],
+            pre_trade_snapshot=state.get("_pre_trade_snapshot") if isinstance(state, dict) else None,
+        )
+        limit_price = entry["intent"]["limit_price"] or float(trade.get("price") or 0)
+        synthetic_fill = {
+            "exec_type": "trade",
+            "exec_id": f"{paper_order_id}-fill",
+            "order_id": paper_order_id,
+            "order_status": "filled",
+            "last_qty": amount,
+            "last_price": limit_price,
+            "cost": amount * limit_price,
+            "fees": [],
+            "order_userref": paper_userref,
+            "side": action,
+            "symbol": pair,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self.execution_stream.inject_event(synthetic_fill)
+        return True
+
+    def _finalize_failed_entry(self, entry: Dict[str, Any], *, terminal_reason: str) -> None:
+        """Patch a journal entry to PLACEMENT_FAILED and append it. Used
+        for pre-exchange failures (ticker/validate/placement rejected)."""
+        entry["lifecycle"] = {
+            "state": "PLACEMENT_FAILED",
+            "vol_exec": 0.0,
+            "avg_fill_price": None,
+            "fee_quote": 0.0,
+            "final_at": datetime.now(timezone.utc).isoformat(),
+            "terminal_reason": terminal_reason,
+            "exec_ids": [],
+        }
+        self.order_journal.append(entry)
+
+    def _apply_execution_event(self, event: Dict[str, Any]) -> None:
+        """Apply one terminal event from the execution stream to the
+        journal entry it came from AND the engine state. Called in the
+        tick loop after drain_events()."""
+        idx = event.get("journal_index")
+        if not isinstance(idx, int) or idx < 0 or idx >= len(self.order_journal):
+            print(f"  [EXEC] stale journal_index {idx} — event dropped")
+            return
+        entry = self.order_journal[idx]
+        state_name = event["state"]
+        entry["lifecycle"] = {
+            "state": state_name,
+            "vol_exec": event["vol_exec"],
+            "avg_fill_price": event.get("avg_fill_price"),
+            "fee_quote": event.get("fee_quote") or 0.0,
+            "final_at": event.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+            "terminal_reason": event.get("terminal_reason"),
+            "exec_ids": event.get("exec_ids") or [],
+        }
+
+        engine = event.get("engine_ref")
+        pre_snap = event.get("pre_trade_snapshot")
+        pair = event.get("pair")
+        side = event.get("side")
+        placed_amount = event.get("placed_amount") or 0.0
+        vol_exec = event.get("vol_exec") or 0.0
+
+        if state_name == "FILLED":
+            # Engine was optimistically committed at placement time — no
+            # correction needed.
+            return
+        if state_name in ("CANCELLED_UNFILLED", "REJECTED"):
+            if engine is not None and pre_snap is not None:
+                engine.restore_position(pre_snap)
+                print(f"  [EXEC] {pair} {side} {state_name}: engine rolled back "
+                      f"(reason: {event.get('terminal_reason') or 'n/a'})")
+            return
+        if state_name == "PARTIALLY_FILLED":
+            # Engine was optimistically committed to the full placed_amount;
+            # actual fill was only vol_exec. HydraEngine does not yet
+            # expose a partial-adjust primitive, so v1 leaves the engine
+            # over-committed (erring toward not re-placing on top) and the
+            # journal carries the true vol_exec for correct P&L. Logged
+            # loudly so the operator sees any divergence. Follow-up:
+            # HydraEngine.adjust_position(target_size) for exact handling.
+            ratio = (vol_exec / placed_amount) if placed_amount > 0 else 0.0
+            print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                  f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
+                  f"engine over-committed; journal has correct vol_exec")
+            return
 
     def _run_tuner_update(self):
         """Run Bayesian parameter update across all pair trackers."""
@@ -1447,8 +2018,10 @@ class HydraAgent:
             "price": sell_trade_obj.price,
             "reason": sell_trade_obj.reason,
             "confidence": 0.85,
+            "swap_id": swap_id,
         }
-        if not self._execute_trade(sell_pair, sell_trade):
+        sell_state["_pre_trade_snapshot"] = sell_snap
+        if not self._place_order(sell_pair, sell_trade, sell_state):
             sell_engine.restore_position(sell_snap)
             print(f"  [ROLLBACK] {sell_pair}: engine state rolled back after failed swap sell")
             return
@@ -1484,24 +2057,17 @@ class HydraAgent:
             "price": buy_trade_obj.price,
             "reason": buy_trade_obj.reason,
             "confidence": 0.85,
+            "swap_id": swap_id,
         }
-        if not self._execute_trade(buy_pair, buy_trade):
+        buy_state["_pre_trade_snapshot"] = buy_snap
+        if not self._place_order(buy_pair, buy_trade, buy_state):
             buy_engine.restore_position(buy_snap)
             print(f"  [ROLLBACK] {buy_pair}: engine state rolled back after failed swap buy")
             return
 
-        # Log the coordinated swap
-        self.trade_log.append({
-            "time": datetime.now(timezone.utc).isoformat(),
-            "type": "COORDINATED_SWAP",
-            "swap_id": swap_id,
-            "sell_pair": sell_pair,
-            "buy_pair": buy_pair,
-            "sell_amount": sell_trade_obj.amount,
-            "buy_amount": buy_trade_obj.amount,
-            "reason": reason,
-        })
-        print(f"  [SWAP] Swap {swap_id} complete")
+        # Both legs placed — the swap_id tag on each leg's journal entry
+        # is how callers link them back together. No separate marker row.
+        print(f"  [SWAP] Swap {swap_id} placed (both legs; lifecycle via execution stream)")
 
     def _log_regime_transitions(self, all_states: Dict[str, dict]):
         """Log regime transitions across pairs for observability.
@@ -1759,7 +2325,7 @@ class HydraAgent:
             "balance_usd": balance_usd,
             "fee_tier": self._fee_tier_cache,
             "pairs": pairs_data,
-            "trade_log": self.trade_log[-20:],
+            "order_journal": self.order_journal[-20:],
             "running": self.running,
             "interval": self.interval,
             "mode": self.mode,
@@ -1829,32 +2395,37 @@ class HydraAgent:
             for asset, amount in bal.items():
                 print(f"    {asset}: {amount}")
 
-        # Trade log
-        if self.trade_log:
-            print(f"\n  TRADE LOG ({len(self.trade_log)} entries)")
+        # Order journal
+        if self.order_journal:
+            print(f"\n  ORDER JOURNAL ({len(self.order_journal)} entries)")
             print(f"  {'-'*70}")
-            for t in self.trade_log[-20:]:
-                if t.get("type") == "COORDINATED_SWAP":
-                    print(f"  [SW] {t['time']} | SWAP {t.get('sell_pair','?')} → {t.get('buy_pair','?')} | {t.get('reason','')[:40]}")
-                    continue
-                status_icon = "OK" if t.get("status") == "EXECUTED" else "XX"
-                t_pair = t.get('pair', '?')
+            for entry in self.order_journal[-20:]:
+                lifecycle = entry.get("lifecycle") or {}
+                state = lifecycle.get("state", "?")
+                status_icon = "OK" if state == "FILLED" else ("~~" if state == "PARTIALLY_FILLED" else "XX")
+                t_pair = entry.get("pair", "?")
                 t_cur = "$" if t_pair.endswith("USDC") or t_pair.endswith("USD") else ""
-                print(f"  [{status_icon}] {t['time']} | {t.get('action','?'):<4} {t.get('amount', 0):.8f} {t_pair:<10} "
-                      f"@ {t_cur}{t.get('price', 0):>10,.{4 if t_cur else 8}f} | {t.get('status','?')}")
+                intent = entry.get("intent") or {}
+                amount = intent.get("amount", 0)
+                price = lifecycle.get("avg_fill_price") or intent.get("limit_price") or 0
+                print(f"  [{status_icon}] {entry.get('placed_at','?')} | "
+                      f"{entry.get('side','?'):<4} {amount:.8f} {t_pair:<10} "
+                      f"@ {t_cur}{price:>10,.{4 if t_cur else 8}f} | {state}")
+                if lifecycle.get("terminal_reason"):
+                    print(f"        reason: {lifecycle['terminal_reason']}")
         else:
-            print(f"\n  No trades executed during session.")
+            print(f"\n  No orders placed during session.")
 
-        # Export trade log
+        # Export journal
         ts = int(time.time())
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        log_file = os.path.join(base_dir, f"hydra_trades_{ts}.json")
+        log_file = os.path.join(base_dir, f"hydra_orders_{ts}.json")
         try:
             with open(log_file, "w") as f:
-                json.dump(self.trade_log, f, indent=2)
-            print(f"\n  Trade log exported to: {log_file}")
+                json.dump(self.order_journal, f, indent=2)
+            print(f"\n  Order journal exported to: {log_file}")
         except Exception as e:
-            print(f"\n  [WARN] Could not export trade log: {e}")
+            print(f"\n  [WARN] Could not export order journal: {e}")
 
         # Export competition results summary
         self._export_competition_results(base_dir, ts)
@@ -1863,37 +2434,42 @@ class HydraAgent:
         print(f"  {'='*80}")
 
     def _compute_pair_realized_pnl(self, pair: str) -> float:
-        """Compute realized P&L for a pair from trade history.
+        """Compute realized P&L for a pair from the order journal.
 
-        Sums sell revenue minus buy cost across all trades in the log.
-        This is accurate across resumes because it uses actual trade prices,
-        not engine balances which get pooled and re-split on each restart.
+        Sums sell revenue minus buy cost from every FILLED and
+        PARTIALLY_FILLED entry for the pair, using lifecycle.vol_exec and
+        lifecycle.avg_fill_price (the execution-stream truth, not the
+        bot's placement intent). Counts only actual fills — PLACED,
+        PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED entries are
+        skipped because they never produced exchange-side quantity.
+
+        Accurate across resumes because it reads directly from on-disk
+        journal state, not engine balances which get pooled and re-split.
         """
+        FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
         buy_cost = 0.0
         sell_revenue = 0.0
-        for t in self.trade_log:
-            if t.get("pair") != pair or t.get("type") == "COORDINATED_SWAP":
+        for entry in self.order_journal:
+            if entry.get("pair") != pair:
                 continue
-            # Skip entries that Kraken accepted into the book but never actually
-            # filled — e.g., dead-man's-switch cancels and post-only rejections.
-            # The CLI call returns "success" (no error key) in those cases, so
-            # historical entries show status=EXECUTED but vol_exec=0 on the
-            # exchange. Data-repair passes downgrade them to PLACED_NOT_FILLED;
-            # the forthcoming reconciler fix (#3) will set this flag at runtime.
-            if t.get("status") == "PLACED_NOT_FILLED":
+            lifecycle = entry.get("lifecycle") or {}
+            if lifecycle.get("state") not in FILL_STATES:
                 continue
-            # Count all remaining trades the engine committed (EXECUTED and
-            # FAILED-but-committed). With rollback logic, truly failed trades
-            # are rolled back and not in the engine state. Pre-rollback FAILED
-            # trades that were committed remain in the log and are correct to
-            # include (e.g., a BUY that Kraken accepted despite returning an
-            # API error).
-            amt = t.get("amount", 0)
-            price = t.get("price", 0)
-            if t["action"] == "BUY":
-                buy_cost += amt * price
-            elif t["action"] == "SELL":
-                sell_revenue += amt * price
+            vol = lifecycle.get("vol_exec") or 0
+            price = lifecycle.get("avg_fill_price")
+            if price is None:
+                # Legacy migrated entries that lack avg_fill_price fall
+                # back to the placement intent. Post-PR entries always
+                # carry avg_fill_price from the execution stream.
+                intent = entry.get("intent") or {}
+                price = intent.get("limit_price") or 0
+            if vol <= 0 or price <= 0:
+                continue
+            side = entry.get("side")
+            if side == "BUY":
+                buy_cost += vol * price
+            elif side == "SELL":
+                sell_revenue += vol * price
         return sell_revenue - buy_cost
 
     def _export_competition_results(self, base_dir: str, ts: int):
@@ -1965,7 +2541,7 @@ class HydraAgent:
             "total_pnl_pct": round((cumulative_pnl_usd / start_balance) * 100, 4) if start_balance > 0 else 0,
             "total_trades": total_trades,
             "pair_results": pair_results,
-            "trade_log": self.trade_log,
+            "order_journal": self.order_journal,
         }
 
         results_file = os.path.join(base_dir, f"competition_results_{ts}.json")

@@ -1,6 +1,6 @@
 """Hydra live-execution test harness core.
 
-Drives HydraAgent._execute_trade across every scenario in scenarios.py and
+Drives HydraAgent._place_order across every scenario in scenarios.py and
 reports pass/fail per scenario with diagnostic output on failure.
 
 Four run modes:
@@ -38,7 +38,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from hydra_agent import HydraAgent, KrakenCLI  # noqa: E402
+from hydra_agent import HydraAgent, KrakenCLI, FakeExecutionStream  # noqa: E402
 from hydra_engine import HydraEngine  # noqa: E402
 
 
@@ -112,21 +112,29 @@ class Harness:
                 self._pre_harness_env[key] = os.environ.pop(key)
 
         # Stash real on-disk state files so they don't leak into the harness.
-        # _merge_rolling_trade_log() runs in HydraAgent.__init__ and would
-        # otherwise pull production trades into a test agent. Rename → restore
-        # is atomic and leaves no window where the file is partially valid.
+        # HydraAgent.__init__ runs the legacy journal migrator AND merges
+        # the rolling order journal, either of which would otherwise pull
+        # production trades into a test agent. Rename -> restore is atomic
+        # and leaves no window where the file is partially valid.
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self._stashed_state_files: list[tuple[str, str]] = []
-        for fname in ("hydra_session_snapshot.json", "hydra_trades_live.json"):
+        stash_names = (
+            "hydra_session_snapshot.json",
+            "hydra_order_journal.json",
+            # Legacy shape — migrator would move it on __init__, so stash it too
+            "hydra_trades_live.json",
+            # Migrator audit sidecar — avoid leaking across test runs
+            "hydra_trades_live.json.migrated",
+        )
+        for fname in stash_names:
             path = os.path.join(base_dir, fname)
             if os.path.exists(path):
                 stash = path + ".harness_stash"
-                # Clean up any leftover stash from a prior crashed run
                 if os.path.exists(stash):
                     os.remove(stash)
                 os.rename(path, stash)
                 self._stashed_state_files.append((path, stash))
-                self._vprint(f"  [ISOLATE] stashed {fname} → .harness_stash")
+                self._vprint(f"  [ISOLATE] stashed {fname} -> .harness_stash")
 
         # Fast mock mode: monkey-patch time.sleep to a no-op. Mock mode never
         # makes real Kraken calls, so rate-limit sleeps are pure wall-clock
@@ -189,6 +197,13 @@ class Harness:
 
         Default pairs is ['SOL/USDC'] — a single pair minimizes setup time and
         most scenarios only need one.
+
+        The live ExecutionStream is swapped out for FakeExecutionStream so no
+        `kraken ws executions` subprocess is spawned during tests. Scenarios
+        can still exercise lifecycle-event application by calling
+        `agent.execution_stream.inject_event(...)` followed by
+        `agent._apply_execution_event(e)` on each drained event, or by
+        calling the agent's tick-loop drain pathway directly.
         """
         if pairs is None:
             pairs = ["SOL/USDC"]
@@ -206,6 +221,8 @@ class Harness:
         )
         self.isolate_tuner(agent)
         self.isolate_broadcaster(agent)
+        # Swap in the fake stream — guaranteed no subprocess, instant events.
+        agent.execution_stream = FakeExecutionStream()
         assert agent.brain is None, "Brain should be None (env vars unset during isolation)"
         return agent
 
@@ -320,26 +337,32 @@ class Harness:
 # ─────────────────────────────────────────────────────────────────
 
 def harness_execute(agent: HydraAgent, pair: str, action: str,
-                    confidence: float, reason: str = "harness test") -> dict:
-    """Reproduces the tick loop's execute wrapper. Returns a report dict
-    suitable for post-scenario assertions.
+                    confidence: float, reason: str = "harness test",
+                    state_overrides: Optional[dict] = None) -> dict:
+    """Reproduces the tick loop's place-order wrapper. Returns a report
+    dict suitable for post-scenario assertions.
 
-    Flow (mirrors hydra_agent.py:876-909):
+    Flow (mirrors hydra_agent.py tick body):
       1. Snapshot engine state
       2. Call engine.execute_signal -> mutates engine, returns Trade object
-      3. If trade, call agent._execute_trade
-      4. If _execute_trade returns False, restore engine state from snapshot
+      3. If trade, build a minimal `state` dict (with _pre_trade_snapshot),
+         call agent._place_order
+      4. If _place_order returns False, restore engine state from snapshot
 
     Returns a dict with:
       outcome: 'success' | 'failed_and_rolled_back' | 'engine_rejected'
       pre_snap: the snapshot dict (for rollback verification)
       trade: the Trade object or None
-      trade_dict: the dict passed to _execute_trade, or None
-      last_trade_log_entry: agent.trade_log[-1] or None
-      trade_log_count_before/after: used to detect multiple appends
+      trade_dict: the dict passed to _place_order, or None
+      last_journal_entry: agent.order_journal[-1] or None
+      journal_count_before/after: used to detect multiple appends
+
+    state_overrides lets a scenario pre-seed decision context (strategy,
+    regime, cross_pair_override, etc.) that the journal entry should
+    capture. Defaults to MOMENTUM / TREND_UP to match historical defaults.
     """
     engine = agent.engines[pair]
-    count_before = len(agent.trade_log)
+    count_before = len(agent.order_journal)
     pre_snap = engine.snapshot_position()
 
     trade = engine.execute_signal(
@@ -351,9 +374,9 @@ def harness_execute(agent: HydraAgent, pair: str, action: str,
             "pre_snap": pre_snap,
             "trade": None,
             "trade_dict": None,
-            "last_trade_log_entry": None,
-            "trade_log_count_before": count_before,
-            "trade_log_count_after": len(agent.trade_log),
+            "last_journal_entry": None,
+            "journal_count_before": count_before,
+            "journal_count_after": len(agent.order_journal),
         }
 
     trade_dict = {
@@ -362,19 +385,37 @@ def harness_execute(agent: HydraAgent, pair: str, action: str,
         "price": trade.price,
         "reason": trade.reason,
         "confidence": trade.confidence,
+        "params_at_entry": getattr(trade, "params_at_entry", None),
     }
-    success = agent._execute_trade(pair, trade_dict)
+    state = {
+        "strategy": "MOMENTUM",
+        "regime": "TREND_UP",
+        "_pre_trade_snapshot": pre_snap,
+    }
+    if state_overrides:
+        state.update(state_overrides)
+    success = agent._place_order(pair, trade_dict, state)
     if not success:
         engine.restore_position(pre_snap)
+
+    # Mirror the tick-loop: drain any queued execution events and apply
+    # them to the journal + engine. In paper mode, _place_paper_order
+    # synthesizes an immediate FILLED event which this drain promotes from
+    # PLACED to FILLED. In live-mocked mode no WS events arrive, so the
+    # entry stays PLACED until a scenario manually injects one.
+    drained_events = agent.execution_stream.drain_events()
+    for ev in drained_events:
+        agent._apply_execution_event(ev)
 
     return {
         "outcome": "success" if success else "failed_and_rolled_back",
         "pre_snap": pre_snap,
         "trade": trade,
         "trade_dict": trade_dict,
-        "last_trade_log_entry": agent.trade_log[-1] if agent.trade_log else None,
-        "trade_log_count_before": count_before,
-        "trade_log_count_after": len(agent.trade_log),
+        "last_journal_entry": agent.order_journal[-1] if agent.order_journal else None,
+        "journal_count_before": count_before,
+        "journal_count_after": len(agent.order_journal),
+        "drained_events": drained_events,
     }
 
 
@@ -415,8 +456,10 @@ def main() -> int:
             assert agent.brain is None
             assert agent.broadcaster is not None
             assert "SOL/USDC" in agent.engines
-            assert len(agent.trade_log) == 0
-            print("  [SMOKE] Agent constructed, brain=None, engines ready, trade_log empty")
+            assert len(agent.order_journal) == 0
+            assert hasattr(agent, "execution_stream")
+            assert agent.execution_stream.healthy
+            print("  [SMOKE] Agent constructed, brain=None, engines ready, order_journal empty, stream healthy")
             print("  [SMOKE] OK")
             harness.restore_environment()
             return 0

@@ -3,22 +3,36 @@
 Each scenario is a function that takes a Harness instance and raises on
 failure. Scenarios are registered in ALL_SCENARIOS at the bottom of the
 file and categorized H (happy), F (failure), E (edge), S (schema),
-R (rollback), H_prime (historical regression), L (live).
+R (rollback), H_prime (historical regression), W (WS execution stream),
+L (live).
 
 Scenario codes are stable identifiers — tests, docs, and CI can reference
 them by code. If you change a scenario's semantics, don't reuse its code.
 
 Note: most scenarios stub KrakenCLI._run to avoid real network calls.
 Live and validate modes bypass the stubs and hit the real Kraken CLI.
+
+Lifecycle note: after the WS execution stream conversion, scenarios
+observe journal entries in one of these states after a successful
+placement:
+  - Paper flows: `FILLED` (_place_paper_order synthesizes a fill event
+    which harness_execute drains and applies immediately)
+  - Live-mocked flows: `PLACED` (no WS events arrive in mock mode; a
+    scenario can manually call agent.execution_stream.inject_event() to
+    drive the lifecycle to a terminal state)
+  - Any pre-placement failure: `PLACEMENT_FAILED` with `terminal_reason`
 """
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable
 
 from tests.live_harness.harness import Harness, Scenario, harness_execute
-from tests.live_harness.schemas import validate_entry, SchemaViolation
+from tests.live_harness.schemas import (
+    validate_journal_entry, validate_entry, SchemaViolation,
+)
 from tests.live_harness.state_comparator import (
     capture_engine_state, assert_rollback_complete, RollbackDiff,
 )
@@ -48,7 +62,7 @@ ALL_MOCK = frozenset({"mock"})
 # ═════════════════════════════════════════════════════════════════
 
 def scenario_H1_paper_buy(h: Harness):
-    """Paper BUY SOL/USDC -> PAPER_EXECUTED entry with full schema."""
+    """Paper BUY SOL/USDC -> journal entry reaches FILLED via synthetic event."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
@@ -61,18 +75,19 @@ def scenario_H1_paper_buy(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success", f"expected success, got {report['outcome']}"
-    assert report["last_trade_log_entry"] is not None
-    entry = report["last_trade_log_entry"]
-    validate_entry(entry, expected_status="PAPER_EXECUTED")
+    entry = report["last_journal_entry"]
+    assert entry is not None
+    validate_journal_entry(entry, expected_state="FILLED")
     assert entry["pair"] == "SOL/USDC"
-    assert entry["action"] == "BUY"
-    assert entry["amount"] > 0
-    assert entry["order_type"] == "paper market"
-    assert entry["confidence"] == 0.75 or (entry["confidence"] is not None and abs(entry["confidence"] - 0.75) < 0.001)
+    assert entry["side"] == "BUY"
+    assert entry["intent"]["amount"] > 0
+    assert entry["intent"]["paper"] is True
+    conf = entry["decision"]["confidence"]
+    assert conf is not None and abs(conf - 0.75) < 0.001
 
 
 def scenario_H2_paper_sell_from_position(h: Harness):
-    """Paper SELL SOL/USDC from a preset position -> PAPER_EXECUTED."""
+    """Paper SELL SOL/USDC from a preset position -> FILLED."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
@@ -88,14 +103,15 @@ def scenario_H2_paper_sell_from_position(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success"
-    entry = report["last_trade_log_entry"]
-    validate_entry(entry, expected_status="PAPER_EXECUTED")
-    assert entry["action"] == "SELL"
+    entry = report["last_journal_entry"]
+    validate_journal_entry(entry, expected_state="FILLED")
+    assert entry["side"] == "SELL"
 
 
 def scenario_H3_live_buy_mocked(h: Harness):
-    """Live BUY SOL/USDC with all Kraken responses mocked -> EXECUTED entry,
-    reconciler registers the txid, txid is scalar (unwrapped from list)."""
+    """Live BUY SOL/USDC with all Kraken responses mocked -> journal entry
+    at PLACED, registered with the execution stream under the returned
+    order_id. No WS events arrive in mock mode so the entry stays PLACED."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
@@ -110,27 +126,27 @@ def scenario_H3_live_buy_mocked(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success", f"expected success, got {report}"
-    entry = report["last_trade_log_entry"]
-    validate_entry(entry, expected_status="EXECUTED")
-    assert entry["order_type"] == "limit post-only"
-    assert entry["result"] is not None
-    assert entry["error"] is None
-    # Reconciler should have the unwrapped scalar txid
-    assert agent.reconciler is not None
-    assert "TXID_H3_ABC" in agent.reconciler.known_orders, \
-        f"reconciler missing txid; known_orders={agent.reconciler.known_orders}"
-    tracked = agent.reconciler.known_orders["TXID_H3_ABC"]
+    entry = report["last_journal_entry"]
+    validate_journal_entry(entry, expected_state="PLACED")
+    assert entry["intent"]["order_type"] == "limit"
+    assert entry["intent"]["post_only"] is True
+    assert entry["order_ref"]["order_id"] == "TXID_H3_ABC"
+    assert isinstance(entry["order_ref"]["order_userref"], int)
+    # The execution stream should have the order registered under its id.
+    known = agent.execution_stream._known_orders
+    assert "TXID_H3_ABC" in known, \
+        f"stream missing order_id; known_orders={list(known.keys())}"
+    tracked = known["TXID_H3_ABC"]
     assert tracked["pair"] == "SOL/USDC"
-    assert tracked["side"] == "buy"
+    assert tracked["side"] == "BUY"
 
 
 def scenario_H4_live_sell_mocked_from_position(h: Harness):
-    """Live SELL from a preset position -> EXECUTED, total_trades incremented
-    (SELL close of full position), loss_count or win_count incremented."""
+    """Live SELL from a preset position -> PLACED entry, engine total_trades
+    incremented on SELL-close (commit 88797ca: increment on close, not on BUY)."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
-    # Preset a small position (below ordermin would skip, above ordermin executes)
     engine.position.size = 0.05
     engine.position.avg_entry = 95.0
     pre_total = engine.total_trades
@@ -148,59 +164,40 @@ def scenario_H4_live_sell_mocked_from_position(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success"
-    entry = report["last_trade_log_entry"]
-    validate_entry(entry, expected_status="EXECUTED")
-    # Depending on confidence, SELL may be full or partial. For full close:
-    # total_trades should have incremented (commit 88797ca: increment on close, not on BUY)
+    entry = report["last_journal_entry"]
+    validate_journal_entry(entry, expected_state="PLACED")
     post_total = engine.total_trades
     post_wins = engine.win_count
     post_losses = engine.loss_count
-    # At least one of win/loss should increment on close
     if engine.position.size < 0.00001:
-        # Full close happened
         assert post_total == pre_total + 1, f"total_trades: {pre_total} -> {post_total}"
         assert (post_wins + post_losses) == (pre_wins + pre_losses + 1)
 
 
 def scenario_H5_live_buy_real_kraken(h: Harness):
-    """LIVE MODE: place a real post-only buy on SOL/USDC at a deliberately
-    non-crossing price, verify EXECUTED entry and reconciler registration,
-    then immediately cancel the order via kraken CLI."""
+    """LIVE MODE: place a real post-only buy on SOL/USDC at a non-crossing
+    price, verify PLACED entry and stream registration, then cancel."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
-    # Harness uses the real KrakenCLI — no stub. _execute_trade will fetch
-    # ticker and place a real post-only order at bid (which won't cross).
     report = harness_execute(agent, "SOL/USDC", "BUY", 0.60, "L1 live mode")
     try:
         assert report["outcome"] in ("success", "failed_and_rolled_back"), \
             f"unexpected outcome: {report['outcome']}"
         if report["outcome"] == "success":
-            entry = report["last_trade_log_entry"]
-            validate_entry(entry, expected_status="EXECUTED")
-            assert agent.reconciler is not None
-            # Extract txid from the result dict
-            result = entry.get("result") or {}
-            txid = result.get("txid")
-            if isinstance(txid, list):
-                txid = txid[0] if txid else "unknown"
-            assert txid and txid != "unknown"
-            assert txid in agent.reconciler.known_orders
-            # Immediately cancel the order (with retry) to avoid leaving it resting
-            _cancel_order_with_retry(txid, max_retries=3)
+            entry = report["last_journal_entry"]
+            validate_journal_entry(entry)
+            order_id = entry["order_ref"]["order_id"]
+            assert order_id and order_id != "unknown"
+            assert order_id in agent.execution_stream._known_orders
+            _cancel_order_with_retry(order_id, max_retries=3)
     except Exception:
-        # Safety: cancel ANY resting orders if something went wrong
         _cancel_all_safe()
         raise
 
 
 def scenario_H6_live_sell_real_kraken(h: Harness):
-    """LIVE MODE: symmetric to H5 but for SELL. Requires a pre-existing
-    position. Since we don't want to rely on a real filled buy, we skip this
-    in pure live mode and just verify the path via the validate-mode scenario."""
-    # In live mode, attempting a SELL without a position causes engine.execute_signal
-    # to return None (engine_rejected). That's not a failure of the harness — it's
-    # expected behavior and proves the engine correctly refuses. Document and pass.
+    """LIVE MODE: SELL without position -> engine rejects, no journal entry."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
@@ -209,8 +206,7 @@ def scenario_H6_live_sell_real_kraken(h: Harness):
     report = harness_execute(agent, "SOL/USDC", "SELL", 0.70, "H6 live sell no position")
     assert report["outcome"] == "engine_rejected", \
         f"expected engine to refuse SELL with no position; got {report['outcome']}"
-    # No trade log entry should have been written
-    assert report["trade_log_count_before"] == report["trade_log_count_after"]
+    assert report["journal_count_before"] == report["journal_count_after"]
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -220,12 +216,15 @@ def scenario_H6_live_sell_real_kraken(h: Harness):
 def _run_with_rollback_check(h: Harness, scenario_code: str,
                               setup_stub: Callable[[], StubRun],
                               action: str, confidence: float,
-                              expected_status: str, expected_outcome: str = "failed_and_rolled_back"):
-    """Shared helper for F scenarios: wraps setup, execution, and rollback assertion."""
+                              expected_reason_prefix: str,
+                              expected_outcome: str = "failed_and_rolled_back"):
+    """Shared helper for F scenarios: wraps setup, execution, and rollback
+    assertion. Asserts the journal entry lands at PLACEMENT_FAILED with a
+    terminal_reason that starts with expected_reason_prefix.
+    """
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
-    # If action is SELL, preset a position so execute_signal doesn't return None
     if action == "SELL":
         engine.position.size = 0.05
         engine.position.avg_entry = 95.0
@@ -239,42 +238,43 @@ def _run_with_rollback_check(h: Harness, scenario_code: str,
 
     assert report["outcome"] == expected_outcome, \
         f"{scenario_code}: expected outcome {expected_outcome!r}, got {report['outcome']!r}"
-    entry = report["last_trade_log_entry"]
-    assert entry is not None, f"{scenario_code}: no trade_log entry written"
-    validate_entry(entry, expected_status=expected_status)
+    entry = report["last_journal_entry"]
+    assert entry is not None, f"{scenario_code}: no journal entry written"
+    validate_journal_entry(entry, expected_state="PLACEMENT_FAILED")
+    reason = entry["lifecycle"]["terminal_reason"]
+    assert isinstance(reason, str) and reason.startswith(expected_reason_prefix), \
+        f"{scenario_code}: expected terminal_reason to start with {expected_reason_prefix!r}, got {reason!r}"
 
-    # Rollback check — engine state must match pre-snapshot
     after = capture_engine_state(engine)
     assert_rollback_complete(before, after, scenario_name=scenario_code)
 
 
 def scenario_F1_ticker_error(h: Harness):
-    """Ticker fetch returns an error -> TICKER_FAILED, rollback verified."""
+    """Ticker fetch returns an error -> PLACEMENT_FAILED(ticker_failed:...), rollback."""
     _run_with_rollback_check(
         h, "F1",
         setup_stub=lambda: StubRun(build_dispatcher({
             "ticker": kraken_ticker_error("EAPI:Rate limit"),
         })),
         action="BUY", confidence=0.75,
-        expected_status="TICKER_FAILED",
+        expected_reason_prefix="ticker_failed",
     )
 
 
 def scenario_F2_ticker_missing_fields(h: Harness):
-    """Ticker parses but lacks bid/ask -> TICKER_FAILED (the
-    `"bid" not in ticker` branch at hydra_agent.py:1143)."""
+    """Ticker parses but lacks bid/ask -> PLACEMENT_FAILED(ticker_failed:...)."""
     _run_with_rollback_check(
         h, "F2",
         setup_stub=lambda: StubRun(build_dispatcher({
             "ticker": kraken_ticker_missing_fields(),
         })),
         action="BUY", confidence=0.75,
-        expected_status="TICKER_FAILED",
+        expected_reason_prefix="ticker_failed",
     )
 
 
 def scenario_F3_validation_post_only_crossed(h: Harness):
-    """Validation returns post-only crossing error -> VALIDATION_FAILED, rollback."""
+    """Validation returns post-only crossing error -> PLACEMENT_FAILED(validation_failed:...)."""
     _run_with_rollback_check(
         h, "F3",
         setup_stub=lambda: StubRun(build_dispatcher({
@@ -282,12 +282,12 @@ def scenario_F3_validation_post_only_crossed(h: Harness):
             "order_validate": kraken_validate_error("EOrder:Post-only order rejected (would cross)"),
         })),
         action="BUY", confidence=0.75,
-        expected_status="VALIDATION_FAILED",
+        expected_reason_prefix="validation_failed",
     )
 
 
 def scenario_F4_validation_insufficient_funds(h: Harness):
-    """Validation returns insufficient funds -> VALIDATION_FAILED."""
+    """Validation returns insufficient funds -> PLACEMENT_FAILED(validation_failed:...)."""
     _run_with_rollback_check(
         h, "F4",
         setup_stub=lambda: StubRun(build_dispatcher({
@@ -295,17 +295,12 @@ def scenario_F4_validation_insufficient_funds(h: Harness):
             "order_validate": kraken_validate_error("EOrder:Insufficient funds"),
         })),
         action="BUY", confidence=0.75,
-        expected_status="VALIDATION_FAILED",
+        expected_reason_prefix="validation_failed",
     )
 
 
 def scenario_F5_execution_fails_after_validation(h: Harness):
-    """Validation passes but second order call errors -> FAILED, rollback.
-
-    This is the tricky case: _execute_trade calls ticker, then validate, then
-    ticker again (re-fetch), then the real order. We need the dispatcher to
-    return success for the validate and error for the non-validate order call.
-    """
+    """Validation passes but second order call errors -> PLACEMENT_FAILED(placement_error:...)."""
     def make_stub():
         return StubRun(build_dispatcher({
             "ticker": kraken_ticker("SOL/USDC", bid=100.0, ask=100.1),
@@ -316,12 +311,12 @@ def scenario_F5_execution_fails_after_validation(h: Harness):
     _run_with_rollback_check(
         h, "F5", setup_stub=make_stub,
         action="BUY", confidence=0.75,
-        expected_status="FAILED",
+        expected_reason_prefix="placement_error",
     )
 
 
 def scenario_F6_execution_timeout(h: Harness):
-    """Order subprocess times out -> FAILED with retryable flag in error."""
+    """Order subprocess times out -> PLACEMENT_FAILED(placement_error:...)."""
     _run_with_rollback_check(
         h, "F6",
         setup_stub=lambda: StubRun(build_dispatcher({
@@ -330,13 +325,14 @@ def scenario_F6_execution_timeout(h: Harness):
             "order": kraken_order_timeout(),
         })),
         action="BUY", confidence=0.75,
-        expected_status="FAILED",
+        expected_reason_prefix="placement_error",
     )
 
 
 def scenario_F7_paper_failure(h: Harness):
-    """Paper trade fails -> PAPER_FAILED entry. Paper has no pre-trade snapshot,
-    so outcome is 'failed_and_rolled_back' but the rollback is a no-op."""
+    """Paper trade fails -> PLACEMENT_FAILED(paper_failed:...). Paper has no
+    pre-trade snapshot, so outcome is 'failed_and_rolled_back' but the
+    rollback is a no-op."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
@@ -349,11 +345,11 @@ def scenario_F7_paper_failure(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "failed_and_rolled_back"
-    entry = report["last_trade_log_entry"]
+    entry = report["last_journal_entry"]
     assert entry is not None
-    validate_entry(entry, expected_status="PAPER_FAILED")
-    assert entry["order_type"] == "paper market"
-    assert entry["error"] is not None
+    validate_journal_entry(entry, expected_state="PLACEMENT_FAILED")
+    assert entry["intent"]["paper"] is True
+    assert entry["lifecycle"]["terminal_reason"].startswith("paper_failed")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -361,11 +357,12 @@ def scenario_F7_paper_failure(h: Harness):
 # ═════════════════════════════════════════════════════════════════
 
 def _live_success_scenario(h: Harness, code: str, order_response: dict,
-                            expected_txid_in_known_orders: str | None):
+                            expected_order_id_registered: str | None):
     """Generic live-success scenario with a configurable order response shape.
 
-    If expected_txid_in_known_orders is None, asserts reconciler skipped
-    registration (empty known_orders). Otherwise asserts the txid is tracked."""
+    If expected_order_id_registered is None, asserts the execution stream
+    did NOT register the order (because order_id came back as 'unknown').
+    Otherwise asserts the order_id is tracked under _known_orders."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
@@ -380,25 +377,25 @@ def _live_success_scenario(h: Harness, code: str, order_response: dict,
         stub.restore()
 
     assert report["outcome"] == "success", f"{code}: {report}"
-    entry = report["last_trade_log_entry"]
-    validate_entry(entry, expected_status="EXECUTED")
+    entry = report["last_journal_entry"]
+    validate_journal_entry(entry, expected_state="PLACED")
 
-    if expected_txid_in_known_orders is None:
-        assert not agent.reconciler.known_orders, \
-            f"{code}: reconciler should be empty, got {agent.reconciler.known_orders}"
+    known = agent.execution_stream._known_orders
+    if expected_order_id_registered is None:
+        # When order_id is 'unknown', register() is a no-op by design.
+        assert not known, \
+            f"{code}: stream should be empty, got {list(known.keys())}"
     else:
-        assert expected_txid_in_known_orders in agent.reconciler.known_orders, \
-            f"{code}: missing txid {expected_txid_in_known_orders!r}; have {list(agent.reconciler.known_orders.keys())}"
+        assert expected_order_id_registered in known, \
+            f"{code}: missing order_id {expected_order_id_registered!r}; have {list(known.keys())}"
 
 
 def scenario_E1_txid_list_unwrap(h: Harness):
-    """Txid returned as list -> unwrapped to scalar, reconciler registers it.
-
-    (Also tagged as historical regression H'5 for commit 9e652d5.)"""
+    """Txid returned as list -> unwrapped to scalar, stream registers it."""
     _live_success_scenario(
         h, "E1",
         order_response=kraken_order_success_list("E1_TXID"),
-        expected_txid_in_known_orders="E1_TXID",
+        expected_order_id_registered="E1_TXID",
     )
 
 
@@ -407,26 +404,25 @@ def scenario_E2_txid_nested_result(h: Harness):
     _live_success_scenario(
         h, "E2",
         order_response=kraken_order_success_nested("E2_TXID"),
-        expected_txid_in_known_orders="E2_TXID",
+        expected_order_id_registered="E2_TXID",
     )
 
 
 def scenario_E3_txid_missing(h: Harness):
-    """Txid missing entirely -> becomes 'unknown', reconciler skips, trade_log
-    entry still written."""
+    """Txid missing entirely -> becomes 'unknown', stream skips registration."""
     _live_success_scenario(
         h, "E3",
         order_response=kraken_order_success_missing_txid(),
-        expected_txid_in_known_orders=None,
+        expected_order_id_registered=None,
     )
 
 
 def scenario_E4_txid_empty_list(h: Harness):
-    """Txid is an empty list -> becomes 'unknown', reconciler skips."""
+    """Txid is an empty list -> becomes 'unknown', stream skips registration."""
     _live_success_scenario(
         h, "E4",
         order_response=kraken_order_success_empty_list(),
-        expected_txid_in_known_orders=None,
+        expected_order_id_registered=None,
     )
 
 
@@ -435,26 +431,23 @@ def scenario_E5_halted_engine(h: Harness):
     trade generated. Tests the PRODUCTION tick-loop behavior at
     hydra_engine.py:866-868 (the `if self.halted: return HOLD` early return).
 
-    NOTE: engine.execute_signal() itself does NOT check `halted` — only tick()
-    does. In production, tick() is always called first, so execute_signal is
-    never reached on a halted engine. But this is a LATENT GAP: any future
-    code path that calls execute_signal directly (e.g. the swap handler at
-    hydra_agent.py:1337) bypasses the halt check. The harness documents this
-    as a finding; see tests/live_harness/README.md section 'Known findings'."""
+    NOTE: engine.execute_signal() itself does NOT check `halted` — only
+    tick() does. In production, tick() is always called first, so
+    execute_signal is never reached on a halted engine. But this is a
+    LATENT GAP: any future code path that calls execute_signal directly
+    (e.g. the swap handler) bypasses the halt check."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
     engine.halted = True
     engine.halt_reason = "Harness test: simulated circuit breaker"
 
-    # Call tick() — the production path — and verify HOLD signal
     state = engine.tick()
     assert state["signal"]["action"] == "HOLD", \
         f"E5: halted engine tick() must return HOLD; got {state['signal']['action']}"
     reason = state["signal"]["reason"].lower()
     assert "halt" in reason or "circuit" in reason or "breaker" in reason, \
         f"E5: halted signal should reference halt reason; got {state['signal']['reason']!r}"
-    # Halted state should also propagate to state['halted']
     assert state.get("halted") is True, "E5: state should expose halted=True"
 
 
@@ -464,12 +457,9 @@ def scenario_E6_ordermin_partial_sell_forces_full_close(h: Harness):
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
-    # Position slightly above ordermin (0.02 SOL)
     engine.position.size = 0.025
     engine.position.avg_entry = 95.0
 
-    # Confidence 0.65 -> sell_pct=0.5 -> 0.0125 (below 0.02 ordermin)
-    # Engine should force full close to 0.025 (not 0.0125)
     stub = StubRun(build_dispatcher({
         "paper_sell": kraken_paper_success(),
     })).install()
@@ -478,17 +468,15 @@ def scenario_E6_ordermin_partial_sell_forces_full_close(h: Harness):
     finally:
         stub.restore()
 
-    # The trade should have executed at full 0.025, not 0.0125
     assert report["outcome"] == "success"
-    entry = report["last_trade_log_entry"]
+    entry = report["last_journal_entry"]
     assert entry is not None
-    # Engine should have closed the position entirely
     assert engine.position.size < 0.00001, \
         f"E6: position not fully closed; size={engine.position.size}"
 
 
 def scenario_E7_unparseable_kraken_response(h: Harness):
-    """Kraken returns a JSON parse error dict -> treated as FAILED, rollback."""
+    """Kraken returns a JSON parse error dict -> PLACEMENT_FAILED, rollback."""
     _run_with_rollback_check(
         h, "E7",
         setup_stub=lambda: StubRun(build_dispatcher({
@@ -497,7 +485,7 @@ def scenario_E7_unparseable_kraken_response(h: Harness):
             "order": kraken_order_json_error(),
         })),
         action="BUY", confidence=0.75,
-        expected_status="FAILED",
+        expected_reason_prefix="placement_error",
     )
 
 
@@ -505,52 +493,68 @@ def scenario_E7_unparseable_kraken_response(h: Harness):
 # Category S — Schema compliance
 # ═════════════════════════════════════════════════════════════════
 #
-# S scenarios are implemented implicitly: every H/F/E scenario calls
-# validate_entry() with the expected status. That exercises S1-S5.
-# S6 (COORDINATED_SWAP) requires a swap scenario which we don't build
-# here (swap logic is out of harness scope). Schema for swap is
-# verified by the swap handler's behavior — future work.
-#
-# A single meta-scenario confirms that the schemas themselves are
-# loadable and that validate_entry() rejects malformed input.
+# Every H/F/E scenario calls validate_journal_entry() with the expected
+# state. A single meta-scenario confirms the schema validator itself
+# rejects malformed input.
 
 
 def scenario_S_meta_validator_rejects_garbage(h: Harness):
     """Meta-check: the validator itself catches obvious malformations."""
-    from tests.live_harness.schemas import validate_entry, SchemaViolation, SCHEMAS
+    from tests.live_harness.schemas import (
+        validate_journal_entry, SchemaViolation, LIFECYCLE_STATES,
+    )
 
-    assert "EXECUTED" in SCHEMAS
-    assert "PAPER_EXECUTED" in SCHEMAS
-    assert "COORDINATED_SWAP" in SCHEMAS
+    assert "PLACED" in LIFECYCLE_STATES
+    assert "FILLED" in LIFECYCLE_STATES
+    assert "PLACEMENT_FAILED" in LIFECYCLE_STATES
 
-    # Missing required field
+    # Missing required sections
     try:
-        validate_entry({"status": "EXECUTED"})
-        raise AssertionError("validator should have rejected empty EXECUTED entry")
+        validate_journal_entry({"placed_at": "2026-01-01T00:00:00+00:00"})
+        raise AssertionError("validator should have rejected near-empty entry")
     except SchemaViolation:
         pass
 
-    # Wrong type
+    # Wrong side
     try:
-        validate_entry({
-            "time": "2026-01-01T00:00:00+00:00", "pair": "SOL/USDC",
-            "action": "BUY", "amount": "not-a-number", "price": 100.0,
-            "order_type": "limit post-only", "reason": "x", "confidence": 0.5,
-            "status": "EXECUTED", "result": {"ok": True}, "error": None,
+        validate_journal_entry({
+            "placed_at": "2026-01-01T00:00:00+00:00",
+            "pair": "SOL/USDC",
+            "side": "LONG",
+            "intent": {"amount": 0.02, "limit_price": 100.0, "post_only": True,
+                        "order_type": "limit", "paper": False},
+            "decision": {"strategy": None, "regime": None, "reason": None,
+                          "confidence": None, "params_at_entry": None,
+                          "cross_pair_override": None,
+                          "book_confidence_modifier": None,
+                          "brain_verdict": None, "swap_id": None},
+            "order_ref": {"order_userref": None, "order_id": None},
+            "lifecycle": {"state": "PLACED", "vol_exec": 0, "avg_fill_price": None,
+                           "fee_quote": 0, "final_at": None,
+                           "terminal_reason": None, "exec_ids": []},
         })
-        raise AssertionError("validator should have rejected string amount")
+        raise AssertionError("validator should have rejected side='LONG'")
     except SchemaViolation:
         pass
 
-    # Wrong order_type for EXECUTED
+    # FILLED with mismatched vol_exec
     try:
-        validate_entry({
-            "time": "2026-01-01T00:00:00+00:00", "pair": "SOL/USDC",
-            "action": "BUY", "amount": 0.02, "price": 100.0,
-            "order_type": "market", "reason": "x", "confidence": 0.5,
-            "status": "EXECUTED", "result": {"ok": True}, "error": None,
+        validate_journal_entry({
+            "placed_at": "2026-01-01T00:00:00+00:00",
+            "pair": "SOL/USDC", "side": "BUY",
+            "intent": {"amount": 0.02, "limit_price": 100.0, "post_only": True,
+                        "order_type": "limit", "paper": False},
+            "decision": {"strategy": None, "regime": None, "reason": None,
+                          "confidence": None, "params_at_entry": None,
+                          "cross_pair_override": None,
+                          "book_confidence_modifier": None,
+                          "brain_verdict": None, "swap_id": None},
+            "order_ref": {"order_userref": None, "order_id": None},
+            "lifecycle": {"state": "FILLED", "vol_exec": 0.01,  # mismatch
+                           "avg_fill_price": 100.0, "fee_quote": 0,
+                           "final_at": None, "terminal_reason": None, "exec_ids": []},
         })
-        raise AssertionError("validator should have rejected wrong order_type for EXECUTED")
+        raise AssertionError("validator should have caught FILLED vol_exec mismatch")
     except SchemaViolation:
         pass
 
@@ -558,9 +562,6 @@ def scenario_S_meta_validator_rejects_garbage(h: Harness):
 # ═════════════════════════════════════════════════════════════════
 # Category R — Rollback completeness (meta)
 # ═════════════════════════════════════════════════════════════════
-# Implicit: every F scenario uses _run_with_rollback_check which calls
-# assert_rollback_complete. This meta-scenario verifies the comparator
-# itself catches obvious tampering.
 
 
 def scenario_R_meta_comparator_catches_tampering(h: Harness):
@@ -584,17 +585,13 @@ def scenario_R_meta_comparator_catches_tampering(h: Harness):
 
 
 # ═════════════════════════════════════════════════════════════════
-# Category H′ — Historical regression tests
+# Category H' — Historical regression tests
 # ═════════════════════════════════════════════════════════════════
 
 def scenario_Hp1_falsy_zero_competition_start_balance(h: Harness):
     """Commit 4effbea: snapshot competition_start_balance=0.0 must restore
-    as 0.0, not None. Load a snapshot dict with 0.0 and verify restoration."""
+    as 0.0, not None."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
-    # The loading logic is in _load_snapshot. We verify the `is not None`
-    # check by directly calling the load logic with a synthetic snapshot.
-    # Rather than calling _load_snapshot (which reads a file), we test the
-    # same condition directly.
     snap = {"competition_start_balance": 0.0}
     value = snap.get("competition_start_balance")
     assert value is not None, "The fix uses `is not None`; 0.0 must not be treated as missing"
@@ -602,23 +599,17 @@ def scenario_Hp1_falsy_zero_competition_start_balance(h: Harness):
 
 
 def scenario_Hp2_pre_trade_snapshot_stripped_from_broadcast(h: Harness):
-    """Commit 4effbea: _pre_trade_snapshot must be stripped before broadcast.
-    Verify the tick loop's strip logic at hydra_agent.py:938-942."""
+    """Commit 4effbea: _pre_trade_snapshot must be stripped before broadcast."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
-    # Simulate a state dict with the internal snapshot key
     fake_state = {
         "signal": {"action": "HOLD", "confidence": 0.5, "reason": ""},
         "_pre_trade_snapshot": {"position_size": 0.1, "balance": 100.0},
     }
-    # The tick loop strips this with: state.pop("_pre_trade_snapshot", None)
-    # Verify the production code would strip it — we directly call the
-    # same operation here as a regression test of the intent:
     stripped = dict(fake_state)
     stripped.pop("_pre_trade_snapshot", None)
     assert "_pre_trade_snapshot" not in stripped
-    # But the real fix is in hydra_agent.py:942; grep-verify it still exists
     with open(os.path.join(_hydra_root(), "hydra_agent.py"), encoding="utf-8") as f:
         src = f.read()
     assert '_pre_trade_snapshot' in src and 'state.pop("_pre_trade_snapshot"' in src, \
@@ -647,14 +638,7 @@ def scenario_Hp3_total_trades_not_incremented_on_buy(h: Harness):
 
 
 def scenario_Hp4_break_even_counts_as_loss(h: Harness):
-    """Commit 88797ca: break-even (P&L=0) counts as loss, not win.
-
-    Construct a full SELL close where sell_price == avg_entry -> P&L = 0.
-    Verify loss_count incremented and win_count did not.
-
-    Note: seed_candles produces an uptrend so engine.prices[-1] > base_price.
-    We must set avg_entry to match engine.prices[-1] exactly for a true
-    break-even close (P&L depends on current price, not base_price)."""
+    """Commit 88797ca: break-even (P&L=0) counts as loss, not win."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=True, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
     engine = agent.engines["SOL/USDC"]
@@ -674,10 +658,8 @@ def scenario_Hp4_break_even_counts_as_loss(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success"
-    # With confidence > 0.7, sell_pct=1.0 -> full close
     post_wins = engine.win_count
     post_losses = engine.loss_count
-    # Exactly one of these should have incremented
     delta_wins = post_wins - pre_wins
     delta_losses = post_losses - pre_losses
     assert delta_wins + delta_losses == 1, \
@@ -687,15 +669,254 @@ def scenario_Hp4_break_even_counts_as_loss(h: Harness):
 
 
 def scenario_Hp5_txid_as_list_regression(h: Harness):
-    """Commit 9e652d5: txid returned as list must be unwrapped. Same as E1
-    but tagged explicitly as historical regression."""
+    """Commit 9e652d5: txid returned as list must be unwrapped."""
     scenario_E1_txid_list_unwrap(h)
 
 
 def scenario_Hp6_ordermin_sell_regression(h: Harness):
-    """Commit 35a134d: partial sell below ordermin forces full close. Same
-    as E6 but tagged explicitly as historical regression."""
+    """Commit 35a134d: partial sell below ordermin forces full close."""
     scenario_E6_ordermin_partial_sell_forces_full_close(h)
+
+
+# ═════════════════════════════════════════════════════════════════
+# Category W — WS execution stream lifecycle transitions
+# ═════════════════════════════════════════════════════════════════
+# These exercise the new ExecutionStream / _apply_execution_event path.
+# Every scenario places a live-mock order (journal at PLACED) then
+# injects a synthetic WS event into the stream, drains, and asserts the
+# resulting journal + engine state.
+
+
+def _place_and_get_context(h: Harness):
+    """Helper: place a live-mocked BUY and return (agent, entry, pre_snap, engine)."""
+    agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "SOL/USDC", base_price=100.0)
+    engine = agent.engines["SOL/USDC"]
+    pre_snap = engine.snapshot_position()
+
+    stub = StubRun(build_dispatcher({
+        "ticker": kraken_ticker("SOL/USDC", bid=100.0, ask=100.1),
+        "order_validate": kraken_validate_success(),
+        "order": kraken_order_success_list("W_TXID"),
+    })).install()
+    try:
+        report = harness_execute(agent, "SOL/USDC", "BUY", 0.70, "W placement")
+    finally:
+        stub.restore()
+    assert report["outcome"] == "success"
+    entry = report["last_journal_entry"]
+    validate_journal_entry(entry, expected_state="PLACED")
+    return agent, entry, pre_snap, engine
+
+
+def _inject_and_drain(agent, ws_entry):
+    agent.execution_stream.inject_event(ws_entry)
+    events = agent.execution_stream.drain_events()
+    for e in events:
+        agent._apply_execution_event(e)
+    return events
+
+
+def scenario_W1_ws_full_fill(h: Harness):
+    """Place, then WS full-fill -> journal FILLED, engine unchanged."""
+    agent, entry, pre_snap, engine = _place_and_get_context(h)
+    engine_size_after_place = engine.position.size
+
+    placed_amount = entry["intent"]["amount"]
+    ws = {
+        "exec_type": "trade", "exec_id": "W1-1",
+        "order_id": "W_TXID", "order_status": "filled",
+        "last_qty": placed_amount, "last_price": 100.0,
+        "cost": placed_amount * 100.0,
+        "fees": [{"asset": "USDC", "qty": placed_amount * 100.0 * 0.002}],
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    }
+    events = _inject_and_drain(agent, ws)
+    assert len(events) == 1
+    final = agent.order_journal[-1]
+    validate_journal_entry(final, expected_state="FILLED")
+    assert abs(final["lifecycle"]["vol_exec"] - placed_amount) < 1e-9
+    assert final["lifecycle"]["avg_fill_price"] == 100.0
+    # Engine unchanged from post-place optimistic state
+    assert abs(engine.position.size - engine_size_after_place) < 1e-9
+
+
+def scenario_W2_ws_dms_cancel_rolls_back(h: Harness):
+    """Place, then WS DMS cancel with vol_exec=0 -> CANCELLED_UNFILLED,
+    engine rolled back to pre-trade snapshot."""
+    agent, entry, pre_snap, engine = _place_and_get_context(h)
+
+    ws = {
+        "order_id": "W_TXID", "order_status": "canceled",
+        "reason": "CancelAllOrdersAfter Timeout",
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    }
+    events = _inject_and_drain(agent, ws)
+    assert len(events) == 1
+    final = agent.order_journal[-1]
+    validate_journal_entry(final, expected_state="CANCELLED_UNFILLED")
+    assert "CancelAllOrdersAfter" in final["lifecycle"]["terminal_reason"]
+    # Engine should have been restored to pre_snap via restore_position
+    assert abs(engine.position.size - pre_snap["position_size"]) < 1e-9
+    assert abs(engine.balance - pre_snap["balance"]) < 1e-9
+
+
+def scenario_W3_ws_post_only_reject_rolls_back(h: Harness):
+    """Place, then WS post-only rejection -> REJECTED, engine rolled back."""
+    agent, entry, pre_snap, engine = _place_and_get_context(h)
+
+    ws = {
+        "order_id": "W_TXID", "order_status": "rejected",
+        "reason": "Post only order",
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    }
+    events = _inject_and_drain(agent, ws)
+    assert len(events) == 1
+    final = agent.order_journal[-1]
+    validate_journal_entry(final, expected_state="REJECTED")
+    assert "Post only" in final["lifecycle"]["terminal_reason"]
+    assert abs(engine.position.size - pre_snap["position_size"]) < 1e-9
+
+
+def scenario_W4_ws_partial_fill_then_cancel(h: Harness):
+    """Place, interim partial fill (no emit), then cancel -> PARTIALLY_FILLED
+    with correct vol_exec and avg_fill_price from the interim event."""
+    agent, entry, pre_snap, engine = _place_and_get_context(h)
+    placed_amount = entry["intent"]["amount"]
+    partial = placed_amount * 0.4
+
+    # Interim partial — should not emit
+    _inject_and_drain(agent, {
+        "exec_type": "trade", "exec_id": "W4-1",
+        "order_id": "W_TXID", "order_status": "partially_filled",
+        "last_qty": partial, "last_price": 99.90,
+        "cost": partial * 99.90,
+        "fees": [{"asset": "USDC", "qty": 0.01}],
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    })
+    # Intermediate journal entry unchanged (still PLACED)
+    assert agent.order_journal[-1]["lifecycle"]["state"] == "PLACED"
+
+    # Terminal cancel
+    events = _inject_and_drain(agent, {
+        "order_id": "W_TXID", "order_status": "canceled",
+        "reason": "user_cancel",
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:10Z",
+    })
+    assert len(events) == 1
+    final = agent.order_journal[-1]
+    assert final["lifecycle"]["state"] == "PARTIALLY_FILLED"
+    assert abs(final["lifecycle"]["vol_exec"] - partial) < 1e-9
+    assert abs(final["lifecycle"]["avg_fill_price"] - 99.90) < 1e-6
+
+
+def scenario_W5_ws_unknown_order_skipped(h: Harness):
+    """WS event for an unregistered order_id is silently ignored."""
+    agent, _, _, _ = _place_and_get_context(h)
+    events = _inject_and_drain(agent, {
+        "order_id": "O-NOT-REGISTERED", "order_status": "filled",
+        "exec_type": "trade", "last_qty": 0.05, "last_price": 100.0, "cost": 5.0,
+        "order_userref": 0, "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    })
+    assert events == []
+    # Journal unchanged
+    assert agent.order_journal[-1]["lifecycle"]["state"] == "PLACED"
+
+
+def scenario_W6_ws_duplicate_terminal_not_re_emitted(h: Harness):
+    """A second terminal event for the same order_id after finalization is ignored."""
+    agent, entry, _, _ = _place_and_get_context(h)
+    placed_amount = entry["intent"]["amount"]
+    _inject_and_drain(agent, {
+        "exec_type": "trade", "exec_id": "W6-1",
+        "order_id": "W_TXID", "order_status": "filled",
+        "last_qty": placed_amount, "last_price": 100.0,
+        "cost": placed_amount * 100.0, "fees": [],
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:00Z",
+    })
+    assert agent.order_journal[-1]["lifecycle"]["state"] == "FILLED"
+    # Same order_id again — should be a no-op
+    events = _inject_and_drain(agent, {
+        "exec_type": "trade", "exec_id": "W6-dup",
+        "order_id": "W_TXID", "order_status": "filled",
+        "last_qty": placed_amount, "last_price": 101.0,
+        "cost": placed_amount * 101.0, "fees": [],
+        "order_userref": entry["order_ref"]["order_userref"],
+        "side": "buy", "symbol": "SOL/USDC",
+        "timestamp": "2026-04-11T20:00:01Z",
+    })
+    assert events == []
+    assert agent.order_journal[-1]["lifecycle"]["avg_fill_price"] == 100.0
+
+
+def scenario_W7_journal_pnl_uses_vol_exec(h: Harness):
+    """_compute_pair_realized_pnl reads from lifecycle.vol_exec / avg_fill_price
+    and skips non-fill states."""
+    agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
+    # Hand-craft three entries: one FILLED buy, one FILLED sell, one CANCELLED
+    agent.order_journal = [
+        {
+            "placed_at": "2026-04-11T10:00:00+00:00",
+            "pair": "SOL/USDC", "side": "BUY",
+            "intent": {"amount": 0.1, "limit_price": 80.0, "post_only": True,
+                        "order_type": "limit", "paper": False},
+            "decision": {"strategy": None, "regime": None, "reason": None,
+                          "confidence": None, "params_at_entry": None,
+                          "cross_pair_override": None, "book_confidence_modifier": None,
+                          "brain_verdict": None, "swap_id": None},
+            "order_ref": {"order_userref": 1, "order_id": "OB1"},
+            "lifecycle": {"state": "FILLED", "vol_exec": 0.1,
+                           "avg_fill_price": 80.0, "fee_quote": 0.016,
+                           "final_at": "2026-04-11T10:00:05+00:00",
+                           "terminal_reason": None, "exec_ids": ["EB1"]},
+        },
+        {
+            "placed_at": "2026-04-11T11:00:00+00:00",
+            "pair": "SOL/USDC", "side": "SELL",
+            "intent": {"amount": 0.1, "limit_price": 85.0, "post_only": True,
+                        "order_type": "limit", "paper": False},
+            "decision": {"strategy": None, "regime": None, "reason": None,
+                          "confidence": None, "params_at_entry": None,
+                          "cross_pair_override": None, "book_confidence_modifier": None,
+                          "brain_verdict": None, "swap_id": None},
+            "order_ref": {"order_userref": 2, "order_id": "OS1"},
+            "lifecycle": {"state": "FILLED", "vol_exec": 0.1,
+                           "avg_fill_price": 85.0, "fee_quote": 0.017,
+                           "final_at": "2026-04-11T11:00:05+00:00",
+                           "terminal_reason": None, "exec_ids": ["ES1"]},
+        },
+        {
+            "placed_at": "2026-04-11T12:00:00+00:00",
+            "pair": "SOL/USDC", "side": "BUY",
+            "intent": {"amount": 0.5, "limit_price": 84.0, "post_only": True,
+                        "order_type": "limit", "paper": False},
+            "decision": {"strategy": None, "regime": None, "reason": None,
+                          "confidence": None, "params_at_entry": None,
+                          "cross_pair_override": None, "book_confidence_modifier": None,
+                          "brain_verdict": None, "swap_id": None},
+            "order_ref": {"order_userref": 3, "order_id": "OB2"},
+            "lifecycle": {"state": "CANCELLED_UNFILLED", "vol_exec": 0,
+                           "avg_fill_price": None, "fee_quote": 0,
+                           "final_at": "2026-04-11T12:00:01+00:00",
+                           "terminal_reason": "dms_timeout", "exec_ids": []},
+        },
+    ]
+    pnl = agent._compute_pair_realized_pnl("SOL/USDC")
+    # Expected: sell_revenue (0.1 * 85) - buy_cost (0.1 * 80) = 0.5
+    assert abs(pnl - 0.5) < 1e-9, f"expected 0.5, got {pnl}"
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -704,7 +925,7 @@ def scenario_Hp6_ordermin_sell_regression(h: Harness):
 
 def scenario_L1_live_ticker_SOLUSDC(h: Harness):
     """Real ticker fetch for SOL/USDC — verify response parses and has bid/ask."""
-    time.sleep(2)  # rate limit
+    time.sleep(2)
     result = KrakenCLI.ticker("SOL/USDC")
     assert "error" not in result, f"L1 ticker error: {result}"
     assert "bid" in result and "ask" in result, f"L1 ticker missing fields: {result}"
@@ -712,16 +933,10 @@ def scenario_L1_live_ticker_SOLUSDC(h: Harness):
 
 
 def scenario_L2_live_validate_buy_SOLUSDC(h: Harness):
-    """Real Kraken with --validate flag for SOL/USDC buy — should succeed at ordermin.
-
-    Uses ticker["bid"] directly (no multiplication) to avoid introducing extra
-    decimal precision that would violate Kraken's per-pair price precision rule.
-    See README 'Known findings' section on KrakenCLI price precision."""
+    """Real Kraken with --validate flag for SOL/USDC buy — should succeed at ordermin."""
     time.sleep(2)
     ticker = KrakenCLI.ticker("SOL/USDC")
     assert "error" not in ticker
-    # Use bid directly — a buy at the bid is a valid post-only maker order
-    # and the price is guaranteed to match Kraken's precision rules
     time.sleep(2)
     result = KrakenCLI.order_buy("SOL/USDC", 0.02, price=ticker["bid"], validate=True)
     assert "error" not in result, f"L2 validate error: {result}"
@@ -764,25 +979,21 @@ def _cancel_all_safe():
 
 def scenario_L3_live_buy_cancel_SOLUSDC(h: Harness):
     """Real post-only buy on SOL/USDC at a non-crossing price, followed by
-    immediate cancel. Verifies the full _execute_trade path including real
-    reconciler registration with a real txid."""
+    immediate cancel. Verifies the full _place_order path including real
+    execution stream registration with a real order_id."""
     agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
     h.seed_candles(agent, "SOL/USDC", base_price=100.0)
 
-    # Use real Kraken — no stub
     try:
         report = harness_execute(agent, "SOL/USDC", "BUY", 0.60, "L3 real buy + cancel")
         assert report["outcome"] in ("success", "failed_and_rolled_back")
         if report["outcome"] == "success":
-            entry = report["last_trade_log_entry"]
-            validate_entry(entry, expected_status="EXECUTED")
-            result = entry.get("result") or {}
-            txid = result.get("txid")
-            if isinstance(txid, list):
-                txid = txid[0] if txid else None
-            if txid:
-                assert txid in agent.reconciler.known_orders
-                _cancel_order_with_retry(txid)
+            entry = report["last_journal_entry"]
+            validate_journal_entry(entry)
+            order_id = entry["order_ref"]["order_id"]
+            if order_id and order_id != "unknown":
+                assert order_id in agent.execution_stream._known_orders
+                _cancel_order_with_retry(order_id)
     except Exception:
         _cancel_all_safe()
         raise
@@ -796,14 +1007,11 @@ def scenario_L4_live_buy_cancel_XBTUSDC(h: Harness):
         report = harness_execute(agent, "XBT/USDC", "BUY", 0.60, "L4 real buy XBT + cancel")
         assert report["outcome"] in ("success", "failed_and_rolled_back")
         if report["outcome"] == "success":
-            entry = report["last_trade_log_entry"]
-            validate_entry(entry, expected_status="EXECUTED")
-            result = entry.get("result") or {}
-            txid = result.get("txid")
-            if isinstance(txid, list):
-                txid = txid[0] if txid else None
-            if txid:
-                _cancel_order_with_retry(txid)
+            entry = report["last_journal_entry"]
+            validate_journal_entry(entry)
+            order_id = entry["order_ref"]["order_id"]
+            if order_id and order_id != "unknown":
+                _cancel_order_with_retry(order_id)
     except Exception:
         _cancel_all_safe()
         raise
@@ -817,33 +1025,27 @@ def scenario_L5_live_buy_cancel_SOLXBT(h: Harness):
         report = harness_execute(agent, "SOL/XBT", "BUY", 0.60, "L5 real buy SOL/XBT + cancel")
         assert report["outcome"] in ("success", "failed_and_rolled_back")
         if report["outcome"] == "success":
-            entry = report["last_trade_log_entry"]
-            validate_entry(entry, expected_status="EXECUTED")
-            result = entry.get("result") or {}
-            txid = result.get("txid")
-            if isinstance(txid, list):
-                txid = txid[0] if txid else None
-            if txid:
-                _cancel_order_with_retry(txid)
+            entry = report["last_journal_entry"]
+            validate_journal_entry(entry)
+            order_id = entry["order_ref"]["order_id"]
+            if order_id and order_id != "unknown":
+                _cancel_order_with_retry(order_id)
     except Exception:
         _cancel_all_safe()
         raise
 
 
 def scenario_L6_live_validate_below_costmin(h: Harness):
-    """Attempt to validate an order below costmin -> Kraken rejects with
-    recognizable error."""
+    """Attempt to validate an order below costmin -> Kraken rejects."""
     time.sleep(2)
-    # 0.00001 SOL × ~$100 = $0.001 — well below 0.5 USDC costmin
     result = KrakenCLI.order_buy("SOL/USDC", 0.00001, price=100.0, validate=True)
     assert "error" in result, f"L6 expected error, got success: {result}"
 
 
 # ═════════════════════════════════════════════════════════════════
-# Helper: project root for file existence checks
+# Helper: project root
 # ═════════════════════════════════════════════════════════════════
 
-import os
 def _hydra_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -854,30 +1056,30 @@ def _hydra_root() -> str:
 
 ALL_SCENARIOS: list[Scenario] = [
     # Category H — happy paths
-    Scenario("H1", "Paper BUY SOL/USDC", "H", MOCK, scenario_H1_paper_buy),
-    Scenario("H2", "Paper SELL SOL/USDC from preset position", "H", MOCK, scenario_H2_paper_sell_from_position),
-    Scenario("H3", "Live BUY SOL/USDC mocked, txid list unwrap", "H", MOCK, scenario_H3_live_buy_mocked),
-    Scenario("H4", "Live SELL SOL/USDC mocked from preset position", "H", MOCK, scenario_H4_live_sell_mocked_from_position),
+    Scenario("H1", "Paper BUY SOL/USDC -> FILLED", "H", MOCK, scenario_H1_paper_buy),
+    Scenario("H2", "Paper SELL SOL/USDC from preset position -> FILLED", "H", MOCK, scenario_H2_paper_sell_from_position),
+    Scenario("H3", "Live BUY SOL/USDC mocked -> PLACED + stream registration", "H", MOCK, scenario_H3_live_buy_mocked),
+    Scenario("H4", "Live SELL SOL/USDC mocked from preset position -> PLACED", "H", MOCK, scenario_H4_live_sell_mocked_from_position),
     Scenario("H5", "LIVE BUY SOL/USDC real+cancel", "H", LIVE_ONLY, scenario_H5_live_buy_real_kraken),
     Scenario("H6", "LIVE SELL without position -> engine rejection", "H", LIVE_ONLY, scenario_H6_live_sell_real_kraken),
 
     # Category F — failure paths
-    Scenario("F1", "Ticker error -> TICKER_FAILED + rollback", "F", MOCK, scenario_F1_ticker_error),
-    Scenario("F2", "Ticker missing bid/ask -> TICKER_FAILED + rollback", "F", MOCK, scenario_F2_ticker_missing_fields),
-    Scenario("F3", "Validation post-only crossing -> VALIDATION_FAILED + rollback", "F", MOCK, scenario_F3_validation_post_only_crossed),
-    Scenario("F4", "Validation insufficient funds -> VALIDATION_FAILED + rollback", "F", MOCK, scenario_F4_validation_insufficient_funds),
-    Scenario("F5", "Execution fails after validation -> FAILED + rollback", "F", MOCK, scenario_F5_execution_fails_after_validation),
-    Scenario("F6", "Order timeout -> FAILED + rollback", "F", MOCK, scenario_F6_execution_timeout),
-    Scenario("F7", "Paper failure -> PAPER_FAILED (no rollback needed)", "F", MOCK, scenario_F7_paper_failure),
+    Scenario("F1", "Ticker error -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F1_ticker_error),
+    Scenario("F2", "Ticker missing bid/ask -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F2_ticker_missing_fields),
+    Scenario("F3", "Validation post-only crossing -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F3_validation_post_only_crossed),
+    Scenario("F4", "Validation insufficient funds -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F4_validation_insufficient_funds),
+    Scenario("F5", "Execution fails after validation -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F5_execution_fails_after_validation),
+    Scenario("F6", "Order timeout -> PLACEMENT_FAILED + rollback", "F", MOCK, scenario_F6_execution_timeout),
+    Scenario("F7", "Paper failure -> PLACEMENT_FAILED (paper)", "F", MOCK, scenario_F7_paper_failure),
 
     # Category E — edge cases
     Scenario("E1", "Txid list unwrap", "E", MOCK, scenario_E1_txid_list_unwrap),
     Scenario("E2", "Txid nested in result", "E", MOCK, scenario_E2_txid_nested_result),
     Scenario("E3", "Txid missing -> 'unknown'", "E", MOCK, scenario_E3_txid_missing),
     Scenario("E4", "Txid empty list -> 'unknown'", "E", MOCK, scenario_E4_txid_empty_list),
-    Scenario("E5", "Halted engine produces no trade log entries", "E", MOCK, scenario_E5_halted_engine),
+    Scenario("E5", "Halted engine produces no journal entries", "E", MOCK, scenario_E5_halted_engine),
     Scenario("E6", "Ordermin partial sell forces full close", "E", MOCK, scenario_E6_ordermin_partial_sell_forces_full_close),
-    Scenario("E7", "Unparseable Kraken response -> FAILED + rollback", "E", MOCK, scenario_E7_unparseable_kraken_response),
+    Scenario("E7", "Unparseable Kraken response -> PLACEMENT_FAILED + rollback", "E", MOCK, scenario_E7_unparseable_kraken_response),
 
     # Category S — schema meta
     Scenario("S0", "Schema validator rejects malformed entries", "S", MOCK, scenario_S_meta_validator_rejects_garbage),
@@ -885,13 +1087,22 @@ ALL_SCENARIOS: list[Scenario] = [
     # Category R — rollback meta
     Scenario("R0", "Rollback comparator catches tampered state", "R", MOCK, scenario_R_meta_comparator_catches_tampering),
 
-    # Category H′ — historical regression
+    # Category H' — historical regression
     Scenario("Hp1", "4effbea: falsy-zero competition_start_balance", "H_prime", MOCK, scenario_Hp1_falsy_zero_competition_start_balance),
     Scenario("Hp2", "4effbea: _pre_trade_snapshot stripped from broadcast", "H_prime", MOCK, scenario_Hp2_pre_trade_snapshot_stripped_from_broadcast),
     Scenario("Hp3", "88797ca: BUY does not increment total_trades", "H_prime", MOCK, scenario_Hp3_total_trades_not_incremented_on_buy),
     Scenario("Hp4", "88797ca: break-even counts as loss", "H_prime", MOCK, scenario_Hp4_break_even_counts_as_loss),
     Scenario("Hp5", "9e652d5: txid-as-list regression", "H_prime", MOCK, scenario_Hp5_txid_as_list_regression),
     Scenario("Hp6", "35a134d: ordermin on sell regression", "H_prime", MOCK, scenario_Hp6_ordermin_sell_regression),
+
+    # Category W — WS execution stream lifecycle
+    Scenario("W1", "WS full fill -> FILLED", "W", MOCK, scenario_W1_ws_full_fill),
+    Scenario("W2", "WS DMS cancel -> CANCELLED_UNFILLED + engine rollback", "W", MOCK, scenario_W2_ws_dms_cancel_rolls_back),
+    Scenario("W3", "WS post-only reject -> REJECTED + engine rollback", "W", MOCK, scenario_W3_ws_post_only_reject_rolls_back),
+    Scenario("W4", "WS interim partial + terminal cancel -> PARTIALLY_FILLED", "W", MOCK, scenario_W4_ws_partial_fill_then_cancel),
+    Scenario("W5", "WS event for unknown order_id is ignored", "W", MOCK, scenario_W5_ws_unknown_order_skipped),
+    Scenario("W6", "WS duplicate terminal not re-emitted", "W", MOCK, scenario_W6_ws_duplicate_terminal_not_re_emitted),
+    Scenario("W7", "_compute_pair_realized_pnl uses lifecycle.vol_exec", "W", MOCK, scenario_W7_journal_pnl_uses_vol_exec),
 
     # Category L — live only
     Scenario("L1", "Live ticker SOL/USDC", "L", LIVE, scenario_L1_live_ticker_SOLUSDC),
