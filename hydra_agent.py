@@ -610,6 +610,13 @@ class HydraAgent:
         if resume:
             self._load_snapshot()
 
+        # Merge on-disk rolling trade log into self.trade_log, regardless of --resume.
+        # The snapshot only holds the last 200 entries; the rolling file is the
+        # long-horizon record. Prior versions would overwrite the rolling file on
+        # the first tick after restart, truncating history — this merges it in first
+        # so restarts preserve full depth (bounded by TRADE_LOG_CAP).
+        self._merge_rolling_trade_log()
+
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
         sig.signal(sig.SIGTERM, self._handle_shutdown)
@@ -684,6 +691,60 @@ class HydraAgent:
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
+
+    def _merge_rolling_trade_log(self):
+        """Merge any existing on-disk hydra_trades_live.json into self.trade_log.
+
+        Rationale: _save_snapshot caps trade_log at [-200:] for compactness, so
+        _load_snapshot can only ever restore the last 200 entries. The rolling
+        file (hydra_trades_live.json) is the authoritative long-horizon record —
+        but prior versions of the tick loop would overwrite it on the first tick
+        after a restart, destroying any history older than the in-memory log.
+        This method loads the rolling file at startup and unions it with
+        whatever was restored from the snapshot, so restart never truncates
+        historical depth. Bounded by TRADE_LOG_CAP.
+
+        Dedup key is (time, txid) when a Kraken txid is available, else
+        (time, pair, action, amount) — precise enough because Hydra timestamps
+        have microsecond resolution.
+        """
+        rolling_file = os.path.join(self._snapshot_dir, "hydra_trades_live.json")
+        if not os.path.exists(rolling_file):
+            return
+        try:
+            with open(rolling_file, "r") as f:
+                on_disk = json.load(f)
+        except Exception as e:
+            print(f"  [TRADE LOG] Could not read rolling file for merge: {e}")
+            return
+        if not isinstance(on_disk, list):
+            return
+
+        def _key(entry):
+            t = entry.get("time", "")
+            result = entry.get("result") or {}
+            txids = result.get("txid") if isinstance(result, dict) else None
+            if isinstance(txids, list) and txids:
+                return (t, txids[0])
+            if isinstance(txids, str):
+                return (t, txids)
+            return (t, entry.get("pair", ""), entry.get("action", ""), entry.get("amount", 0))
+
+        seen = {_key(e): e for e in self.trade_log}
+        merged_count = 0
+        for e in on_disk:
+            k = _key(e)
+            if k not in seen:
+                seen[k] = e
+                merged_count += 1
+
+        merged = sorted(seen.values(), key=lambda e: e.get("time", ""))
+        if len(merged) > self.TRADE_LOG_CAP:
+            merged = merged[-self.TRADE_LOG_CAP:]
+        self.trade_log = merged
+        if merged_count:
+            print(f"  [TRADE LOG] Merged {merged_count} historical entries from "
+                  f"{os.path.basename(rolling_file)}; total = {len(self.trade_log)}")
 
     def run(self):
         """Main agent loop."""
@@ -1012,12 +1073,16 @@ class HydraAgent:
                         elif ev["type"] == "poll_failed":
                             print(f"  [RECON] Poll failed: {ev.get('error')}")
 
-                # Rolling save — persist trade log every tick so no data is lost on crash
+                # Rolling save — persist trade log every tick so no data is lost on crash.
+                # Atomic write (.tmp + os.replace) so a crash mid-write cannot corrupt
+                # the file into half-valid JSON. Mirrors _save_snapshot's pattern.
                 if self.trade_log:
-                    rolling_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_trades_live.json")
+                    rolling_file = os.path.join(self._snapshot_dir, "hydra_trades_live.json")
+                    rolling_tmp = rolling_file + ".tmp"
                     try:
-                        with open(rolling_file, "w") as f:
+                        with open(rolling_tmp, "w") as f:
                             json.dump(self.trade_log, f, indent=2)
+                        os.replace(rolling_tmp, rolling_file)
                     except Exception as e:
                         # HF-003 fix: previously "except Exception: pass" silently
                         # swallowed write failures (permission, disk, lock, etc.),
@@ -1809,11 +1874,20 @@ class HydraAgent:
         for t in self.trade_log:
             if t.get("pair") != pair or t.get("type") == "COORDINATED_SWAP":
                 continue
-            # Count all trades the engine committed (EXECUTED and FAILED-but-committed).
-            # With rollback logic, truly failed trades are rolled back and not in the
-            # engine state. Pre-rollback FAILED trades that were committed remain in
-            # the log and are correct to include (e.g., the SOL/USDC BUY that Kraken
-            # accepted despite returning an API error).
+            # Skip entries that Kraken accepted into the book but never actually
+            # filled — e.g., dead-man's-switch cancels and post-only rejections.
+            # The CLI call returns "success" (no error key) in those cases, so
+            # historical entries show status=EXECUTED but vol_exec=0 on the
+            # exchange. Data-repair passes downgrade them to PLACED_NOT_FILLED;
+            # the forthcoming reconciler fix (#3) will set this flag at runtime.
+            if t.get("status") == "PLACED_NOT_FILLED":
+                continue
+            # Count all remaining trades the engine committed (EXECUTED and
+            # FAILED-but-committed). With rollback logic, truly failed trades
+            # are rolled back and not in the engine state. Pre-rollback FAILED
+            # trades that were committed remain in the log and are correct to
+            # include (e.g., a BUY that Kraken accepted despite returning an
+            # API error).
             amt = t.get("amount", 0)
             price = t.get("price", 0)
             if t["action"] == "BUY":

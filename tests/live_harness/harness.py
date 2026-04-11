@@ -97,9 +97,9 @@ class Harness:
     # ───────── Isolation ─────────
 
     def isolate_environment(self) -> None:
-        """Unset LLM API keys so HydraBrain is never constructed, and flag the
-        real on-disk state files so the user notices if something unexpected
-        happens to them.
+        """Unset LLM API keys so HydraBrain is never constructed, and temporarily
+        move aside any real on-disk state files so HydraAgent construction is
+        hermetic (does not pick up the operator's live trade log / snapshot).
 
         In mock mode, also monkey-patches time.sleep to a no-op so the harness
         runs in seconds instead of ~90s (Hydra's rate-limit sleeps are only
@@ -111,13 +111,22 @@ class Harness:
             if key in os.environ:
                 self._pre_harness_env[key] = os.environ.pop(key)
 
-        # Report on real state file state (advisory only — we won't touch them)
+        # Stash real on-disk state files so they don't leak into the harness.
+        # _merge_rolling_trade_log() runs in HydraAgent.__init__ and would
+        # otherwise pull production trades into a test agent. Rename → restore
+        # is atomic and leaves no window where the file is partially valid.
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self._stashed_state_files: list[tuple[str, str]] = []
         for fname in ("hydra_session_snapshot.json", "hydra_trades_live.json"):
             path = os.path.join(base_dir, fname)
             if os.path.exists(path):
-                st = os.stat(path)
-                self._vprint(f"  [ISOLATE] real {fname} exists: size={st.st_size}, mtime={int(st.st_mtime)}")
+                stash = path + ".harness_stash"
+                # Clean up any leftover stash from a prior crashed run
+                if os.path.exists(stash):
+                    os.remove(stash)
+                os.rename(path, stash)
+                self._stashed_state_files.append((path, stash))
+                self._vprint(f"  [ISOLATE] stashed {fname} → .harness_stash")
 
         # Fast mock mode: monkey-patch time.sleep to a no-op. Mock mode never
         # makes real Kraken calls, so rate-limit sleeps are pure wall-clock
@@ -131,7 +140,7 @@ class Harness:
             hydra_agent.time.sleep = lambda *_args, **_kwargs: None
 
     def restore_environment(self) -> None:
-        """Restore env vars and time.sleep on exit."""
+        """Restore env vars, time.sleep, and any stashed state files on exit."""
         for key, val in self._pre_harness_env.items():
             os.environ[key] = val
         self._pre_harness_env.clear()
@@ -141,6 +150,18 @@ class Harness:
             import hydra_agent
             hydra_agent.time.sleep = self._original_time_sleep
             del self._original_time_sleep
+        # Restore stashed state files; remove anything the harness wrote in
+        # their place so the operator's real files come back clean.
+        for path, stash in getattr(self, "_stashed_state_files", []):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                if os.path.exists(stash):
+                    os.rename(stash, path)
+            except OSError as e:
+                print(f"  [ISOLATE] WARNING: failed to restore {os.path.basename(path)}: {e}",
+                      file=sys.stderr)
+        self._stashed_state_files = []
 
     def isolate_tuner(self, agent: HydraAgent) -> None:
         """Monkey-patch each ParameterTracker._save method on the agent to a no-op.
