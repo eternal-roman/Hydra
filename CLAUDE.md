@@ -85,7 +85,8 @@ python hydra_engine.py
 - Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, XBT/USDC=1, SOL/XBT=7).
 - Circuit breaker: 15% max drawdown halts the engine permanently for the session. Both `tick()` and `_maybe_execute` check the halt flag.
 - Rate limiting: 2-second minimum between every Kraken API call — do not remove or reduce
-- Trade log persistence: `trade_log` is snapshotted immediately after any tick that appends (not just on the periodic N-tick cadence), so a subsequent crash cannot lose entries since the last successful tick
+- Order journal persistence: `order_journal` is snapshotted immediately after any tick that appends (not just on the periodic N-tick cadence), so a subsequent crash cannot lose entries since the last successful tick. The rolling file `hydra_order_journal.json` is merged on startup so restarts preserve full history.
+- Execution stream: lifecycle finalization flows from `kraken ws executions` via the `ExecutionStream` class — push-based, not polling. Placement stays REST (`KrakenCLI.order_buy/sell` with `--userref` for correlation); WS events drive entries from `PLACED` to `FILLED` / `PARTIALLY_FILLED` / `CANCELLED_UNFILLED` / `REJECTED` and handle engine rollback on non-fills.
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
 
 ### Dashboard
@@ -122,16 +123,19 @@ python hydra_engine.py             # Synthetic engine demo (no API keys needed)
 
 ### Live-execution test harness
 
-`tests/live_harness/` drives `HydraAgent._execute_trade` across 34 scenarios
+`tests/live_harness/` drives `HydraAgent._place_order` across 33+ scenarios
 (happy paths, failure modes, rollback completeness, schema validation,
-historical regressions, and real Kraken). It is the canonical validation tool
-for any change to `_execute_trade`, `OrderReconciler`, `snapshot_position`/
-`restore_position`, `PositionSizer`, or any trade-log write site.
+historical regressions, WS execution stream lifecycle transitions, and real
+Kraken). It is the canonical validation tool for any change to `_place_order`,
+`ExecutionStream`, `snapshot_position`/`restore_position`, `PositionSizer`, or
+any order-journal write site. A `FakeExecutionStream` test double lets mock
+scenarios drive lifecycle transitions via `inject_event(...)` without spawning
+the real `kraken ws executions` subprocess.
 
 ```bash
-python tests/live_harness/harness.py --mode smoke    # ~1.5s, import + agent construction
-python tests/live_harness/harness.py --mode mock     # ~1.5s, 26 scenarios (default)
-python tests/live_harness/harness.py --mode validate # ~10s, real Kraken read-only + --validate
+python tests/live_harness/harness.py --mode smoke    # import + agent construction
+python tests/live_harness/harness.py --mode mock     # full mock-mode scenario run
+python tests/live_harness/harness.py --mode validate # real Kraken read-only + --validate
 python tests/live_harness/harness.py --mode live --i-understand-this-places-real-orders
 ```
 
@@ -150,7 +154,7 @@ See AUDIT.md for the full verification checklist.
 - Don't reduce rate limiting below 2s — Kraken will throttle or ban
 - Don't merge engine instances across pairs — they must remain independent
 - The `.env` file contains Kraken API keys — never commit it
-- `hydra_trades_*.json` files are runtime trade logs — they're gitignored
+- `hydra_order_journal.json` is the rolling order journal — it's gitignored. Legacy `hydra_trades_live.json` is auto-migrated on first startup and preserved as `hydra_trades_live.json.migrated`.
 - `hydra_params_*.json` files are learned tuning parameters — they're gitignored
 - `hydra_session_snapshot.json` is the session snapshot for `--resume` — it's gitignored
 - On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this

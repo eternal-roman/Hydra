@@ -1,224 +1,268 @@
-"""Trade log entry schemas per status.
+"""Order journal entry schema — single shape, one state machine.
 
-Every trade_log entry produced by _execute_trade or _execute_paper_trade
-must conform to one of these schemas. validate_entry() asserts the shape
-matches the expected status. Mismatches raise SchemaViolation with a
-human-readable diff.
+Every entry produced by _place_order / _place_paper_order / _apply_execution_event
+must conform to the single schema below. validate_journal_entry() asserts
+the shape, type constraints, and lifecycle state. Mismatches raise
+SchemaViolation with a human-readable diff.
 
-Known gap: TICKER_FAILED and VALIDATION_FAILED entries omit `reason`,
-`confidence`, and `order_type` (see hydra_agent.py:1145-1170). This is
-intentional — those entries are written before the trade makes it past
-pre-flight checks, so those fields haven't been resolved yet. The
-schemas explicitly reflect this.
+Entry shape (LOCKED as of feat/ws-execution-stream):
+
+    {
+      "placed_at":  ISO 8601 str,
+      "pair":       str (e.g. "SOL/USDC"),
+      "side":       "BUY" | "SELL",
+      "intent": {
+        "amount":       int|float,
+        "limit_price":  int|float|None,
+        "post_only":    bool,
+        "order_type":   str,
+        "paper":        bool,
+      },
+      "decision": {
+        "strategy":                  str|None,
+        "regime":                    str|None,
+        "reason":                    str|None,
+        "confidence":                int|float|None,
+        "params_at_entry":           dict|None,
+        "cross_pair_override":       dict|None,
+        "book_confidence_modifier":  int|float|None,
+        "brain_verdict":             dict|None,
+        "swap_id":                   str|None,
+      },
+      "order_ref": {
+        "order_userref":  int|None,
+        "order_id":       str|None,
+      },
+      "lifecycle": {
+        "state":            one of LIFECYCLE_STATES,
+        "vol_exec":         int|float,
+        "avg_fill_price":   int|float|None,
+        "fee_quote":        int|float,
+        "final_at":         str|None,
+        "terminal_reason":  str|None,
+        "exec_ids":         list[str],
+      }
+    }
 """
-
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
+
+# ── Sentinels ────────────────────────────────────────────────────────
+NOT_NULL = object()
+IS_NULL = object()
+
+# ── Lifecycle states (must stay in sync with hydra_agent + migrator) ─
+LIFECYCLE_STATES = (
+    "PLACED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "CANCELLED_UNFILLED",
+    "REJECTED",
+    "PLACEMENT_FAILED",
+)
+
+# Terminal states — used by scenarios that assert an order has finished.
+TERMINAL_STATES = (
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "CANCELLED_UNFILLED",
+    "REJECTED",
+    "PLACEMENT_FAILED",
+)
 
 
 class SchemaViolation(AssertionError):
     pass
 
 
-# ─────────────────────────────────────────────────────────────────
-# Schema definitions — what every entry must contain per status
-# ─────────────────────────────────────────────────────────────────
+# ── Section schemas ─────────────────────────────────────────────────
 
-# Field name -> type (or tuple of types). Use `(type(None), X)` for optional-typed.
-# Use `NOT_NULL` to assert the value is not None regardless of type.
-# Use `IS_NULL` to assert the value IS None.
-
-NOT_NULL = object()
-IS_NULL = object()
-
-SCHEMAS: dict[str, dict[str, Any]] = {
-    "TICKER_FAILED": {
-        "time": str,  # ISO 8601
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "status": str,
-        "error": str,
-    },
-    "VALIDATION_FAILED": {
-        "time": str,
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "status": str,
-        "error": str,
-    },
-    "EXECUTED": {
-        "time": str,
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "order_type": str,  # must be "limit post-only"
-        "reason": str,
-        "confidence": (int, float, type(None)),  # may be None if trade dict didn't have it
-        "status": str,
-        "result": NOT_NULL,  # Kraken response dict
-        "error": IS_NULL,
-    },
-    "FAILED": {
-        "time": str,
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "order_type": str,
-        "reason": str,
-        "confidence": (int, float, type(None)),
-        "status": str,
-        "result": IS_NULL,
-        "error": NOT_NULL,
-    },
-    "PAPER_EXECUTED": {
-        "time": str,
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "order_type": str,  # must be "paper market"
-        "reason": str,
-        "confidence": (int, float, type(None)),
-        "status": str,
-        "result": NOT_NULL,
-        "error": IS_NULL,
-    },
-    "PAPER_FAILED": {
-        "time": str,
-        "pair": str,
-        "action": str,
-        "amount": (int, float),
-        "price": (int, float),
-        "order_type": str,
-        "reason": str,
-        "confidence": (int, float, type(None)),
-        "status": str,
-        "result": IS_NULL,
-        "error": NOT_NULL,
-    },
-    "COORDINATED_SWAP": {
-        "time": str,
-        "type": str,  # must be "COORDINATED_SWAP"
-        "swap_id": (int, str),
-        "sell_pair": str,
-        "buy_pair": str,
-        "sell_amount": (int, float),
-        "buy_amount": (int, float),
-        "reason": str,
-    },
+_INTENT_SCHEMA: dict[str, Any] = {
+    "amount": (int, float),
+    "limit_price": (int, float, type(None)),
+    "post_only": bool,
+    "order_type": str,
+    "paper": bool,
 }
 
-# Discriminator: how to look up the right schema for an entry.
-def schema_for(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    if entry.get("type") == "COORDINATED_SWAP":
-        return "COORDINATED_SWAP", SCHEMAS["COORDINATED_SWAP"]
-    status = entry.get("status")
-    if status in SCHEMAS:
-        return status, SCHEMAS[status]
-    raise SchemaViolation(
-        f"Cannot determine schema: entry has no recognized status or type. "
-        f"Got status={status!r}, type={entry.get('type')!r}. "
-        f"Known statuses: {list(SCHEMAS.keys())}"
-    )
+_DECISION_SCHEMA: dict[str, Any] = {
+    "strategy": (str, type(None)),
+    "regime": (str, type(None)),
+    "reason": (str, type(None)),
+    "confidence": (int, float, type(None)),
+    "params_at_entry": (dict, type(None)),
+    "cross_pair_override": (dict, type(None)),
+    "book_confidence_modifier": (int, float, type(None)),
+    "brain_verdict": (dict, type(None)),
+    "swap_id": (str, type(None)),
+}
+
+_ORDER_REF_SCHEMA: dict[str, Any] = {
+    "order_userref": (int, type(None)),
+    "order_id": (str, type(None)),
+}
+
+_LIFECYCLE_SCHEMA: dict[str, Any] = {
+    "state": str,
+    "vol_exec": (int, float),
+    "avg_fill_price": (int, float, type(None)),
+    "fee_quote": (int, float, type(None)),
+    "final_at": (str, type(None)),
+    "terminal_reason": (str, type(None)),
+    "exec_ids": list,
+}
 
 
-# ─────────────────────────────────────────────────────────────────
-# Validator
-# ─────────────────────────────────────────────────────────────────
-
-def validate_entry(entry: dict[str, Any], expected_status: str = None) -> None:
-    """Validate a single trade_log entry against its schema.
-
-    If expected_status is provided, also asserts the entry's status matches.
-    Raises SchemaViolation with a full diff on any mismatch.
-    """
-    if not isinstance(entry, dict):
-        raise SchemaViolation(f"Entry is not a dict: {type(entry).__name__}")
-
-    status, schema = schema_for(entry)
-
-    if expected_status is not None and status != expected_status:
-        raise SchemaViolation(
-            f"Status mismatch: expected {expected_status!r}, got {status!r}. Entry: {entry}"
-        )
-
-    errors = []
-
-    # Check required fields and types
+def _check_section(errors: list[str], section_name: str, value: Any,
+                    schema: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{section_name!r} must be a dict, got {type(value).__name__}")
+        return
     for field, spec in schema.items():
-        if field not in entry:
-            errors.append(f"missing required field: {field!r}")
+        if field not in value:
+            errors.append(f"{section_name}.{field} missing")
             continue
-        val = entry[field]
+        val = value[field]
         if spec is NOT_NULL:
             if val is None:
-                errors.append(f"{field!r} must not be None")
+                errors.append(f"{section_name}.{field} must not be None")
         elif spec is IS_NULL:
             if val is not None:
-                errors.append(f"{field!r} must be None, got {val!r}")
+                errors.append(f"{section_name}.{field} must be None, got {val!r}")
         elif isinstance(spec, tuple):
             if not isinstance(val, spec):
                 errors.append(
-                    f"{field!r} type mismatch: expected {spec}, got {type(val).__name__} ({val!r})"
+                    f"{section_name}.{field} type mismatch: expected {spec}, "
+                    f"got {type(val).__name__} ({val!r})"
                 )
         else:
             if not isinstance(val, spec):
                 errors.append(
-                    f"{field!r} type mismatch: expected {spec.__name__}, got {type(val).__name__} ({val!r})"
+                    f"{section_name}.{field} type mismatch: expected {spec.__name__}, "
+                    f"got {type(val).__name__} ({val!r})"
                 )
 
-    # Extra-field check: warn if entry has fields the schema doesn't know about.
-    # This is advisory, not fatal — new fields may be added without breaking.
-    # We only warn; we don't fail on extras.
 
-    # Status-specific assertions
-    if status == "EXECUTED":
-        if entry.get("order_type") != "limit post-only":
-            errors.append(f"order_type for EXECUTED must be 'limit post-only', got {entry.get('order_type')!r}")
-    elif status == "FAILED":
-        if entry.get("order_type") != "limit post-only":
-            errors.append(f"order_type for FAILED must be 'limit post-only', got {entry.get('order_type')!r}")
-    elif status in ("PAPER_EXECUTED", "PAPER_FAILED"):
-        if entry.get("order_type") != "paper market":
-            errors.append(f"order_type for {status} must be 'paper market', got {entry.get('order_type')!r}")
-    elif status == "COORDINATED_SWAP":
-        if entry.get("type") != "COORDINATED_SWAP":
-            errors.append(f"type must be 'COORDINATED_SWAP', got {entry.get('type')!r}")
+def validate_journal_entry(entry: dict[str, Any],
+                            expected_state: str = None,
+                            *,
+                            require_terminal: bool = False) -> None:
+    """Validate a single order_journal entry against the new shape.
 
-    # Timestamp format check (ISO 8601 UTC) — common to all statuses
-    time_val = entry.get("time")
-    if isinstance(time_val, str):
-        try:
-            datetime.fromisoformat(time_val.replace("Z", "+00:00"))
-        except ValueError:
-            errors.append(f"time {time_val!r} is not valid ISO 8601")
+    Args:
+        entry:            the dict to validate
+        expected_state:   if set, assert lifecycle.state equals this exactly
+        require_terminal: if True, assert lifecycle.state is in TERMINAL_STATES
+
+    Raises:
+        SchemaViolation with a full diff on any mismatch.
+    """
+    if not isinstance(entry, dict):
+        raise SchemaViolation(f"Entry is not a dict: {type(entry).__name__}")
+
+    errors: list[str] = []
+
+    # ── Top-level required keys ────────────────────────────────
+    for key in ("placed_at", "pair", "side", "intent", "decision",
+                "order_ref", "lifecycle"):
+        if key not in entry:
+            errors.append(f"missing required top-level key: {key!r}")
 
     if errors:
         raise SchemaViolation(
-            f"Entry for status {status!r} has {len(errors)} schema violation(s):\n  "
+            "Entry is missing required sections:\n  " + "\n  ".join(errors)
+            + f"\nEntry keys: {list(entry.keys())}"
+        )
+
+    # ── Top-level types ───────────────────────────────────────
+    if not isinstance(entry["placed_at"], str):
+        errors.append(f"placed_at must be str, got {type(entry['placed_at']).__name__}")
+    else:
+        try:
+            datetime.fromisoformat(entry["placed_at"].replace("Z", "+00:00"))
+        except ValueError:
+            errors.append(f"placed_at {entry['placed_at']!r} is not valid ISO 8601")
+
+    if not isinstance(entry["pair"], str):
+        errors.append(f"pair must be str, got {type(entry['pair']).__name__}")
+
+    side = entry.get("side")
+    if side not in ("BUY", "SELL"):
+        errors.append(f"side must be 'BUY' or 'SELL', got {side!r}")
+
+    # ── Section schemas ───────────────────────────────────────
+    _check_section(errors, "intent", entry["intent"], _INTENT_SCHEMA)
+    _check_section(errors, "decision", entry["decision"], _DECISION_SCHEMA)
+    _check_section(errors, "order_ref", entry["order_ref"], _ORDER_REF_SCHEMA)
+    _check_section(errors, "lifecycle", entry["lifecycle"], _LIFECYCLE_SCHEMA)
+
+    # ── Lifecycle state is one of the enumerated values ──────
+    lifecycle = entry.get("lifecycle") or {}
+    state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
+    if state not in LIFECYCLE_STATES:
+        errors.append(
+            f"lifecycle.state must be one of {LIFECYCLE_STATES}, got {state!r}"
+        )
+
+    if expected_state is not None and state != expected_state:
+        errors.append(
+            f"lifecycle.state mismatch: expected {expected_state!r}, got {state!r}"
+        )
+
+    if require_terminal and state not in TERMINAL_STATES:
+        errors.append(
+            f"lifecycle.state {state!r} is not terminal; expected one of {TERMINAL_STATES}"
+        )
+
+    # ── Cross-field invariants ───────────────────────────────
+    if state == "FILLED":
+        vol = lifecycle.get("vol_exec", 0)
+        placed_amount = (entry.get("intent") or {}).get("amount", 0)
+        if isinstance(vol, (int, float)) and isinstance(placed_amount, (int, float)):
+            eps = max(1e-9, placed_amount * 1e-6)
+            if abs(vol - placed_amount) > eps:
+                errors.append(
+                    f"FILLED state requires vol_exec ~= intent.amount, "
+                    f"got vol_exec={vol}, amount={placed_amount}"
+                )
+        if lifecycle.get("avg_fill_price") is None:
+            errors.append("FILLED state requires non-null avg_fill_price")
+
+    if state == "PLACEMENT_FAILED":
+        if lifecycle.get("vol_exec", 0) != 0:
+            errors.append(f"PLACEMENT_FAILED requires vol_exec == 0, got {lifecycle.get('vol_exec')}")
+        if not lifecycle.get("terminal_reason"):
+            errors.append("PLACEMENT_FAILED requires non-empty terminal_reason")
+
+    if state in ("CANCELLED_UNFILLED", "REJECTED"):
+        if not lifecycle.get("terminal_reason"):
+            errors.append(f"{state} requires non-empty terminal_reason")
+        if lifecycle.get("vol_exec", 0) != 0:
+            errors.append(f"{state} requires vol_exec == 0, got {lifecycle.get('vol_exec')}")
+
+    if errors:
+        raise SchemaViolation(
+            f"Journal entry (state={state!r}) has {len(errors)} violation(s):\n  "
             + "\n  ".join(errors)
             + f"\nEntry: {entry}"
         )
 
 
-def validate_entries(entries: list[dict[str, Any]]) -> None:
-    """Validate every entry in a list. Reports all errors at once."""
-    failures = []
+def validate_journal_entries(entries: Iterable[dict[str, Any]]) -> None:
+    """Validate every entry in an iterable. Reports all errors at once."""
+    failures: list[str] = []
     for i, entry in enumerate(entries):
         try:
-            validate_entry(entry)
+            validate_journal_entry(entry)
         except SchemaViolation as e:
             failures.append(f"[{i}] {e}")
     if failures:
         raise SchemaViolation(
-            f"{len(failures)} of {len(entries)} entries failed validation:\n"
-            + "\n".join(failures)
+            f"{len(failures)} entries failed validation:\n" + "\n".join(failures)
         )
+
+
+# ── Back-compat alias (scenarios.py still imports the old name) ─────
+validate_entry = validate_journal_entry

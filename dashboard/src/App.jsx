@@ -169,7 +169,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
-  const [tradeLog, setTradeLog] = useState([]);
+  const [orderJournal, setOrderJournal] = useState([]);
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
 
@@ -187,7 +187,7 @@ export default function App() {
           const engineEquity = Object.values(data.pairs).reduce((sum, p) => sum + (p.portfolio?.equity || 0), 0);
           setHistory((prev) => [...prev, liveTotal != null ? liveTotal : engineEquity].slice(-500));
         }
-        if (data.trade_log) setTradeLog(data.trade_log);
+        if (data.order_journal) setOrderJournal(data.order_journal);
       } catch (e) { console.error("[HYDRA] Parse error:", e); }
     };
     ws.onclose = () => { setConnected(false); reconnectRef.current = setTimeout(connect, 3000); };
@@ -417,27 +417,40 @@ export default function App() {
                 </div>
               )}
 
-              {/* Trade Log */}
+              {/* Order Journal */}
               <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 10, overflow: "hidden" }}>
                 <div style={{ padding: "8px 14px", borderBottom: `1px solid ${COLORS.panelBorder}`, fontSize: 10, fontWeight: 600, color: COLORS.textDim, fontFamily: mono, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                  Trade Log ({tradeLog.length})
+                  Order Journal ({orderJournal.length})
                 </div>
                 <div style={{ maxHeight: 180, overflowY: "auto" }}>
-                  {tradeLog.length === 0 && (
-                    <div style={{ color: COLORS.textMuted, fontSize: 10, padding: 12, fontFamily: mono }}>Awaiting first trade signal...</div>
+                  {orderJournal.length === 0 && (
+                    <div style={{ color: COLORS.textMuted, fontSize: 10, padding: 12, fontFamily: mono }}>Awaiting first order...</div>
                   )}
-                  {tradeLog.slice().reverse().map((t, i) => (
-                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderBottom: `1px solid ${COLORS.panelBorder}`, fontSize: 9, fontFamily: mono }}>
-                      <span style={{ width: 14, fontWeight: 700, color: t.status === "EXECUTED" ? COLORS.accent : COLORS.danger }}>
-                        {t.status === "EXECUTED" ? "\u2713" : "\u2717"}
-                      </span>
-                      <span style={{ width: 30, fontWeight: 700, color: t.action === "BUY" ? COLORS.buy : COLORS.sell }}>{t.action}</span>
-                      <span style={{ width: 75 }}>{(t.amount || 0).toFixed(6)}</span>
-                      <span style={{ width: 65, color: COLORS.textDim }}>{t.pair}</span>
-                      <span style={{ width: 85 }}>{fmtPrice(t.price || 0, pairPrefix(t.pair))}</span>
-                      <span style={{ flex: 1, color: COLORS.textMuted, fontSize: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.reason || ""}</span>
-                    </div>
-                  ))}
+                  {orderJournal.slice().reverse().map((entry, i) => {
+                    const lifecycle = entry.lifecycle || {};
+                    const intent = entry.intent || {};
+                    const decision = entry.decision || {};
+                    const state = lifecycle.state || "PLACED";
+                    const isFilled = state === "FILLED";
+                    const isTerminal = state === "FILLED" || state === "PARTIALLY_FILLED";
+                    const icon = isFilled ? "\u2713" : (state === "PLACED" ? "\u22ef" : "\u2717");
+                    const iconColor = isFilled ? COLORS.accent : (state === "PLACED" ? COLORS.textDim : COLORS.danger);
+                    const amount = intent.amount || 0;
+                    const price = lifecycle.avg_fill_price || intent.limit_price || 0;
+                    const reasonLine = lifecycle.terminal_reason
+                      ? `${state}: ${lifecycle.terminal_reason}`
+                      : (decision.reason || state);
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderBottom: `1px solid ${COLORS.panelBorder}`, fontSize: 9, fontFamily: mono }}>
+                        <span style={{ width: 14, fontWeight: 700, color: iconColor }}>{icon}</span>
+                        <span style={{ width: 30, fontWeight: 700, color: entry.side === "BUY" ? COLORS.buy : COLORS.sell }}>{entry.side}</span>
+                        <span style={{ width: 75 }}>{amount.toFixed(6)}</span>
+                        <span style={{ width: 65, color: COLORS.textDim }}>{entry.pair}</span>
+                        <span style={{ width: 85 }}>{fmtPrice(price, pairPrefix(entry.pair))}</span>
+                        <span style={{ flex: 1, color: COLORS.textMuted, fontSize: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{reasonLine}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
