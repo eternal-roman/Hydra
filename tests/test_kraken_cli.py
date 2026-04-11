@@ -185,6 +185,28 @@ class TestOrderAmendArgs:
         assert "error" in result
         assert stub.calls == []  # _run was NOT called
 
+    def test_amend_none_txid_returns_error_without_subprocess(self):
+        stub = _StubRun({"result": "should not be called"})
+        stub.install()
+        try:
+            result = KrakenCLI.order_amend(None, limit_price=100.0)
+        finally:
+            stub.restore()
+        assert "error" in result
+        assert "txid" in result["error"].lower()
+        assert stub.calls == []
+
+    def test_amend_empty_string_txid_returns_error_without_subprocess(self):
+        stub = _StubRun({"result": "should not be called"})
+        stub.install()
+        try:
+            result = KrakenCLI.order_amend("", limit_price=100.0)
+        finally:
+            stub.restore()
+        assert "error" in result
+        assert "txid" in result["error"].lower()
+        assert stub.calls == []
+
     def test_amend_numeric_txid_coerced_to_str(self):
         _, stub = _with_stub({}, lambda: KrakenCLI.order_amend(987654, limit_price=50.0))
         assert stub.calls[0][3] == "987654"

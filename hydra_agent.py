@@ -266,11 +266,14 @@ class KrakenCLI:
                     post_only: bool = True) -> dict:
         """Amend a live limit order in place (preserves queue priority and txid).
 
-        At least one of limit_price / order_qty must be provided. post_only rejects
-        the amend if the new price would cross the book — safer than a silent taker
-        flip. Returns raw Kraken response or {"error": ...}. Note: this method has
-        no caller yet; it is groundwork for a future drift-detect repricing loop.
+        At least one of limit_price / order_qty must be provided, and txid must
+        be non-empty. post_only rejects the amend if the new price would cross the
+        book — safer than a silent taker flip. Returns raw Kraken response or
+        {"error": ...}. Note: this method has no caller yet; it is groundwork for
+        a future drift-detect repricing loop.
         """
+        if txid is None or txid == "":
+            return {"error": "order_amend requires txid"}
         if limit_price is None and order_qty is None:
             return {"error": "order_amend requires limit_price or order_qty"}
         args = ["order", "amend", "--txid", str(txid)]

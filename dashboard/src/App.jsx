@@ -338,11 +338,22 @@ export default function App() {
                         <span>MACD <span style={{ color: (ind.macd_histogram || 0) > 0 ? COLORS.buy : COLORS.sell, fontWeight: 600 }}>{fmtInd(ind.macd_histogram)}</span></span>
                         <span>BB <span style={{ color: COLORS.text }}>[{fmtInd(ind.bb_lower)} — {fmtInd(ind.bb_upper)}]</span></span>
                         <span>Width <span style={{ color: (ind.bb_width || 0) > 0.06 ? COLORS.volatile : COLORS.text, fontWeight: 600 }}>{((ind.bb_width || 0) * 100).toFixed(2)}%</span></span>
-                        {state?.fee_tier?.pair_fees?.[pair] && (
-                          <span>Fee M/T <span style={{ color: COLORS.text, fontWeight: 600 }}>
-                            {(state.fee_tier.pair_fees[pair].maker_pct ?? 0).toFixed(2)}/{(state.fee_tier.pair_fees[pair].taker_pct ?? 0).toFixed(2)}%
-                          </span></span>
-                        )}
+                        {(() => {
+                          const fees = state?.fee_tier?.pair_fees?.[pair];
+                          if (!fees) return null;
+                          const m = fees.maker_pct;
+                          const t = fees.taker_pct;
+                          // Only render when at least one side has a real numeric value —
+                          // otherwise null would silently collapse to "0.00%" via `?? 0`,
+                          // misleading the user into thinking fees are zero.
+                          if (m == null && t == null) return null;
+                          const fmt = (v) => (v == null ? "—" : v.toFixed(2));
+                          return (
+                            <span>Fee M/T <span style={{ color: COLORS.text, fontWeight: 600 }}>
+                              {fmt(m)}/{fmt(t)}%
+                            </span></span>
+                          );
+                        })()}
                       </div>
                     )}
 
