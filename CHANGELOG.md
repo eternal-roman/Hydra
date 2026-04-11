@@ -6,6 +6,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.5.1] — 2026-04-11
+
+### Fixed
+- **`hydra_tuner.py` silent save failures** — `ParameterTracker._save()` and
+  `reset()` had bare `except Exception: pass` (same class as HF-003 in the
+  trade-log writer, which was fixed in v2.5.0). A save failure — permission
+  denied, disk full, read-only install dir — would let the in-memory tuner
+  keep updating while the on-disk file diverged; the next restart would load
+  the stale file and discard every update in between. Replaced with a logged
+  warning so the outer tick-body try/except surfaces the traceback to
+  `hydra_errors.log`.
+- **`hydra_tuner.py` dead-code default in `update()`** — the Bayesian update
+  loop used `o["params"].get(param_name, self._defaults[param_name])` inside
+  a list comprehension whose surrounding filter (`if param_name in ...`)
+  made the default fallback unreachable. Two contradictory intents for the
+  same line. Cleaned up to just `o["params"][param_name]` with a comment
+  explaining why missing observations are skipped rather than defaulted
+  (defaulting would fabricate datapoints biased toward the default value).
+- **`hydra_tuner.py` NaN/Inf guard** — `max(lo, min(hi, val))` propagates
+  NaN silently, so a corrupted or hand-edited `hydra_params_*.json` with a
+  non-finite value could poison every clamped param. Added `math.isfinite`
+  checks on both the load path and the post-shift value in `update()`.
+  Low-likelihood (stdlib `json.dump` refuses to emit NaN) but defensive.
+- **`hydra_brain.py` OpenAI/xAI response truncation not detected** — the
+  Anthropic branch of `_call_llm` logged a warning on `stop_reason == "max_tokens"`,
+  but the OpenAI/xAI branch did not check `finish_reason == "length"`. A
+  truncated response would silently reach `_parse_json` and fail with an
+  opaque parse error; the brain would fall back to engine-only cleanly but
+  the user would have no diagnostic trail. Added parity check that prints
+  the provider and `max_tokens` value when truncation is detected.
+- **`hydra_brain.py` conviction default bypassed escalation** — the
+  strategist-escalation gate used `analyst_output.get("conviction", 1.0) <
+  threshold`. If the analyst LLM returned valid JSON but omitted the
+  `conviction` key, the default of 1.0 was above any reasonable threshold,
+  so the strategist was never consulted. Changed the default to 0.0, which
+  treats "unknown" as "low confidence → escalate" — the safer posture for
+  a malformed analyst output.
+
+### Changed
+- **Dashboard WebSocket URL is now build-time configurable** via
+  `VITE_HYDRA_WS_URL`. Default remains `ws://localhost:8765` so existing
+  single-machine setups are unchanged. Set the env var before `npm run build`
+  or `npm run dev` to point the bundled dashboard at a remote agent.
+
+### Removed (test cleanup)
+- **`test_engine.py::TestBrain::test_brain_import`** — only asserted the
+  module imported. Trivially passing; would have passed even if
+  `HydraBrain.__init__` were broken.
+- **`test_engine.py::TestBrain::test_call_interval_caching`** — claimed to
+  verify the tick-counter interval skip, but never actually advanced the
+  counter to trigger the cached path. Tested nothing it named.
+- **`test_tuner.py::TestShiftDirection::test_shift_rate_is_conservative`
+  recomputation** — the test re-implemented `SHIFT_RATE` math inside the
+  assertion (`old + SHIFT_RATE * (win_mean - old)`) and compared against
+  its own calculation. Tautological: a bug that changed `SHIFT_RATE` in
+  both test and production would still pass. Kept the test but replaced
+  the calculation with the literal expected value `4.2`.
+
+### Tightened
+- **`test_engine.py::TestEMA::test_basic`** — previously asserted only
+  `isinstance(float) and > 14.0`. A regression that replaced EMA with
+  SMA-of-last-5 or with `sum(prices)` would still pass. Pinned against
+  the exact expected value 17.0 (SMA seed 12.0, then five smoothing steps
+  with k=1/3 on the arithmetic sequence).
+- **`test_order_book.py::TestVolumeCalculation::test_top_10_only`** —
+  previously used equal volume on all 20 depth levels, so the assertion
+  `bid_volume == 100.0` would pass whether the analyzer capped at 10 or
+  took all 20 (since top_10 * 10 = 100 and top_20 * 10 = 200, yes it
+  would catch that case, but an accidental `top_n = 5` cap would also
+  still match). Changed to make levels 11-20 carry `999.0` volume so any
+  off-by-one or missing cap produces `10090` instead of `100`.
+
+---
+
 ## [2.5.0] — 2026-04-11
 
 ### Added

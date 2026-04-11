@@ -365,6 +365,7 @@ order execution, dashboard components, infrastructure) and
 | `websockets` not installed | `pip install websockets` |
 | Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |
 | Dashboard shows "DISCONNECTED" | Ensure agent is running — it hosts the WebSocket server on port 8765 |
+| Dashboard hosted on a different machine | Set `VITE_HYDRA_WS_URL=ws://agent-host:8765` before `npm run build` or `npm run dev`. Default is `ws://localhost:8765`. |
 | No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 55% |
 
 ## SKILL.md

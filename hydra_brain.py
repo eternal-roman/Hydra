@@ -251,10 +251,14 @@ class HydraBrain:
             # Agent 3: Strategic Advisor (Grok) — only on contested decisions
             strategist_output = None
             escalated = False
+            # Default conviction to 0.0 (below any reasonable threshold) so that
+            # a malformed analyst response missing the key escalates to the
+            # strategist rather than silently bypassing it. The old default of
+            # 1.0 treated "unknown" as "fully confident" which is unsafe.
             needs_strategist = (
                 self.has_strategist and (
                     risk_output.get("decision") != "CONFIRM" or
-                    analyst_output.get("conviction", 1.0) < self.strategist_threshold
+                    analyst_output.get("conviction", 0.0) < self.strategist_threshold
                 )
             )
 
@@ -358,7 +362,12 @@ class HydraBrain:
                 ],
                 timeout=30.0,
             )
-            text = response.choices[0].message.content if response.choices else ""
+            choice = response.choices[0] if response.choices else None
+            text = choice.message.content if choice else ""
+            # Parity with the Anthropic branch: surface truncation so the
+            # subsequent JSON parse failure has a diagnosable root cause.
+            if choice and getattr(choice, "finish_reason", None) == "length":
+                print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}, provider={provider}) — JSON parse likely to fail")
             usage = response.usage
             return text, usage.prompt_tokens if usage else 0, usage.completion_tokens if usage else 0
         else:

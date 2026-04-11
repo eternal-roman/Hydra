@@ -163,12 +163,11 @@ class TestShiftDirection:
         win_params["volatile_atr_pct"] = 6.0
         record_trades(t, n_wins=20, n_losses=0, win_params=win_params)
 
-        old_val = t.current_params["volatile_atr_pct"]  # 4.0
+        # Pin against literal expected value (4.0 old + 0.1 * (6.0 - 4.0) = 4.2)
+        # rather than re-applying SHIFT_RATE in the test — a tautological test
+        # cannot detect a bug that changes SHIFT_RATE in both places at once.
         t.update()
-        new_val = t.current_params["volatile_atr_pct"]
-
-        expected = old_val + SHIFT_RATE * (6.0 - old_val)  # 4.0 + 0.1 * 2.0 = 4.2
-        assert abs(new_val - expected) < 1e-6
+        assert abs(t.current_params["volatile_atr_pct"] - 4.2) < 1e-6
 
     def test_no_shift_when_wins_match_current(self):
         """If winning trades used the same params as current, no shift."""
