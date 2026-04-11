@@ -134,6 +134,63 @@ class TestSpreadsArgsAndParsing:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.order_amend — argument construction
+# ═══════════════════════════════════════════════════════════════
+
+class TestOrderAmendArgs:
+    def test_amend_with_price_only(self):
+        _, stub = _with_stub({"result": "ok"}, lambda: KrakenCLI.order_amend("TX123", limit_price=100.0))
+        assert stub.calls == [["order", "amend", "--txid", "TX123",
+                                "--limit-price", "100.00000000", "--post-only"]]
+
+    def test_amend_with_qty_only(self):
+        _, stub = _with_stub({"result": "ok"}, lambda: KrakenCLI.order_amend("TX123", order_qty=0.5))
+        assert stub.calls == [["order", "amend", "--txid", "TX123",
+                                "--order-qty", "0.50000000", "--post-only"]]
+
+    def test_amend_with_price_and_qty(self):
+        _, stub = _with_stub({"result": "ok"},
+                              lambda: KrakenCLI.order_amend("TX123", limit_price=77.5, order_qty=0.1))
+        assert stub.calls == [["order", "amend", "--txid", "TX123",
+                                "--limit-price", "77.50000000",
+                                "--order-qty", "0.10000000", "--post-only"]]
+
+    def test_amend_post_only_default_true(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=1.0))
+        assert "--post-only" in stub.calls[0]
+
+    def test_amend_post_only_false_omits_flag(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=1.0, post_only=False))
+        assert "--post-only" not in stub.calls[0]
+
+    def test_amend_formats_price_8dp(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=0.000123456789))
+        # Truncated/rounded to 8 decimal places
+        flat = " ".join(stub.calls[0])
+        assert "0.00012346" in flat
+
+    def test_amend_formats_qty_8dp(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", order_qty=0.123456789))
+        flat = " ".join(stub.calls[0])
+        assert "0.12345679" in flat
+
+    def test_amend_missing_both_returns_error_without_subprocess(self):
+        stub = _StubRun({"result": "should not be called"})
+        stub.install()
+        try:
+            result = KrakenCLI.order_amend("TX1")
+        finally:
+            stub.restore()
+        assert isinstance(result, dict)
+        assert "error" in result
+        assert stub.calls == []  # _run was NOT called
+
+    def test_amend_numeric_txid_coerced_to_str(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend(987654, limit_price=50.0))
+        assert stub.calls[0][3] == "987654"
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST: HydraAgent._extract_fee_tier — defensive parsing
 # ═══════════════════════════════════════════════════════════════
 
@@ -331,6 +388,7 @@ def run_tests():
     test_classes = [
         TestVolumeArgsAndParsing,
         TestSpreadsArgsAndParsing,
+        TestOrderAmendArgs,
         TestFeeTierExtraction,
         TestRecordSpreads,
     ]

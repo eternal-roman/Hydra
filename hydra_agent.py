@@ -262,6 +262,27 @@ class KrakenCLI:
         return KrakenCLI._run(args)
 
     @staticmethod
+    def order_amend(txid, limit_price=None, order_qty=None,
+                    post_only: bool = True) -> dict:
+        """Amend a live limit order in place (preserves queue priority and txid).
+
+        At least one of limit_price / order_qty must be provided. post_only rejects
+        the amend if the new price would cross the book — safer than a silent taker
+        flip. Returns raw Kraken response or {"error": ...}. Note: this method has
+        no caller yet; it is groundwork for a future drift-detect repricing loop.
+        """
+        if limit_price is None and order_qty is None:
+            return {"error": "order_amend requires limit_price or order_qty"}
+        args = ["order", "amend", "--txid", str(txid)]
+        if limit_price is not None:
+            args.extend(["--limit-price", f"{float(limit_price):.8f}"])
+        if order_qty is not None:
+            args.extend(["--order-qty", f"{float(order_qty):.8f}"])
+        if post_only:
+            args.append("--post-only")
+        return KrakenCLI._run(args)
+
+    @staticmethod
     def cancel_after(seconds: int = 60) -> dict:
         """Dead man's switch — cancel all orders after timeout."""
         return KrakenCLI._run(["order", "cancel-after", str(seconds)])
