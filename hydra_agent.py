@@ -3,7 +3,7 @@
 HYDRA Agent — Kraken CLI Integration Layer (Live Trading)
 
 Connects the HYDRA engine to live Kraken market data via kraken-cli (WSL).
-Supports live trading on SOL/USDC, SOL/BTC, and BTC/USDC.
+Supports live trading on SOL/USDC, SOL/XBT, and XBT/USDC.
 Broadcasts state over WebSocket for the React dashboard.
 
 Usage:
@@ -56,28 +56,26 @@ except ImportError:
 class KrakenCLI:
     """Wraps kraken-cli v0.2.3 running in WSL Ubuntu."""
 
-    # Map friendly pair names to Kraken CLI pair names
-    # The CLI uses different formats for different commands:
-    # ticker/ohlc: "SOLXBT" (no slash) or "SOL/USDC" (with slash, depends on pair)
+    # REST API pair resolution: friendly name → Kraken REST format.
+    # Internal canonical uses XBT (Kraken REST convention). BTC aliases
+    # are kept for defensive compatibility — any code that accidentally
+    # uses BTC-form still resolves correctly.
     PAIR_MAP = {
         "SOL/USDC": "SOL/USDC",
         "SOL/XBT": "SOLXBT",
-        "SOL/BTC": "SOLXBT",
+        "SOL/BTC": "SOLXBT",       # alias
         "XBT/USDC": "XBTUSDC",
-        "BTC/USDC": "XBTUSDC",
-        "BTC/USD": "XBT/USD",
+        "BTC/USDC": "XBTUSDC",     # alias
+        "BTC/USD": "XBT/USD",      # alias
     }
 
-    # WS v2 uses Kraken's canonical pair names (BTC not XBT, slashed).
-    # REST uses the PAIR_MAP-resolved forms (SOLXBT, XBTUSDC).
+    # WS v2 API pair resolution: friendly name → WS v2 format.
+    # WS v2 uses BTC (not XBT) and slashed names. Separate from PAIR_MAP
+    # because REST and WS accept different formats for the same pairs.
     WS_PAIR_MAP = {
         "SOL/USDC": "SOL/USDC",
         "SOL/XBT": "SOL/BTC",
-        "SOL/BTC": "SOL/BTC",
         "XBT/USDC": "BTC/USDC",
-        "BTC/USDC": "BTC/USDC",
-        "BTC/USD": "BTC/USD",
-        "XBT/USD": "BTC/USD",
     }
 
     # Suffixes Kraken uses for non-tradable (staked/bonded/locked) assets
@@ -90,18 +88,10 @@ class KrakenCLI:
         'ZUSD': 'USD', 'ZUSDC': 'USDC',
     }
 
-    # HF-001 fix: Kraken rejects orders whose price has more meaningful decimals
-    # than the pair's native precision. Previously, f"{price:.8f}" was used
-    # regardless of pair, which was safe only when the price came directly from
-    # ticker["bid"]/ticker["ask"] (Kraken's own precision preserved through the
-    # float round-trip). Any derived price (drift->amend, maker-fee shading,
-    # midpoint) would hit "EOrder:Invalid price:PAIR price can only be specified
-    # up to N decimals." Verified against Kraken's pairs endpoint.
-    #
-    # Entries are duplicated for every form Hydra may pass in: friendly
-    # (SOL/USDC), slashless (SOLUSDC), and PAIR_MAP-resolved. _format_price
-    # also has a slashless-match fallback in case new pairs get added without
-    # updating every form.
+    # Per-pair price precision (hardcoded fallbacks). Dynamically overridden
+    # at startup by load_pair_constants() → apply_pair_constants() from
+    # `kraken pairs`. Entries duplicated for friendly, slashless, and
+    # BTC-alias forms so _format_price works regardless of caller's format.
     PRICE_DECIMALS = {
         'SOL/USDC': 2, 'SOLUSDC': 2,
         'XBT/USDC': 1, 'XBTUSDC': 1,
