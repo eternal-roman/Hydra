@@ -264,15 +264,6 @@ def kraken_balance_success(balances: dict[str, float] = None) -> dict:
     return {k: str(v) for k, v in balances.items()}
 
 
-def kraken_open_orders_empty() -> dict:
-    return {"open": {}}
-
-
-def kraken_open_orders_with(txids: list[str]) -> dict:
-    """Reconciler checks against this shape to determine 'disappeared' orders."""
-    return {"open": {txid: {"status": "open", "descr": {"pair": "SOLUSDC"}} for txid in txids}}
-
-
 # ─────────────────────────────────────────────────────────────────
 # Response dispatcher builder — route by command keyword
 # ─────────────────────────────────────────────────────────────────
@@ -292,11 +283,9 @@ def build_dispatcher(responses: dict[str, Any]) -> Callable[[list], Any]:
       - args[0] == 'order'         -> 'order'
       - args[0] == 'ticker'        -> 'ticker'
       - args[0] == 'balance'       -> 'balance'
-      - args[0] == 'open-orders'   -> 'open_orders'
       - args[0:2] == ['paper','buy'] -> 'paper_buy'
       - args[0:2] == ['paper','sell'] -> 'paper_sell'
       - args[0] == 'volume'        -> 'volume'
-      - args[0] == 'spreads'       -> 'spreads'
     """
 
     def dispatch(args: list) -> Any:
@@ -309,8 +298,8 @@ def build_dispatcher(responses: dict[str, Any]) -> Callable[[list], Any]:
             key = "order"
         elif head == "paper" and len(args) >= 2:
             key = f"paper_{args[1]}"
-        elif head in ("ticker", "balance", "open-orders", "volume", "spreads",
-                       "trade-balance", "trades-history", "depth", "status"):
+        elif head in ("ticker", "balance", "volume",
+                       "trades-history", "status"):
             key = head.replace("-", "_")
         else:
             key = head

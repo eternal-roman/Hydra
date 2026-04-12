@@ -69,9 +69,6 @@ jobs:
       - name: Run BookStream tests
         run: python tests/test_book_stream.py
 
-      - name: Run P&L reconciliation tests
-        run: python tests/test_pnl_reconcile.py
-
       - name: Run live-execution harness (smoke + mock)
         run: |
           python tests/live_harness/harness.py --mode smoke

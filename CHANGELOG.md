@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.7.0] — 2026-04-12
+
+### Architecture: Strip REST fallbacks, WS-native tick loop
+
+- **Tick interval: 305s → 30s** — With WS push delivering real-time candle/ticker/book/balance data, ticks no longer need to align to candle closes. 30s default gives responsive execution event processing and intra-candle price updates.
+- **Removed REST fallback paths** — CandleStream, TickerStream, BookStream, and BalanceStream are now the sole data sources in the tick loop. If a stream is unhealthy, the agent skips that data source until auto-restart recovers it (typically <30s).
+- **Order placement requires TickerStream** — `_place_order` refuses to trade without live bid/ask from the ticker stream. No more REST ticker fallback — if the stream is down, trading halts until it recovers.
+- **Removed spread REST polling** — `_record_spreads` and `KrakenCLI.spreads()` removed. Dashboard spread display now computed from live TickerStream data.
+- **Removed dead methods** — `trade_balance()`, `open_orders()`, `paper_positions()`, `order_amend()`, `order_batch()`, `depth()`, `_reconcile_pnl()` stripped from codebase.
+- **Removed `_kraken_lock`** — No longer needed without REST ticker fallback in brain path.
+- **Added `FakeTickerStream`** — Test double for scenarios needing controlled ticker data injection.
+- **SNAPSHOT_EVERY_N_TICKS: 12 → 120** — Maintains ~1h snapshot cadence at 30s ticks.
+- **Test suite: 458 tests** across 15 suites (removed test_pnl_reconcile.py).
+
+---
+
 ## [2.6.0] — 2026-04-12
 
 ### Added
