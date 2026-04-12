@@ -24,7 +24,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -474,9 +474,16 @@ class ExecutionStream:
                    aggregates fills by order_id, emits one terminal event
                    per order (FILLED / PARTIALLY_FILLED / CANCELLED_UNFILLED
                    / REJECTED), hands them to the caller.
-        stop()   - terminate subprocess, join reader thread.
+        stop()   - terminate subprocess, join reader and stderr threads.
         healthy  - True iff subprocess + reader alive AND a heartbeat was
                    seen within HEARTBEAT_TIMEOUT_S.
+        health_status() -> (ok, reason)
+                 - same check, returning the diagnostic reason string so
+                   the agent's tick warning identifies WHICH check failed.
+        ensure_healthy() -> (ok, reason)
+                 - called every tick by the agent. If unhealthy, attempts
+                   one restart of the subprocess subject to RESTART_COOLDOWN_S
+                   so we don't thrash on a persistently broken environment.
 
     Correlation keys: order_id (from REST placement response) is primary;
     order_userref (numeric tag we passed on placement) is fallback. Both
@@ -490,13 +497,21 @@ class ExecutionStream:
     event queue. No subprocess is spawned.
     """
 
-    HEARTBEAT_TIMEOUT_S = 15.0
+    # 30s heartbeat threshold gives slow WSL cold-starts (and the few seconds
+    # kraken takes to authenticate + subscribe to the WS channel) headroom
+    # before we declare the stream stale. Real heartbeats arrive ~1/sec, so
+    # any healthy stream is well under this bound.
+    HEARTBEAT_TIMEOUT_S = 30.0
     READER_JOIN_TIMEOUT_S = 5.0
+    # Minimum seconds between auto-restart attempts so we don't thrash when
+    # WSL or the network is genuinely down.
+    RESTART_COOLDOWN_S = 30.0
 
     def __init__(self, paper: bool = False):
         self.paper = paper
         self._proc: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._event_queue: "queue.Queue[tuple]" = queue.Queue()
         # Correlation maps — primary by order_id, secondary by userref
         self._known_orders: Dict[str, dict] = {}
@@ -505,6 +520,10 @@ class ExecutionStream:
         self._last_sequence: Optional[int] = None
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
+        # Diagnostic state for health_status() and auto-restart bookkeeping.
+        self._reader_exit_reason: Optional[str] = None
+        self._last_restart_attempt: float = 0.0
+        self._restart_count: int = 0
 
     # ───────── lifecycle ─────────
 
@@ -517,11 +536,26 @@ class ExecutionStream:
         journal just won't get terminal events until the stream recovers).
         """
         if self.paper:
-            self._last_heartbeat = time.time()
+            self._last_heartbeat = time.monotonic()
             return True
+        # Reset state in case start() is called as part of a restart.
+        # _last_sequence is reset because the new WS connection starts its
+        # own sequence numbering at 1, and we don't want a spurious
+        # "sequence gap" warning on the first executions message after
+        # restart. _known_orders is intentionally NOT cleared — in-flight
+        # orders need to remain correlated across restarts so the new
+        # subprocess's snapshot replay can finalize them.
+        self._shutdown.clear()
+        self._reader_exit_reason = None
+        self._last_sequence = None
+        # `exec` replaces bash with kraken in the same process so that when
+        # the wsl wrapper is terminated, the signal propagates to kraken
+        # itself instead of leaving it as an orphaned grandchild inside the
+        # WSL VM. Without exec, repeated auto-restarts would leak kraken
+        # processes and (worse) hold WS connection slots open.
         cmd = [
             "wsl", "-d", "Ubuntu", "--", "bash", "-c",
-            "source ~/.cargo/env && kraken ws executions -o json "
+            "source ~/.cargo/env && exec kraken ws executions -o json "
             "--snap-orders true --snap-trades true",
         ]
         try:
@@ -536,12 +570,20 @@ class ExecutionStream:
             target=self._reader_loop, name="ExecutionStream-reader", daemon=True,
         )
         self._reader_thread.start()
-        self._last_heartbeat = time.time()
+        # stderr drain thread — without this, anything kraken writes to stderr
+        # accumulates in the OS pipe buffer (~64 KB on Linux) and eventually
+        # blocks the subprocess on write, which silently freezes the stream.
+        # Draining also gives us visible kraken-side error messages.
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_loop, name="ExecutionStream-stderr", daemon=True,
+        )
+        self._stderr_thread.start()
+        self._last_heartbeat = time.monotonic()
         print("  [EXECSTREAM] kraken ws executions stream started")
         return True
 
     def stop(self) -> None:
-        """Terminate subprocess, join reader thread. Idempotent."""
+        """Terminate subprocess, join reader and stderr threads. Idempotent."""
         self._shutdown.set()
         if self._proc is not None:
             try:
@@ -555,33 +597,78 @@ class ExecutionStream:
             except Exception:
                 pass
             self._proc = None
-        if self._reader_thread is not None:
-            self._reader_thread.join(timeout=self.READER_JOIN_TIMEOUT_S)
-            self._reader_thread = None
+        for attr in ("_reader_thread", "_stderr_thread"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    t.join(timeout=self.READER_JOIN_TIMEOUT_S)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     @property
     def healthy(self) -> bool:
+        return self.health_status()[0]
+
+    def health_status(self) -> Tuple[bool, str]:
+        """Return (healthy, reason). When healthy, reason is the empty string.
+        When unhealthy, reason describes WHICH check failed so the warning
+        printed at the agent tick body is actionable rather than generic."""
         if self.paper:
-            return True
+            return True, ""
         if self._proc is None:
-            return False
-        if self._proc.poll() is not None:
-            return False  # subprocess exited
+            return False, "subprocess not started"
+        rc = self._proc.poll()
+        if rc is not None:
+            return False, f"subprocess exited (rc={rc})"
         if self._reader_thread is None or not self._reader_thread.is_alive():
-            return False
-        if time.time() - self._last_heartbeat > self.HEARTBEAT_TIMEOUT_S:
-            return False
-        return True
+            reason = self._reader_exit_reason or "exited (reason unknown)"
+            return False, f"reader thread {reason}"
+        # monotonic clock so a wall-clock NTP correction or sleep/resume
+        # cannot spuriously trigger an unhealthy reading or restart.
+        age = time.monotonic() - self._last_heartbeat
+        if age > self.HEARTBEAT_TIMEOUT_S:
+            return False, (
+                f"no heartbeat for {age:.0f}s "
+                f"(threshold {self.HEARTBEAT_TIMEOUT_S:.0f}s)"
+            )
+        return True, ""
+
+    def ensure_healthy(self) -> Tuple[bool, str]:
+        """Check health and, if unhealthy, attempt one restart subject to a
+        cooldown so we don't thrash. Returns the post-action (healthy, reason)
+        tuple — i.e. the state the caller should report to the user."""
+        if self.paper:
+            return True, ""
+        healthy, reason = self.health_status()
+        if healthy:
+            return True, ""
+        now = time.monotonic()
+        if now - self._last_restart_attempt < self.RESTART_COOLDOWN_S:
+            return healthy, reason
+        self._last_restart_attempt = now
+        self._restart_count += 1
+        print(f"  [EXECSTREAM] auto-restart #{self._restart_count}: {reason}")
+        try:
+            self.stop()
+        except Exception as e:
+            print(f"  [EXECSTREAM] stop during restart failed: {type(e).__name__}: {e}")
+        if not self.start():
+            return False, "restart spawn failed"
+        return self.health_status()
 
     # ───────── reader thread ─────────
 
     def _reader_loop(self) -> None:
         """Daemon thread body. Line-iterates subprocess stdout, parses each
-        line as JSON, dispatches to the internal queue."""
+        line as JSON, dispatches to the internal queue. Records exit reason
+        in self._reader_exit_reason so health_status() can report it."""
         assert self._proc is not None
+        exit_reason = "EOF (subprocess closed stdout)"
         try:
             for raw in self._proc.stdout:  # type: ignore[union-attr]
                 if self._shutdown.is_set():
+                    exit_reason = "shutdown signal"
                     break
                 line = raw.rstrip()
                 if not line:
@@ -594,14 +681,38 @@ class ExecutionStream:
                     continue
                 self._dispatch(msg)
         except Exception as e:
+            exit_reason = f"crashed: {type(e).__name__}: {e}"
             if not self._shutdown.is_set():
                 print(f"  [EXECSTREAM] reader thread error: {type(e).__name__}: {e}")
+        finally:
+            self._reader_exit_reason = exit_reason
+            if not self._shutdown.is_set():
+                print(f"  [EXECSTREAM] reader thread exited: {exit_reason}")
+
+    def _stderr_loop(self) -> None:
+        """Daemon thread body for stderr. Drains and prints anything kraken
+        emits to stderr. Without this, the OS pipe buffer fills up and blocks
+        the subprocess on its next stderr write — which silently freezes
+        stdout (and therefore the heartbeat) too. Also gives us visibility
+        into kraken-side connection errors."""
+        if self._proc is None or self._proc.stderr is None:
+            return
+        try:
+            for raw in self._proc.stderr:  # type: ignore[union-attr]
+                if self._shutdown.is_set():
+                    break
+                line = raw.rstrip()
+                if line:
+                    print(f"  [EXECSTREAM stderr] {line[:200]}")
+        except Exception as e:
+            if not self._shutdown.is_set():
+                print(f"  [EXECSTREAM] stderr reader error: {type(e).__name__}: {e}")
 
     def _dispatch(self, msg: Dict[str, Any]) -> None:
         """Classify an incoming WS message and enqueue data events."""
         channel = msg.get("channel")
         if channel == "heartbeat":
-            self._last_heartbeat = time.time()
+            self._last_heartbeat = time.monotonic()
             return
         if channel == "status":
             # Connection status update; informational only
@@ -613,7 +724,7 @@ class ExecutionStream:
         if channel != "executions":
             return
         # Bump the heartbeat on any executions traffic — it's a liveness signal
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = time.monotonic()
         # Sequence gap detection (warn only — subsequent snapshot recovers)
         seq = msg.get("sequence")
         if isinstance(seq, int):
@@ -824,7 +935,7 @@ class FakeExecutionStream(ExecutionStream):
         super().__init__(paper=False)
         # Override so healthy reports True without a subprocess
         self._fake_healthy = True
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = time.monotonic()
 
     def start(self) -> bool:
         # No-op — tests drive events via inject_event.
@@ -836,6 +947,15 @@ class FakeExecutionStream(ExecutionStream):
     @property
     def healthy(self) -> bool:
         return self._fake_healthy
+
+    def health_status(self) -> Tuple[bool, str]:
+        if self._fake_healthy:
+            return True, ""
+        return False, "fake stream marked unhealthy"
+
+    def ensure_healthy(self) -> Tuple[bool, str]:
+        # Tests are deterministic — never auto-restart, just report.
+        return self.health_status()
 
     def set_healthy(self, value: bool) -> None:
         self._fake_healthy = value
@@ -951,6 +1071,10 @@ class HydraAgent:
         # synthetic fill events (inject_event) so the same code path
         # handles both real and paper flows.
         self.execution_stream = ExecutionStream(paper=paper)
+        # Tracks the most recently logged unhealthy reason so the tick body
+        # only prints on transitions instead of spamming the warning every
+        # tick. None means "currently healthy or never warned".
+        self._exec_stream_warned_reason: Optional[str] = None
 
         # Fee tier cache — refreshed at most once per hour from `kraken volume`.
         # Shape: {"volume_30d_usd": float|None, "pair_fees": {pair: {"maker_pct","taker_pct"}}}
@@ -1468,8 +1592,25 @@ class HydraAgent:
                 # has been delivering events in the background since tick
                 # start. In paper mode this drains any synthetic fills
                 # _place_paper_order injected during this tick.
-                if not self.execution_stream.paper and not self.execution_stream.healthy:
-                    print("  [WARN] execution stream unhealthy — lifecycle finalization stalled")
+                #
+                # Health policy: ensure_healthy() reports current state and,
+                # in live mode, attempts an auto-restart of the subprocess
+                # if it's dead (subject to RESTART_COOLDOWN_S). The warning
+                # is rate-limited to transitions — printing every tick spams
+                # the operator and obscures the actionable signal. The reason
+                # string identifies WHICH check failed so we can debug.
+                if not self.execution_stream.paper:
+                    healthy, reason = self.execution_stream.ensure_healthy()
+                    if not healthy:
+                        if self._exec_stream_warned_reason != reason:
+                            print(
+                                f"  [WARN] execution stream unhealthy — {reason} "
+                                f"(lifecycle finalization stalled)"
+                            )
+                            self._exec_stream_warned_reason = reason
+                    elif self._exec_stream_warned_reason is not None:
+                        print("  [EXECSTREAM] stream healthy again")
+                        self._exec_stream_warned_reason = None
                 for term in self.execution_stream.drain_events():
                     self._apply_execution_event(term)
 
