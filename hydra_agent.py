@@ -893,6 +893,142 @@ class TickerStream(BaseStream):
 
 
 # ═══════════════════════════════════════════════════════════════
+# BOOK STREAM — kraken ws book push-based order book updates
+# ═══════════════════════════════════════════════════════════════
+
+class BookStream(BaseStream):
+    """Push-based order book stream. Subscribes to all traded pairs in one WS
+    connection, stores the latest book per pair, and exposes it via
+    latest_book(pair) in the REST-compatible format that OrderBookAnalyzer
+    expects: {"bids": [[price, qty, ts], ...], "asks": [[price, qty, ts], ...]}.
+
+    WS book snapshots include a checksum for integrity; we store the raw
+    snapshot/update data and convert to REST format on read."""
+
+    def __init__(self, pairs: List[str], depth: int = 10, paper: bool = False):
+        super().__init__(paper=paper)
+        self._pairs = list(pairs)
+        self._depth = depth
+        self._latest: Dict[str, dict] = {}
+        self._symbol_map: Dict[str, str] = {}
+        for p in pairs:
+            resolved = KrakenCLI._resolve_pair(p)
+            self._symbol_map[p] = p
+            self._symbol_map[resolved] = p
+            self._symbol_map[resolved.replace("/", "")] = p
+
+    def _build_cmd(self) -> str:
+        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
+        pairs_str = " ".join(resolved)
+        return (f"exec kraken ws book {pairs_str} "
+                f"--depth {self._depth} -o json --snapshot true")
+
+    def _stream_label(self) -> str:
+        return "BOOK_WS"
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
+        channel = msg.get("channel")
+        if channel == "heartbeat":
+            self._on_heartbeat()
+            return
+        if channel != "book":
+            if channel == "status":
+                return
+            if msg.get("method") == "subscribe":
+                if not msg.get("success"):
+                    print(f"  [BOOK_WS] subscribe failed: {msg}")
+                return
+            return
+        self._on_heartbeat()
+        for entry in msg.get("data", []):
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol", "")
+            pair = self._symbol_map.get(symbol)
+            if not pair:
+                continue
+            # Convert WS format {price, qty} dicts to REST format [price, qty, 0]
+            # so OrderBookAnalyzer works unchanged.
+            bids = []
+            for b in entry.get("bids", []):
+                if isinstance(b, dict):
+                    bids.append([float(b.get("price", 0)), float(b.get("qty", 0)), 0])
+            asks = []
+            for a in entry.get("asks", []):
+                if isinstance(a, dict):
+                    asks.append([float(a.get("price", 0)), float(a.get("qty", 0)), 0])
+            with self._lock:
+                self._latest[pair] = {"bids": bids, "asks": asks}
+
+    def latest_book(self, pair: str) -> Optional[Dict[str, Any]]:
+        """Return the latest order book for the pair in REST-compatible format,
+        or None if no data available."""
+        with self._lock:
+            return self._latest.get(pair)
+
+
+# ═══════════════════════════════════════════════════════════════
+# BALANCE STREAM — kraken ws balances push-based balance updates
+# ═══════════════════════════════════════════════════════════════
+
+class BalanceStream(BaseStream):
+    """Push-based balance stream. Receives real-time balance updates for all
+    assets. latest_balances() returns {asset: amount} for non-zero currency
+    balances, matching the shape of KrakenCLI.balance().
+
+    WS returns asset names like "BTC" (not "XBT"), "USD", "USDC", "SOL" etc.
+    We normalize via KrakenCLI._normalize_asset so callers see canonical names.
+    Only currency assets are included (equities/ETFs filtered out)."""
+
+    def __init__(self, paper: bool = False):
+        super().__init__(paper=paper)
+        self._balances: Dict[str, float] = {}
+
+    def _build_cmd(self) -> str:
+        return "exec kraken ws balances -o json --snapshot true"
+
+    def _stream_label(self) -> str:
+        return "BALANCE_WS"
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
+        channel = msg.get("channel")
+        if channel == "heartbeat":
+            self._on_heartbeat()
+            return
+        if channel != "balances":
+            if channel == "status":
+                return
+            if msg.get("method") == "subscribe":
+                if not msg.get("success"):
+                    print(f"  [BALANCE_WS] subscribe failed: {msg}")
+                return
+            return
+        self._on_heartbeat()
+        for entry in msg.get("data", []):
+            if not isinstance(entry, dict):
+                continue
+            # Only include currency assets (skip equities/ETFs)
+            if entry.get("asset_class", "currency") != "currency":
+                continue
+            asset = entry.get("asset", "")
+            balance = entry.get("balance")
+            if not asset or balance is None:
+                continue
+            normalized = KrakenCLI._normalize_asset(asset)
+            with self._lock:
+                bal = float(balance)
+                if bal > 0:
+                    self._balances[normalized] = bal
+                else:
+                    self._balances.pop(normalized, None)
+
+    def latest_balances(self) -> Dict[str, float]:
+        """Return {asset: amount} for non-zero currency balances."""
+        with self._lock:
+            return dict(self._balances)
+
+
+# ═══════════════════════════════════════════════════════════════
 # EXECUTION STREAM — kraken ws executions push reconciler
 # ═══════════════════════════════════════════════════════════════
 
@@ -1384,6 +1520,8 @@ class HydraAgent:
         # no-op (REST fallback used instead).
         self.candle_stream = CandleStream(pairs, interval=candle_interval, paper=paper)
         self.ticker_stream = TickerStream(pairs, paper=paper)
+        self.balance_stream = BalanceStream(paper=paper)
+        self.book_stream = BookStream(pairs, depth=10, paper=paper)
         # Tracks the most recently logged unhealthy reason so the tick body
         # only prints on transitions instead of spamming the warning every
         # tick. None means "currently healthy or never warned".
@@ -1449,6 +1587,8 @@ class HydraAgent:
             (self.execution_stream, "ExecutionStream"),
             (self.candle_stream, "CandleStream"),
             (self.ticker_stream, "TickerStream"),
+            (self.balance_stream, "BalanceStream"),
+            (self.book_stream, "BookStream"),
         ]:
             try:
                 stream.stop()
@@ -1694,6 +1834,10 @@ class HydraAgent:
                 print("  [WARN] CandleStream failed to start — falling back to REST ohlc")
             if not self.ticker_stream.start():
                 print("  [WARN] TickerStream failed to start — falling back to REST ticker")
+            if not self.balance_stream.start():
+                print("  [WARN] BalanceStream failed to start — falling back to REST balance")
+            if not self.book_stream.start():
+                print("  [WARN] BookStream failed to start — falling back to REST depth")
 
         # Reconcile stale PLACED journal entries from previous sessions.
         # After --resume, the journal may contain entries that finalized on
@@ -1798,13 +1942,16 @@ class HydraAgent:
                         original_signals[pair]["confidence"] = state["signal"]["confidence"]
 
                 # Phase 1.75: Order book intelligence
-                # Fetch depth data and apply confidence modifiers before brain runs
+                # Prefer WS book stream (no API call); fall back to REST depth.
+                _book_ws_ok = self.book_stream.healthy
                 for pair in self.pairs:
                     state = engine_states.get(pair)
                     if not state:
                         continue
-                    time.sleep(2)  # Rate limit
-                    depth = KrakenCLI.depth(pair, count=10)
+                    depth = self.book_stream.latest_book(pair) if _book_ws_ok else None
+                    if depth is None:
+                        time.sleep(2)  # Rate limit (REST fallback)
+                        depth = KrakenCLI.depth(pair, count=10)
                     if isinstance(depth, dict) and "error" not in depth:
                         signal_action = state["signal"].get("action", "HOLD")
                         book_analysis = OrderBookAnalyzer.analyze(depth, signal_action)
@@ -1999,6 +2146,8 @@ class HydraAgent:
                 if not self.paper:
                     self.candle_stream.ensure_healthy()
                     self.ticker_stream.ensure_healthy()
+                    self.balance_stream.ensure_healthy()
+                    self.book_stream.ensure_healthy()
 
                 # Rolling save — persist the order journal every tick so
                 # no data is lost on crash. Atomic write (.tmp + os.replace)
@@ -2980,8 +3129,16 @@ class HydraAgent:
     def _build_dashboard_state(self, tick: int, all_states: dict,
                                 elapsed: float) -> dict:
         """Build the full state dict for the dashboard WebSocket."""
-        # Fetch balance every 5th tick to reduce API calls
-        if tick % 5 == 1 or not hasattr(self, '_cached_balance'):
+        # Balance: prefer WS stream when healthy (real-time, no API call).
+        # Fall back to REST polling every 5th tick.
+        ws_bal = (
+            self.balance_stream.latest_balances()
+            if not self.paper and self.balance_stream.healthy
+            else None
+        )
+        if ws_bal:
+            self._cached_balance = ws_bal
+        elif tick % 5 == 1 or not hasattr(self, '_cached_balance'):
             bal = KrakenCLI.paper_balance() if self.paper else KrakenCLI.balance()
             self._cached_balance = bal if "error" not in bal else getattr(self, '_cached_balance', {})
             time.sleep(2)  # Rate limit

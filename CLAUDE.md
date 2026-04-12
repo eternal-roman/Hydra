@@ -93,6 +93,8 @@ python hydra_engine.py
 - Resume reconciliation: on `--resume`, `_reconcile_stale_placed()` scans the journal for PLACED entries from the previous session and queries the exchange. Terminal orders (closed/canceled/expired) have their journal lifecycle updated directly. Still-open orders are re-registered with the ExecutionStream so WS events finalize them. Engine rollback is not possible for previous-session entries (no `pre_trade_snapshot` persisted) — a warning is logged if an unfilled order is found.
 - BaseStream superclass: `ExecutionStream`, `CandleStream`, and `TickerStream` all inherit from `BaseStream` which provides subprocess spawn/stop, reader/stderr threads, heartbeat-based health checks, and auto-restart with cooldown. Subclasses override `_build_cmd()`, `_on_message(msg)`, and `_stream_label()`.
 - Push-based market data: `CandleStream` (ws ohlc) and `TickerStream` (ws ticker) each subscribe to ALL traded pairs in one WS connection. `_fetch_and_tick()` checks the candle stream first (zero REST calls, zero rate-limit sleep); falls back to REST `ohlc()` when the stream is unhealthy. Per-tick rate-limit sleep is skipped when the candle stream is healthy. Both streams are auto-restarted on failure via `ensure_healthy()` each tick.
+- Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy; falls back to REST polling every 5th tick. Asset names are normalized (BTC→XBT) and equities/ETFs are filtered out.
+- Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Phase 1.75 (order book intelligence) uses WS data when healthy; falls back to REST `depth()`. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
 - Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
 
@@ -132,6 +134,8 @@ python tests/test_reconciliation.py # Restart-gap reconciliation (query-orders r
 python tests/test_resume_reconcile.py # Resume reconciliation (stale PLACED entries from previous sessions)
 python tests/test_candle_stream.py # CandleStream (ws ohlc) dispatch, storage, symbol mapping
 python tests/test_ticker_stream.py # TickerStream (ws ticker) dispatch, storage, symbol mapping
+python tests/test_balance_stream.py # BalanceStream (ws balances) dispatch, normalization, filtering
+python tests/test_book_stream.py   # BookStream (ws book) dispatch, REST-format conversion, analyzer compat
 python hydra_engine.py             # Synthetic engine demo (no API keys needed)
 ```
 
