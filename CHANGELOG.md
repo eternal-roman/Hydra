@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.6.0] — 2026-04-12
+
+### Added
+- **System status gate** — tick loop checks `kraken status` before executing;
+  skips during `maintenance`/`cancel_only`, logs transitions. Degrades to
+  `"online"` on API failure. Paper mode skips the check entirely.
+- **Dynamic pair constants** — `kraken pairs` loaded at startup to set
+  `PRICE_DECIMALS`, `ordermin`, `costmin` dynamically. Hardcoded constants
+  remain as fallbacks. Corrects XBT/USDC precision (was 1, Kraken says 2).
+- **Reconciliation primitives** — `KrakenCLI.query_orders()` and
+  `cancel_order()` wrappers. `ExecutionStream.reconcile_restart_gap()` queries
+  the exchange after auto-restart to finalize orders that filled/cancelled
+  while the stream was down.
+- **Resume reconciliation** — `_reconcile_stale_placed()` runs on `--resume`
+  to query PLACED journal entries from previous sessions. Terminal orders
+  finalized; still-open orders re-registered with the live ExecutionStream.
+- **BaseStream superclass** — extracted subprocess/reader/health/restart
+  infrastructure from ExecutionStream. All 5 stream types inherit from it.
+- **CandleStream** (ws ohlc) — push-based candle updates for all pairs in one
+  WS connection. `_fetch_and_tick()` uses stream when healthy; REST fallback
+  seamless. Eliminates 3 REST calls + 6s sleep per tick.
+- **TickerStream** (ws ticker) — push-based bid/ask for all pairs. Used by
+  `_apply_brain` spread assessment and `_place_order` limit pricing. Eliminates
+  up to 4 REST ticker calls per tick.
+- **BalanceStream** (ws balances) — real-time balance updates. Dashboard state
+  builder uses stream when healthy; REST polling every 5th tick as fallback.
+  Normalizes BTC→XBT, filters equities.
+- **BookStream** (ws book) — push-based order book depth 10 for all pairs.
+  Phase 1.75 order book intelligence uses stream when healthy; REST `depth()`
+  fallback. Converts WS `{price,qty}` dicts to REST `[price,qty,ts]` format
+  for OrderBookAnalyzer compatibility. Eliminates 3 REST calls + 6s sleep.
+- **Order batch** — `KrakenCLI.order_batch()` wraps `kraken order batch` for
+  atomic 2–15 order submission (single-pair only; Kraken API limitation).
+- **P&L reconciliation** — `_reconcile_pnl()` compares journal fill data
+  against `kraken trades-history`. On-demand diagnostic; not in tick loop.
+- **19 new test files / test classes**, 455 total tests across 16 suites.
+
+### Changed
+- `ExecutionStream` now inherits from `BaseStream` instead of being standalone.
+  API unchanged; `_dispatch` renamed to `_on_message` (internal).
+- `PositionSizer.apply_pair_limits()` added for dynamic `MIN_ORDER_SIZE` /
+  `MIN_COST` updates.
+- `KrakenCLI.trades_history()` now accepts optional `start`/`end` time filters.
+- Dashboard version bumped to v2.6.0.
+- Rate-limit sleeps in tick loop are now conditional: skipped when the
+  corresponding WS stream is healthy (candle, book, ticker).
+
+### Performance
+- With all WS streams healthy: ~19s/tick saved from eliminated REST calls
+  and rate-limit sleeps (3 ohlc + 3 depth + ~4 ticker + balance polling).
+
+---
+
 ## [2.5.1] — 2026-04-11
 
 ### Fixed

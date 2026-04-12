@@ -2315,11 +2315,19 @@ class HydraAgent:
         # Inject cross-pair triangle context before deliberation
         state["triangle_context"] = self._build_triangle_context(pair, all_engine_states)
 
-        # Fetch spread data for risk assessment (serialized to respect Kraken rate limits)
+        # Fetch spread data for risk assessment. Prefer WS ticker (no API call).
         try:
-            with self._kraken_lock:
-                time.sleep(2)  # Rate limit
-                ticker = KrakenCLI.ticker(pair)
+            ws_tick = (
+                self.ticker_stream.latest_ticker(pair)
+                if self.ticker_stream.healthy
+                else None
+            )
+            if ws_tick and "bid" in ws_tick:
+                ticker = ws_tick
+            else:
+                with self._kraken_lock:
+                    time.sleep(2)  # Rate limit
+                    ticker = KrakenCLI.ticker(pair)
             if "error" not in ticker and "bid" in ticker:
                 bid, ask = ticker["bid"], ticker["ask"]
                 mid = (bid + ask) / 2
@@ -2493,9 +2501,17 @@ class HydraAgent:
         entry = self._build_journal_entry(pair, trade, state)
         pre_trade_snap = state.get("_pre_trade_snapshot") if isinstance(state, dict) else None
 
-        # ─── Ticker fetch ───
-        time.sleep(2)
-        ticker = KrakenCLI.ticker(pair)
+        # ─── Ticker fetch (prefer WS stream, REST fallback) ───
+        ws_tick = (
+            self.ticker_stream.latest_ticker(pair)
+            if self.ticker_stream.healthy
+            else None
+        )
+        if ws_tick and "bid" in ws_tick:
+            ticker = ws_tick
+        else:
+            time.sleep(2)
+            ticker = KrakenCLI.ticker(pair)
         if "error" in ticker or "bid" not in ticker:
             print(f"  [TRADE] Cannot fetch ticker for {pair}, skipping")
             self._finalize_failed_entry(
@@ -2521,8 +2537,16 @@ class HydraAgent:
             return False
 
         # ─── Re-fetch ticker (price may have drifted during validate) ───
-        time.sleep(2)
-        fresh_ticker = KrakenCLI.ticker(pair)
+        ws_tick2 = (
+            self.ticker_stream.latest_ticker(pair)
+            if self.ticker_stream.healthy
+            else None
+        )
+        if ws_tick2 and "bid" in ws_tick2:
+            fresh_ticker = ws_tick2
+        else:
+            time.sleep(2)
+            fresh_ticker = KrakenCLI.ticker(pair)
         if "error" not in fresh_ticker and "bid" in fresh_ticker:
             limit_price = fresh_ticker["bid"] if action == "buy" else fresh_ticker["ask"]
             entry["intent"]["limit_price"] = limit_price
