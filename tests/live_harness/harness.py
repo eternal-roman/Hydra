@@ -38,7 +38,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from hydra_agent import HydraAgent, KrakenCLI, FakeExecutionStream  # noqa: E402
+from hydra_agent import HydraAgent, KrakenCLI, FakeExecutionStream, FakeTickerStream  # noqa: E402
 from hydra_engine import HydraEngine  # noqa: E402
 
 
@@ -223,6 +223,13 @@ class Harness:
         self.isolate_broadcaster(agent)
         # Swap in the fake stream — guaranteed no subprocess, instant events.
         agent.execution_stream = FakeExecutionStream()
+        # Swap in fake ticker stream — no subprocess, deterministic data.
+        agent.ticker_stream = FakeTickerStream(pairs=agent.pairs)
+        agent.ticker_stream.start()
+        # Inject default bid/ask for all pairs
+        for pair in agent.pairs:
+            price = 100.0 if "USDC" in pair else 0.0012
+            agent.ticker_stream.inject(pair, {"bid": price, "ask": price * 1.001, "last": price})
         assert agent.brain is None, "Brain should be None (env vars unset during isolation)"
         return agent
 

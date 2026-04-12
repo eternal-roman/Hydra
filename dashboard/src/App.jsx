@@ -358,16 +358,12 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Spread diagnostic (populated every 5 ticks by Phase 1.8) */}
-                    {ps.spread_history && ps.spread_history.length > 0 && (() => {
-                      const latest = ps.spread_history[ps.spread_history.length - 1];
-                      return (
-                        <div style={{ marginTop: 4, fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
-                          Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(latest.spread_bps || 0).toFixed(1)}</span> bps
-                          <span style={{ marginLeft: 8, color: COLORS.textMuted }}>({ps.spread_history.length} samples)</span>
-                        </div>
-                      );
-                    })()}
+                    {/* Spread from TickerStream */}
+                    {ps.spread && ps.spread.spread_bps != null && (
+                      <span style={{ marginLeft: 12, color: COLORS.textMuted, fontSize: 11 }}>
+                        Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(ps.spread.spread_bps || 0).toFixed(1)}</span> bps
+                      </span>
+                    )}
 
                     {/* AI Reasoning */}
                     {ps.ai_decision && !ps.ai_decision.fallback && (
@@ -599,7 +595,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.6.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.7.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

@@ -26,10 +26,10 @@ Volatility is checked first — it overrides trend detection. This prevents fals
 ## Architecture
 
 ```
-HYDRA Agent Loop (5-min candles, ~305s tick)
-============================================
+HYDRA Agent Loop (5-min candles, 30s tick)
+==========================================
 
-  Kraken CLI OHLC ──> Regime Detector ──> Strategy Selector
+  WS Candle Stream ──> Regime Detector ──> Strategy Selector
                                           TREND_UP  → MOMENTUM
                                           TREND_DN  → DEFENSIVE
   Signal Generator <── Indicator Engine   RANGING   → MEAN_REV
@@ -194,7 +194,7 @@ start_all.bat
 --pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)
 --balance          Reference balance for position sizing in USD (default: 100)
 --candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 5)
---interval         Seconds between ticks (default: auto from candle interval)
+--interval         Seconds between ticks (default: 30)
 --duration         Total duration in seconds, 0 = forever (default: 0)
 --ws-port          WebSocket port for dashboard (default: 8765)
 --mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
@@ -284,7 +284,6 @@ hydra/
 │   ├── test_ticker_stream.py     # TickerStream (ws ticker) dispatch + storage
 │   ├── test_balance_stream.py    # BalanceStream (ws balances) normalization
 │   ├── test_book_stream.py       # BookStream (ws book) dispatch + conversion
-│   ├── test_pnl_reconcile.py     # P&L reconciliation (trades-history matching)
 │   └── live_harness/        # Live-execution test harness (41+ scenarios)
 │       ├── harness.py       # Harness class, CLI entry, harness_execute wrapper
 │       ├── scenarios.py     # All scenarios + ALL_SCENARIOS registry
@@ -349,7 +348,6 @@ python tests/test_candle_stream.py     # CandleStream (ws ohlc) dispatch, storag
 python tests/test_ticker_stream.py     # TickerStream (ws ticker) dispatch, storage, symbol mapping
 python tests/test_balance_stream.py    # BalanceStream (ws balances) dispatch, normalization, filtering
 python tests/test_book_stream.py       # BookStream (ws book) dispatch, REST-format conversion
-python tests/test_pnl_reconcile.py     # P&L reconciliation (trades-history matching)
 python hydra_engine.py                 # Synthetic 300-tick demo (no API keys needed)
 ```
 

@@ -250,27 +250,61 @@ def _run_with_rollback_check(h: Harness, scenario_code: str,
 
 
 def scenario_F1_ticker_error(h: Harness):
-    """Ticker fetch returns an error -> PLACEMENT_FAILED(ticker_failed:...), rollback."""
-    _run_with_rollback_check(
-        h, "F1",
-        setup_stub=lambda: StubRun(build_dispatcher({
-            "ticker": kraken_ticker_error("EAPI:Rate limit"),
-        })),
-        action="BUY", confidence=0.75,
-        expected_reason_prefix="ticker_failed",
-    )
+    """Ticker stream unhealthy -> PLACEMENT_FAILED(ticker_stream_unavailable), rollback."""
+    agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "SOL/USDC", base_price=100.0)
+    engine = agent.engines["SOL/USDC"]
+
+    # Make WS ticker stream unhealthy — _place_order refuses to trade
+    agent.ticker_stream.set_healthy(False)
+
+    before = capture_engine_state(engine)
+    stub = StubRun(build_dispatcher({})).install()
+    try:
+        report = harness_execute(agent, "SOL/USDC", "BUY", 0.75, "F1 fail")
+    finally:
+        stub.restore()
+
+    assert report["outcome"] == "failed_and_rolled_back", \
+        f"F1: expected outcome 'failed_and_rolled_back', got {report['outcome']!r}"
+    entry = report["last_journal_entry"]
+    assert entry is not None, "F1: no journal entry written"
+    validate_journal_entry(entry, expected_state="PLACEMENT_FAILED")
+    reason = entry["lifecycle"]["terminal_reason"]
+    assert reason == "ticker_stream_unavailable", \
+        f"F1: expected terminal_reason 'ticker_stream_unavailable', got {reason!r}"
+
+    after = capture_engine_state(engine)
+    assert_rollback_complete(before, after, scenario_name="F1")
 
 
 def scenario_F2_ticker_missing_fields(h: Harness):
-    """Ticker parses but lacks bid/ask -> PLACEMENT_FAILED(ticker_failed:...)."""
-    _run_with_rollback_check(
-        h, "F2",
-        setup_stub=lambda: StubRun(build_dispatcher({
-            "ticker": kraken_ticker_missing_fields(),
-        })),
-        action="BUY", confidence=0.75,
-        expected_reason_prefix="ticker_failed",
-    )
+    """Ticker stream returns data without bid -> PLACEMENT_FAILED(ticker_stream_unavailable)."""
+    agent = h.new_agent(pairs=["SOL/USDC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "SOL/USDC", base_price=100.0)
+    engine = agent.engines["SOL/USDC"]
+
+    # Inject ticker data that lacks 'bid' key — _place_order should fail
+    agent.ticker_stream.inject("SOL/USDC", {"last": 100.0})
+
+    before = capture_engine_state(engine)
+    stub = StubRun(build_dispatcher({})).install()
+    try:
+        report = harness_execute(agent, "SOL/USDC", "BUY", 0.75, "F2 fail")
+    finally:
+        stub.restore()
+
+    assert report["outcome"] == "failed_and_rolled_back", \
+        f"F2: expected outcome 'failed_and_rolled_back', got {report['outcome']!r}"
+    entry = report["last_journal_entry"]
+    assert entry is not None, "F2: no journal entry written"
+    validate_journal_entry(entry, expected_state="PLACEMENT_FAILED")
+    reason = entry["lifecycle"]["terminal_reason"]
+    assert reason == "ticker_stream_unavailable", \
+        f"F2: expected terminal_reason 'ticker_stream_unavailable', got {reason!r}"
+
+    after = capture_engine_state(engine)
+    assert_rollback_complete(before, after, scenario_name="F2")
 
 
 def scenario_F3_validation_post_only_crossed(h: Harness):

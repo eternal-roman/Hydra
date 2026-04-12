@@ -308,12 +308,6 @@ class KrakenCLI:
                             })
         return candles
 
-    @staticmethod
-    def depth(pair: str, count: int = 10) -> dict:
-        """Fetch order book depth. Returns bids/asks arrays."""
-        p = KrakenCLI._resolve_pair(pair)
-        return KrakenCLI._run(["depth", p, "--count", str(count)])
-
     # ─── Private Account ───
 
     @staticmethod
@@ -323,16 +317,6 @@ class KrakenCLI:
         if isinstance(data, dict) and "error" not in data:
             return {k: float(v) for k, v in data.items() if float(v) > 0}
         return data
-
-    @staticmethod
-    def trade_balance() -> dict:
-        """Get trade balance summary."""
-        return KrakenCLI._run(["trade-balance"])
-
-    @staticmethod
-    def open_orders() -> dict:
-        """Get open orders."""
-        return KrakenCLI._run(["open-orders"])
 
     @staticmethod
     def trades_history(start: float = None, end: float = None) -> dict:
@@ -345,20 +329,6 @@ class KrakenCLI:
             args.extend(["--start", str(start)])
         if end is not None:
             args.extend(["--end", str(end)])
-        return KrakenCLI._run(args)
-
-    @staticmethod
-    def spreads(pair: str, since=None) -> dict:
-        """Get recent bid/ask spreads for a pair.
-
-        Returns raw Kraken response (dict with a data-bearing key plus a 'last' cursor),
-        or {"error": ...} on failure. Callers should use the 'last' cursor to
-        incrementally fetch only new rows on subsequent polls.
-        """
-        p = KrakenCLI._resolve_pair(pair)
-        args = ["spreads", p]
-        if since is not None:
-            args.extend(["--since", str(since)])
         return KrakenCLI._run(args)
 
     @staticmethod
@@ -425,36 +395,6 @@ class KrakenCLI:
         return KrakenCLI._run(args)
 
     @staticmethod
-    def order_amend(txid, limit_price=None, order_qty=None,
-                    post_only: bool = True, pair: str = None) -> dict:
-        """Amend a live limit order in place (preserves queue priority and txid).
-
-        At least one of limit_price / order_qty must be provided, and txid must
-        be non-empty. post_only rejects the amend if the new price would cross
-        the book — safer than a silent taker flip.
-
-        HF-001: pair is an optional arg used ONLY for price precision rounding
-        via PRICE_DECIMALS. If omitted, falls back to 8 decimals (unsafe for
-        low-precision pairs like SOL/USDC which accept only 2). Any caller that
-        computes a derived limit_price MUST pass pair to get correct rounding.
-        """
-        if txid is None or txid == "":
-            return {"error": "order_amend requires txid"}
-        if limit_price is None and order_qty is None:
-            return {"error": "order_amend requires limit_price or order_qty"}
-        args = ["order", "amend", "--txid", str(txid)]
-        if limit_price is not None:
-            if pair:
-                args.extend(["--limit-price", KrakenCLI._format_price(pair, limit_price)])
-            else:
-                args.extend(["--limit-price", f"{float(limit_price):.8f}"])
-        if order_qty is not None:
-            args.extend(["--order-qty", f"{float(order_qty):.8f}"])
-        if post_only:
-            args.append("--post-only")
-        return KrakenCLI._run(args)
-
-    @staticmethod
     def query_orders(*txids, userref: int = None, trades: bool = False) -> dict:
         """Query specific orders by txid or userref.
 
@@ -478,24 +418,6 @@ class KrakenCLI:
         """
         args = ["order", "cancel"]
         args.extend([str(t) for t in txids])
-        args.append("--yes")
-        return KrakenCLI._run(args)
-
-    @staticmethod
-    def order_batch(json_file: str, pair: str = None, validate: bool = False) -> dict:
-        """Submit batch orders from a JSON file (2–15 orders, single pair).
-
-        The JSON file should contain an array of order objects. Each order
-        must specify side, order_type, volume, and optionally price/oflags.
-        All orders in a batch must be for the same pair.
-
-        Returns Kraken response with order results, or {"error": "..."}.
-        """
-        args = ["order", "batch", json_file]
-        if pair:
-            args.extend(["--pair", KrakenCLI._resolve_pair(pair)])
-        if validate:
-            args.append("--validate")
         args.append("--yes")
         return KrakenCLI._run(args)
 
@@ -528,10 +450,6 @@ class KrakenCLI:
         """Get paper trading balance."""
         return KrakenCLI._run(["paper", "balance"])
 
-    @staticmethod
-    def paper_positions() -> dict:
-        """Get paper trading positions."""
-        return KrakenCLI._run(["paper", "positions"])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1446,6 +1364,38 @@ class FakeExecutionStream(ExecutionStream):
         self._fake_healthy = value
 
 
+class FakeTickerStream(TickerStream):
+    """Test double for TickerStream — no subprocess, returns injected data."""
+
+    def __init__(self, pairs, **kw):
+        super().__init__(pairs=pairs, paper=True)
+        self._healthy = True
+
+    def start(self):
+        return True
+
+    def stop(self):
+        pass
+
+    @property
+    def healthy(self):
+        return self._healthy
+
+    def health_status(self):
+        return (self._healthy, "fake" if self._healthy else "fake_unhealthy")
+
+    def ensure_healthy(self):
+        pass
+
+    def set_healthy(self, h):
+        self._healthy = h
+
+    def inject(self, pair, data):
+        """Inject ticker data for a pair (bypasses WS symbol mapping)."""
+        with self._lock:
+            self._latest[pair] = data
+
+
 # ═══════════════════════════════════════════════════════════════
 # HYDRA AGENT (Main Loop)
 # ═══════════════════════════════════════════════════════════════
@@ -1461,7 +1411,7 @@ class HydraAgent:
     CROSS_PAIR = "SOL/XBT"          # Opportunistic regime-driven swaps
     BTC_PAIR = "XBT/USDC"           # For BTC/USDC when we can afford it
     ORDER_JOURNAL_CAP = 2000        # Bound in-memory order journal
-    SNAPSHOT_EVERY_N_TICKS = 12     # ~1h at 5-min candles
+    SNAPSHOT_EVERY_N_TICKS = 120    # ~1h at 30s ticks
 
     def __init__(
         self,
@@ -1488,7 +1438,6 @@ class HydraAgent:
         self.start_time = None
         self.order_journal: List[Dict[str, Any]] = []
         self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
-        self._kraken_lock = threading.Lock()  # Serialize Kraken API calls across threads
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
         # Monotonic client tag seeded from wall-clock to avoid collisions
         # across restarts; flows into Kraken as --userref and comes back on
@@ -1576,11 +1525,6 @@ class HydraAgent:
         # Shape: {"volume_30d_usd": float|None, "pair_fees": {pair: {"maker_pct","taker_pct"}}}
         self._fee_tier_cache: dict = {}
         self._fee_tier_fetched_at: float = 0.0
-
-        # Spread history — diagnostic rolling window per pair, polled every 5 ticks.
-        # Not persisted in snapshot; re-fills cheaply on restart.
-        self._spread_history: Dict[str, list] = {pair: [] for pair in pairs}
-        self._spread_last_cursor: Dict[str, object] = {pair: None for pair in pairs}
 
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
@@ -1940,14 +1884,9 @@ class HydraAgent:
                     time.sleep(2)  # Rate limit
 
                 # Phase 1: Fetch data and run all engines (regimes, signals, positions)
-                # When candle stream is healthy, _fetch_and_tick uses WS data
-                # (no REST call) so we can skip the rate-limit sleep.
-                _candle_ws_ok = self.candle_stream.healthy
                 engine_states = {}
                 for pair in self.pairs:
                     engine_states[pair] = self._fetch_and_tick(pair)
-                    if not _candle_ws_ok:
-                        time.sleep(2)  # Rate limit after REST OHLC fetch
 
                 # Capture engine's original signal before any external modifiers
                 original_signals = {}
@@ -1988,16 +1927,11 @@ class HydraAgent:
                         original_signals[pair]["confidence"] = state["signal"]["confidence"]
 
                 # Phase 1.75: Order book intelligence
-                # Prefer WS book stream (no API call); fall back to REST depth.
-                _book_ws_ok = self.book_stream.healthy
                 for pair in self.pairs:
                     state = engine_states.get(pair)
                     if not state:
                         continue
-                    depth = self.book_stream.latest_book(pair) if _book_ws_ok else None
-                    if depth is None:
-                        time.sleep(2)  # Rate limit (REST fallback)
-                        depth = KrakenCLI.depth(pair, count=10)
+                    depth = self.book_stream.latest_book(pair)
                     if isinstance(depth, dict) and "error" not in depth:
                         signal_action = state["signal"].get("action", "HOLD")
                         book_analysis = OrderBookAnalyzer.analyze(depth, signal_action)
@@ -2013,20 +1947,6 @@ class HydraAgent:
                                   f"(mod {book_analysis['confidence_modifier']:+.2f})"
                                   f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
                                   f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
-
-                # Phase 1.8: Spread history diagnostic (polled every 5 ticks, attached every tick)
-                # Purely observational — does NOT influence signal confidence or sizing.
-                if tick % 5 == 0:
-                    for pair in self.pairs:
-                        time.sleep(2)  # Rate limit
-                        sp = KrakenCLI.spreads(pair, since=self._spread_last_cursor.get(pair))
-                        self._record_spreads(pair, sp)
-                # Attach the latest 60-row cached window to each pair's state every tick
-                # (engine.tick() rebuilds state dicts, so we must re-attach even on non-poll ticks)
-                for pair in self.pairs:
-                    state = engine_states.get(pair)
-                    if state is not None:
-                        state["spread_history"] = list(self._spread_history.get(pair, []))[-60:]
 
                 # ── Total modifier cap ──────────────────────────────────
                 # External modifiers (cross-pair + order book) can reduce confidence without limit
@@ -2291,22 +2211,9 @@ class HydraAgent:
             candle_ingested = True
 
         if not candle_ingested:
-            # REST fallback — fetch latest candle via CLI
-            candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
-            if candles:
-                engine.ingest_candle(candles[-1])
-                candle_ingested = True
-            else:
-                # Last resort: ticker → synthetic candle
-                ticker = KrakenCLI.ticker(pair)
-                if "price" in ticker:
-                    p = ticker["price"]
-                    interval_secs = self.candle_interval * 60
-                    aligned_ts = (int(time.time()) // interval_secs) * interval_secs
-                    engine.ingest_candle({
-                        "open": p, "high": p, "low": p, "close": p, "volume": 0,
-                        "timestamp": aligned_ts,
-                    })
+            # CandleStream unavailable — skip tick for this pair.
+            # Engine retains previous candle data from warmup / prior ticks.
+            return None
 
         # Snapshot position before tick so we can rollback if exchange order fails.
         # When generate_only=True (brain active), execute_signal happens later and
@@ -2336,17 +2243,7 @@ class HydraAgent:
 
         # Fetch spread data for risk assessment. Prefer WS ticker (no API call).
         try:
-            ws_tick = (
-                self.ticker_stream.latest_ticker(pair)
-                if self.ticker_stream.healthy
-                else None
-            )
-            if ws_tick and "bid" in ws_tick:
-                ticker = ws_tick
-            else:
-                with self._kraken_lock:
-                    time.sleep(2)  # Rate limit
-                    ticker = KrakenCLI.ticker(pair)
+            ticker = self.ticker_stream.latest_ticker(pair) or {}
             if "error" not in ticker and "bid" in ticker:
                 bid, ask = ticker["bid"], ticker["ask"]
                 mid = (bid + ask) / 2
@@ -2520,21 +2417,12 @@ class HydraAgent:
         entry = self._build_journal_entry(pair, trade, state)
         pre_trade_snap = state.get("_pre_trade_snapshot") if isinstance(state, dict) else None
 
-        # ─── Ticker fetch (prefer WS stream, REST fallback) ───
-        ws_tick = (
-            self.ticker_stream.latest_ticker(pair)
-            if self.ticker_stream.healthy
-            else None
-        )
-        if ws_tick and "bid" in ws_tick:
-            ticker = ws_tick
-        else:
-            time.sleep(2)
-            ticker = KrakenCLI.ticker(pair)
-        if "error" in ticker or "bid" not in ticker:
-            print(f"  [TRADE] Cannot fetch ticker for {pair}, skipping")
+        # ─── Ticker fetch (WS stream only — refuse to trade without live price) ───
+        ticker = self.ticker_stream.latest_ticker(pair) if self.ticker_stream.healthy else None
+        if not ticker or "bid" not in ticker:
+            print(f"  [TRADE] TickerStream has no bid/ask for {pair} — refusing to trade")
             self._finalize_failed_entry(
-                entry, terminal_reason=f"ticker_failed:{ticker.get('error', 'no bid/ask')}",
+                entry, terminal_reason="ticker_stream_unavailable",
             )
             return False
 
@@ -2556,16 +2444,7 @@ class HydraAgent:
             return False
 
         # ─── Re-fetch ticker (price may have drifted during validate) ───
-        ws_tick2 = (
-            self.ticker_stream.latest_ticker(pair)
-            if self.ticker_stream.healthy
-            else None
-        )
-        if ws_tick2 and "bid" in ws_tick2:
-            fresh_ticker = ws_tick2
-        else:
-            time.sleep(2)
-            fresh_ticker = KrakenCLI.ticker(pair)
+        fresh_ticker = self.ticker_stream.latest_ticker(pair) or {}
         if "error" not in fresh_ticker and "bid" in fresh_ticker:
             limit_price = fresh_ticker["bid"] if action == "buy" else fresh_ticker["ask"]
             entry["intent"]["limit_price"] = limit_price
@@ -2816,97 +2695,6 @@ class HydraAgent:
             print(f"  [HYDRA] Stale PLACED reconciliation: {', '.join(parts)}")
         else:
             print(f"  [HYDRA] Stale PLACED reconciliation: all {len(stale)} entries still pending on exchange or query failed")
-
-    def _reconcile_pnl(self) -> Dict[str, Any]:
-        """Compare journal fill data against Kraken trades-history to detect
-        P&L discrepancies. Returns a summary dict with match/mismatch counts.
-
-        Only checks terminal journal entries (FILLED/PARTIALLY_FILLED) that
-        have a valid order_id. Compares vol_exec and fee_quote against
-        Kraken's authoritative trade records.
-        """
-        # Collect terminal journal entries with order IDs
-        journal_fills: Dict[str, dict] = {}  # order_id → journal entry
-        for entry in self.order_journal:
-            lc = entry.get("lifecycle", {})
-            if lc.get("state") not in ("FILLED", "PARTIALLY_FILLED"):
-                continue
-            oid = entry.get("order_ref", {}).get("order_id")
-            if not oid or oid == "unknown":
-                continue
-            journal_fills[oid] = entry
-
-        if not journal_fills:
-            return {"checked": 0, "matched": 0, "mismatched": 0, "missing": 0, "details": []}
-
-        # Fetch trades-history from Kraken
-        time.sleep(2)  # Rate limit
-        resp = KrakenCLI.trades_history()
-        if not isinstance(resp, dict) or "error" in resp:
-            print(f"  [PNL] trades-history query failed: {resp}")
-            return {"checked": 0, "matched": 0, "mismatched": 0, "missing": 0,
-                    "details": [], "error": str(resp)}
-
-        # Build order_id → aggregated fills from Kraken trades
-        kraken_fills: Dict[str, dict] = {}  # ordertxid → {vol, cost, fee}
-        trades = resp.get("trades", {})
-        for _tid, trade in trades.items():
-            if not isinstance(trade, dict):
-                continue
-            ordertxid = trade.get("ordertxid", "")
-            if ordertxid not in journal_fills:
-                continue
-            if ordertxid not in kraken_fills:
-                kraken_fills[ordertxid] = {"vol": 0.0, "cost": 0.0, "fee": 0.0}
-            kraken_fills[ordertxid]["vol"] += float(trade.get("vol", 0))
-            kraken_fills[ordertxid]["cost"] += float(trade.get("cost", 0))
-            kraken_fills[ordertxid]["fee"] += float(trade.get("fee", 0))
-
-        # Compare
-        matched = 0
-        mismatched = 0
-        missing = 0
-        details = []
-        for oid, entry in journal_fills.items():
-            lc = entry["lifecycle"]
-            j_vol = lc.get("vol_exec", 0)
-            j_fee = lc.get("fee_quote", 0) or 0
-
-            if oid not in kraken_fills:
-                missing += 1
-                details.append({
-                    "order_id": oid, "status": "missing_from_kraken",
-                    "journal_vol": j_vol, "journal_fee": j_fee,
-                })
-                continue
-
-            k = kraken_fills[oid]
-            vol_match = abs(j_vol - k["vol"]) / max(j_vol, 1e-12) < 0.01
-            fee_match = abs(j_fee - k["fee"]) < 0.01  # absolute tolerance for fees
-
-            if vol_match and fee_match:
-                matched += 1
-            else:
-                mismatched += 1
-                details.append({
-                    "order_id": oid, "status": "mismatch",
-                    "journal_vol": j_vol, "kraken_vol": k["vol"],
-                    "journal_fee": j_fee, "kraken_fee": k["fee"],
-                })
-
-        checked = matched + mismatched + missing
-        summary = {"checked": checked, "matched": matched,
-                   "mismatched": mismatched, "missing": missing, "details": details}
-
-        if mismatched or missing:
-            print(f"  [PNL] Reconciliation: {checked} checked, {matched} matched, "
-                  f"{mismatched} mismatched, {missing} missing from Kraken")
-            for d in details[:5]:
-                print(f"  [PNL]   {d['order_id']}: {d['status']}")
-        else:
-            print(f"  [PNL] Reconciliation: {checked} checked, all matched")
-
-        return summary
 
     def _apply_execution_event(self, event: Dict[str, Any]) -> None:
         """Apply one terminal event from the execution stream to the
@@ -3222,41 +3010,6 @@ class HydraAgent:
             result["pair_fees"][friendly] = {"maker_pct": maker_pct, "taker_pct": taker_pct}
         return result
 
-    def _record_spreads(self, pair: str, response: dict) -> None:
-        """Append new rows from a `kraken spreads` response into the rolling history.
-
-        Updates the 'last' cursor so subsequent polls incrementally fetch only new rows.
-        Silently drops malformed rows and caps the per-pair history at 120 entries.
-        No-ops on error responses (diagnostic, not safety-critical).
-        """
-        if not isinstance(response, dict) or "error" in response:
-            return
-        rows = []
-        for key, val in response.items():
-            if key == "last":
-                try:
-                    self._spread_last_cursor[pair] = int(val)
-                except (TypeError, ValueError):
-                    pass
-                continue
-            if isinstance(val, list) and not rows:
-                rows = val
-        history = self._spread_history.setdefault(pair, [])
-        for row in rows:
-            if not isinstance(row, list) or len(row) < 3:
-                continue
-            try:
-                ts = float(row[0])
-                bid = float(row[1])
-                ask = float(row[2])
-            except (TypeError, ValueError):
-                continue
-            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
-            spread_bps = round((ask - bid) / mid * 10000, 2) if mid > 0 else 0.0
-            history.append({"ts": ts, "bid": bid, "ask": ask, "spread_bps": spread_bps})
-        if len(history) > 120:
-            self._spread_history[pair] = history[-120:]
-
     def _compute_balance_usd(self, balance: dict) -> dict:
         """Convert raw Kraken balance to USD breakdown with staked asset handling.
 
@@ -3314,10 +3067,8 @@ class HydraAgent:
         )
         if ws_bal:
             self._cached_balance = ws_bal
-        elif tick % 5 == 1 or not hasattr(self, '_cached_balance'):
-            bal = KrakenCLI.paper_balance() if self.paper else KrakenCLI.balance()
-            self._cached_balance = bal if "error" not in bal else getattr(self, '_cached_balance', {})
-            time.sleep(2)  # Rate limit
+        else:
+            pass  # Use startup-cached balance until WS reconnects
         bal = getattr(self, '_cached_balance', {})
 
         # Fee tier refresh — at most once per hour, live mode only (paper has no fee data).
@@ -3596,7 +3347,7 @@ def main():
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,
-                        help="Seconds between ticks (default: auto from candle interval)")
+                        help="Seconds between ticks (default: 30)")
     parser.add_argument("--candle-interval", type=int, default=5, choices=[1, 5, 15, 30, 60],
                         help="OHLC candle period in minutes (default: 5)")
     parser.add_argument("--duration", type=int, default=0,
@@ -3617,16 +3368,10 @@ def main():
     pairs = [p.strip() for p in args.pairs.split(",")]
     candle_interval = args.candle_interval
 
-    # Auto-derive tick interval: candle period + 5s buffer for candle close
-    auto_interval = candle_interval * 60 + 5
     if args.interval is not None:
-        if args.interval < candle_interval * 60:
-            print(f"  [WARN] --interval {args.interval}s < candle period {candle_interval}m. Using {auto_interval}s.")
-            tick_interval = auto_interval
-        else:
-            tick_interval = args.interval
+        tick_interval = args.interval
     else:
-        tick_interval = auto_interval
+        tick_interval = 30
 
     if args.paper:
         print(f"\n  HYDRA — Paper trading mode. No real money at risk.")

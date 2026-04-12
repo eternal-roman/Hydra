@@ -1,9 +1,9 @@
 """
 HYDRA KrakenCLI Wrapper Test Suite
 Validates argument construction, error passthrough, and response parsing for
-the volume/spreads/order_amend wrappers, plus the fee-tier extraction and
-spread-recording helpers on HydraAgent. No subprocess calls are made — all
-tests monkey-patch KrakenCLI._run with an in-memory stub.
+the volume wrappers, plus the fee-tier extraction helper on HydraAgent. No
+subprocess calls are made — all tests monkey-patch KrakenCLI._run with an
+in-memory stub.
 """
 
 import sys
@@ -97,43 +97,6 @@ class TestVolumeArgsAndParsing:
 
 
 # ═══════════════════════════════════════════════════════════════
-# TEST: KrakenCLI.spreads — argument construction & passthrough
-# ═══════════════════════════════════════════════════════════════
-
-class TestSpreadsArgsAndParsing:
-    def test_spreads_requires_pair(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC"))
-        assert stub.calls[0][0] == "spreads"
-        assert "SOL/USDC" in stub.calls[0]
-
-    def test_spreads_resolves_pair(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/XBT"))
-        assert stub.calls == [["spreads", "SOLXBT"]]
-
-    def test_spreads_without_since_omits_flag(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC"))
-        assert "--since" not in stub.calls[0]
-
-    def test_spreads_with_since_includes_flag(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC", since=1700000000))
-        assert stub.calls == [["spreads", "SOL/USDC", "--since", "1700000000"]]
-
-    def test_spreads_returns_passthrough(self):
-        payload = {"SOLUSDC": [[1700000000, "130.1", "130.2"]], "last": 1700000001}
-        result, _ = _with_stub(payload, lambda: KrakenCLI.spreads("SOL/USDC"))
-        assert result == payload
-
-    def test_spreads_returns_error_dict(self):
-        err = {"error": "EGeneral:Temporary lockout"}
-        result, _ = _with_stub(err, lambda: KrakenCLI.spreads("SOL/USDC"))
-        assert result == err
-
-    def test_spreads_negative_since_still_stringified(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.spreads("SOL/USDC", since=-1))
-        assert stub.calls == [["spreads", "SOL/USDC", "--since", "-1"]]
-
-
-# ═══════════════════════════════════════════════════════════════
 # TEST: HF-001 — KrakenCLI._format_price pair-aware precision
 # ═══════════════════════════════════════════════════════════════
 
@@ -200,99 +163,6 @@ class TestPriceFormat:
         price_idx = call.index("--price")
         assert call[price_idx + 1] == "73031.90000000"
 
-    def test_order_amend_with_pair_uses_rounded_price(self):
-        _, stub = _with_stub({"txid": ["ABC"]},
-                              lambda: KrakenCLI.order_amend("TX1", limit_price=80.4745, pair="SOL/USDC"))
-        call = stub.calls[0]
-        price_idx = call.index("--limit-price")
-        assert call[price_idx + 1] == "80.47000000"
-
-    def test_order_amend_without_pair_falls_back(self):
-        # When pair is not provided, old .8f behavior kicks in (caller's responsibility)
-        _, stub = _with_stub({"txid": ["ABC"]},
-                              lambda: KrakenCLI.order_amend("TX1", limit_price=100.0))
-        call = stub.calls[0]
-        price_idx = call.index("--limit-price")
-        assert call[price_idx + 1] == "100.00000000"
-
-
-# ═══════════════════════════════════════════════════════════════
-# TEST: KrakenCLI.order_amend — argument construction
-# ═══════════════════════════════════════════════════════════════
-
-class TestOrderAmendArgs:
-    def test_amend_with_price_only(self):
-        _, stub = _with_stub({"result": "ok"}, lambda: KrakenCLI.order_amend("TX123", limit_price=100.0))
-        assert stub.calls == [["order", "amend", "--txid", "TX123",
-                                "--limit-price", "100.00000000", "--post-only"]]
-
-    def test_amend_with_qty_only(self):
-        _, stub = _with_stub({"result": "ok"}, lambda: KrakenCLI.order_amend("TX123", order_qty=0.5))
-        assert stub.calls == [["order", "amend", "--txid", "TX123",
-                                "--order-qty", "0.50000000", "--post-only"]]
-
-    def test_amend_with_price_and_qty(self):
-        _, stub = _with_stub({"result": "ok"},
-                              lambda: KrakenCLI.order_amend("TX123", limit_price=77.5, order_qty=0.1))
-        assert stub.calls == [["order", "amend", "--txid", "TX123",
-                                "--limit-price", "77.50000000",
-                                "--order-qty", "0.10000000", "--post-only"]]
-
-    def test_amend_post_only_default_true(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=1.0))
-        assert "--post-only" in stub.calls[0]
-
-    def test_amend_post_only_false_omits_flag(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=1.0, post_only=False))
-        assert "--post-only" not in stub.calls[0]
-
-    def test_amend_formats_price_8dp(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", limit_price=0.000123456789))
-        # Truncated/rounded to 8 decimal places
-        flat = " ".join(stub.calls[0])
-        assert "0.00012346" in flat
-
-    def test_amend_formats_qty_8dp(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend("TX1", order_qty=0.123456789))
-        flat = " ".join(stub.calls[0])
-        assert "0.12345679" in flat
-
-    def test_amend_missing_both_returns_error_without_subprocess(self):
-        stub = _StubRun({"result": "should not be called"})
-        stub.install()
-        try:
-            result = KrakenCLI.order_amend("TX1")
-        finally:
-            stub.restore()
-        assert isinstance(result, dict)
-        assert "error" in result
-        assert stub.calls == []  # _run was NOT called
-
-    def test_amend_none_txid_returns_error_without_subprocess(self):
-        stub = _StubRun({"result": "should not be called"})
-        stub.install()
-        try:
-            result = KrakenCLI.order_amend(None, limit_price=100.0)
-        finally:
-            stub.restore()
-        assert "error" in result
-        assert "txid" in result["error"].lower()
-        assert stub.calls == []
-
-    def test_amend_empty_string_txid_returns_error_without_subprocess(self):
-        stub = _StubRun({"result": "should not be called"})
-        stub.install()
-        try:
-            result = KrakenCLI.order_amend("", limit_price=100.0)
-        finally:
-            stub.restore()
-        assert "error" in result
-        assert "txid" in result["error"].lower()
-        assert stub.calls == []
-
-    def test_amend_numeric_txid_coerced_to_str(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.order_amend(987654, limit_price=50.0))
-        assert stub.calls[0][3] == "987654"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -346,38 +216,6 @@ class TestCancelOrder:
     def test_cancel_order_error_passthrough(self):
         err = {"error": "EOrder:Unknown order"}
         result, _ = _with_stub(err, lambda: KrakenCLI.cancel_order("FAKE"))
-        assert result == err
-
-
-# ═══════════════════════════════════════════════════════════════
-# TEST: KrakenCLI.order_batch — argument construction & passthrough
-# ═══════════════════════════════════════════════════════════════
-
-class TestOrderBatch:
-    def test_order_batch_basic(self):
-        _, stub = _with_stub({"results": []},
-                              lambda: KrakenCLI.order_batch("/tmp/orders.json"))
-        assert stub.calls == [["order", "batch", "/tmp/orders.json", "--yes"]]
-
-    def test_order_batch_with_pair(self):
-        _, stub = _with_stub({},
-                              lambda: KrakenCLI.order_batch("/tmp/o.json", pair="SOL/USDC"))
-        assert stub.calls == [["order", "batch", "/tmp/o.json", "--pair", "SOL/USDC", "--yes"]]
-
-    def test_order_batch_validate(self):
-        _, stub = _with_stub({},
-                              lambda: KrakenCLI.order_batch("/tmp/o.json", validate=True))
-        assert stub.calls == [["order", "batch", "/tmp/o.json", "--validate", "--yes"]]
-
-    def test_order_batch_resolves_pair(self):
-        _, stub = _with_stub({},
-                              lambda: KrakenCLI.order_batch("/tmp/o.json", pair="XBT/USDC"))
-        assert "--pair" in stub.calls[0]
-        assert "XBTUSDC" in stub.calls[0]
-
-    def test_order_batch_error_passthrough(self):
-        err = {"error": "EGeneral:Invalid arguments"}
-        result, _ = _with_stub(err, lambda: KrakenCLI.order_batch("/tmp/o.json"))
         assert result == err
 
 
@@ -539,103 +377,6 @@ class TestFeeTierExtraction:
 
 
 # ═══════════════════════════════════════════════════════════════
-# TEST: HydraAgent._record_spreads — rolling history
-# ═══════════════════════════════════════════════════════════════
-
-class TestRecordSpreads:
-    def _make_agent(self):
-        agent = object.__new__(HydraAgent)
-        agent._spread_history = {"SOL/USDC": [], "XBT/USDC": []}
-        agent._spread_last_cursor = {"SOL/USDC": None, "XBT/USDC": None}
-        return agent
-
-    def test_record_spreads_error_response_noop(self):
-        agent = self._make_agent()
-        agent._record_spreads("SOL/USDC", {"error": "boom"})
-        assert agent._spread_history["SOL/USDC"] == []
-        assert agent._spread_last_cursor["SOL/USDC"] is None
-
-    def test_record_spreads_non_dict_noop(self):
-        agent = self._make_agent()
-        agent._record_spreads("SOL/USDC", None)
-        assert agent._spread_history["SOL/USDC"] == []
-
-    def test_record_spreads_appends_rows(self):
-        agent = self._make_agent()
-        response = {
-            "SOLUSDC": [
-                [1700000000, "130.10", "130.20"],
-                [1700000005, "130.15", "130.25"],
-            ],
-            "last": 1700000005,
-        }
-        agent._record_spreads("SOL/USDC", response)
-        assert len(agent._spread_history["SOL/USDC"]) == 2
-
-    def test_record_spreads_updates_cursor(self):
-        agent = self._make_agent()
-        response = {"SOLUSDC": [[1700000000, "130.10", "130.20"]], "last": 1700000500}
-        agent._record_spreads("SOL/USDC", response)
-        assert agent._spread_last_cursor["SOL/USDC"] == 1700000500
-
-    def test_record_spreads_computes_spread_bps(self):
-        agent = self._make_agent()
-        response = {"SOLUSDC": [[1700000000, "100.00", "100.10"]], "last": 1}
-        agent._record_spreads("SOL/USDC", response)
-        row = agent._spread_history["SOL/USDC"][0]
-        # (100.10 - 100.00) / 100.05 * 10000 = ~9.995 bps
-        assert abs(row["spread_bps"] - 9.995) < 0.01
-        assert row["bid"] == 100.00
-        assert row["ask"] == 100.10
-
-    def test_record_spreads_bounds_to_120_entries(self):
-        agent = self._make_agent()
-        # Pre-fill with 115 entries, then push 10 more → should cap at 120
-        agent._spread_history["SOL/USDC"] = [
-            {"ts": float(i), "bid": 1.0, "ask": 1.01, "spread_bps": 99.5} for i in range(115)
-        ]
-        response = {
-            "SOLUSDC": [[1700000000 + i, "1.00", "1.01"] for i in range(10)],
-            "last": 1700000010,
-        }
-        agent._record_spreads("SOL/USDC", response)
-        assert len(agent._spread_history["SOL/USDC"]) == 120
-
-    def test_record_spreads_skips_malformed_rows(self):
-        agent = self._make_agent()
-        response = {
-            "SOLUSDC": [
-                [1700000000, "130.10", "130.20"],   # good
-                "not-a-list",                         # bad
-                [1700000005],                         # too short
-                [1700000006, "bad", "bad"],           # unparseable floats
-                [1700000007, "131.00", "131.05"],   # good
-            ],
-            "last": 1700000007,
-        }
-        agent._record_spreads("SOL/USDC", response)
-        assert len(agent._spread_history["SOL/USDC"]) == 2
-
-    def test_record_spreads_handles_missing_data_key(self):
-        agent = self._make_agent()
-        agent._record_spreads("SOL/USDC", {"last": 1700000000})  # only 'last', no list
-        assert agent._spread_history["SOL/USDC"] == []
-        assert agent._spread_last_cursor["SOL/USDC"] == 1700000000
-
-    def test_record_spreads_malformed_cursor_silently_ignored(self):
-        agent = self._make_agent()
-        agent._record_spreads("SOL/USDC", {"SOLUSDC": [], "last": "garbage"})
-        assert agent._spread_last_cursor["SOL/USDC"] is None
-
-    def test_record_spreads_zero_prices_yield_zero_bps(self):
-        agent = self._make_agent()
-        response = {"SOLUSDC": [[1700000000, "0", "0"]], "last": 1}
-        agent._record_spreads("SOL/USDC", response)
-        row = agent._spread_history["SOL/USDC"][0]
-        assert row["spread_bps"] == 0.0
-
-
-# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -647,17 +388,13 @@ def run_tests():
 
     test_classes = [
         TestVolumeArgsAndParsing,
-        TestSpreadsArgsAndParsing,
         TestPriceFormat,
-        TestOrderAmendArgs,
         TestQueryOrders,
         TestCancelOrder,
-        TestOrderBatch,
         TestTradesHistory,
         TestAssetPairs,
         TestSystemStatus,
         TestFeeTierExtraction,
-        TestRecordSpreads,
     ]
 
     for cls in test_classes:
