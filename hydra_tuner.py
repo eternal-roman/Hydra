@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-HYDRA Tuner — Self-Tuning Parameters via Bayesian Updating
+HYDRA Tuner — Self-Tuning Parameters via Exponential Smoothing
 
 Tracks which parameter values led to winning vs losing trades and
-shifts thresholds toward profitable values. Conservative 10% shift
-per update cycle prevents overfitting.
+shifts thresholds toward profitable values (and away from losing values).
+Conservative shift per update cycle prevents overfitting.
 
 Usage:
     from hydra_tuner import ParameterTracker
@@ -107,13 +107,14 @@ class ParameterTracker:
         })
 
     def update(self) -> Dict[str, float]:
-        """Run Bayesian update if enough observations have accumulated.
+        """Run exponential-smoothing update if enough observations accumulated.
 
         For each parameter:
         1. Split observations into win/loss buckets
-        2. Compute mean parameter value for wins
-        3. Shift current value 10% toward the winning mean
-        4. Clamp to hard bounds
+        2. Compute mean parameter value for wins (and losses if available)
+        3. Shift current value toward the winning mean
+        4. Shift away from the losing mean (at half rate) when loss data exists
+        5. Clamp to hard bounds
 
         Returns:
             Updated parameter dict (unchanged if < MIN_OBSERVATIONS)
@@ -145,8 +146,16 @@ class ParameterTracker:
             win_mean = sum(win_values) / len(win_values)
             old_val = self.current_params[param_name]
 
-            # Shift 10% toward winning mean
+            # Shift toward winning mean
             new_val = old_val + SHIFT_RATE * (win_mean - old_val)
+
+            # Also shift away from losing mean (at half rate) when loss data exists
+            loss_values = [o["params"][param_name]
+                           for o in losses if param_name in o.get("params", {})]
+            if loss_values:
+                loss_mean = sum(loss_values) / len(loss_values)
+                # Push away from loss mean at half the attraction rate
+                new_val += (SHIFT_RATE * 0.5) * (new_val - loss_mean)
 
             # Reject non-finite intermediates (defensive: a corrupted observation
             # or hand-edited params file could introduce NaN/Inf, which would

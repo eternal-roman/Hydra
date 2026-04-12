@@ -107,6 +107,16 @@ class TestTickerStreamDispatch:
         })
         assert ts._last_heartbeat > time.monotonic() - 1.0
 
+    def test_btc_usdc_maps_to_xbt_usdc(self):
+        ts = _make_stream()
+        ts._on_message({
+            "channel": "ticker", "type": "snapshot",
+            "data": [{"symbol": "BTC/USDC", "bid": 95000.0, "ask": 95100.0, "last": 95050.0}],
+        })
+        ticker = ts.latest_ticker("XBT/USDC")
+        assert ticker is not None
+        assert ticker["bid"] == 95000.0
+
 
 class TestTickerStreamBuildCmd:
 

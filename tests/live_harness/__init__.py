@@ -1,7 +1,7 @@
 """Hydra live-execution test harness.
 
-Drives HydraAgent._execute_trade directly across happy, failure, edge,
-schema, rollback, and historical regression scenarios. Runs in four modes:
+Drives HydraAgent._place_order directly across happy, failure, edge,
+schema, rollback, WS lifecycle, and historical regression scenarios. Runs in four modes:
 
 - smoke:   imports + construction only, <5s, zero API, zero cost
 - mock:    every mockable scenario via monkey-patched KrakenCLI, ~30s, zero cost

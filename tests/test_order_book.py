@@ -367,53 +367,78 @@ class TestEdgeCases:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 9. TOTAL MODIFIER CAP (agent-level logic, tested as pure math)
+# 9. TOTAL MODIFIER CAP — exercises OrderBookAnalyzer.analyze()
+#    with extreme order books to verify MAX_BOOK_MODIFIER cap,
+#    plus the agent-level clamp formula: max(0.0, min(1.0, conf + mod))
 # ═══════════════════════════════════════════════════════════════
 
 class TestTotalModifierCap:
-    def test_total_cap_blocks_stacking(self):
-        """Cross-pair +0.10 and book +0.07 on a 0.60 signal should cap at 0.75."""
-        original = 0.60
-        after_cross_pair = 0.70  # +0.10 from coordinator
-        after_book = 0.77        # +0.07 from order book
-        max_boost = 0.15
-        capped = min(after_book, original + max_boost)
-        assert capped == 0.75
+    def test_extreme_bullish_buy_capped_at_max(self):
+        """Massively lopsided bid book on BUY must not exceed MAX_BOOK_MODIFIER (+0.07)."""
+        depth = make_depth(
+            [100, 99, 98, 97, 96], [10000, 10000, 10000, 10000, 10000],
+            [101, 102, 103, 104, 105], [1, 1, 1, 1, 1],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        assert result["confidence_modifier"] > 0
+        assert result["confidence_modifier"] <= OrderBookAnalyzer.MAX_BOOK_MODIFIER
 
-    def test_total_cap_does_not_limit_reductions(self):
-        """Negative modifiers should NOT be capped — let both modifiers kill weak signals."""
-        original = 0.60
-        after_book = 0.43        # -0.17 total from cross-pair + book
-        max_boost = 0.15
-        # Cap only applies to boosts, not reductions
-        final = after_book  # no upward clamping
-        assert final == 0.43
-        assert final < original - max_boost  # this is allowed
+    def test_extreme_bearish_buy_capped_at_neg_max(self):
+        """Massively lopsided ask book on BUY must not go below -MAX_BOOK_MODIFIER (-0.07)."""
+        depth = make_depth(
+            [100, 99, 98, 97, 96], [1, 1, 1, 1, 1],
+            [101, 102, 103, 104, 105], [10000, 10000, 10000, 10000, 10000],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        assert result["confidence_modifier"] < 0
+        assert result["confidence_modifier"] >= -OrderBookAnalyzer.MAX_BOOK_MODIFIER
 
-    def test_direction_change_resets_baseline(self):
-        """When coordinator changes signal direction, cap baseline resets."""
-        coord_conf = 0.80    # coordinator overrode to SELL at 0.80
-        book_boost = 0.07    # book confirms SELL
-        final = coord_conf + book_boost  # 0.87
-        # Baseline reset to 0.80 after direction change
-        # Cap: 0.80 + 0.15 = 0.95
-        capped = min(final, coord_conf + 0.15)
-        assert round(capped, 4) == 0.87  # not capped because 0.87 < 0.95
+    def test_extreme_bearish_sell_capped_at_max(self):
+        """Massively lopsided ask book on SELL must not exceed MAX_BOOK_MODIFIER (+0.07)."""
+        depth = make_depth(
+            [100, 99, 98, 97, 96], [1, 1, 1, 1, 1],
+            [101, 102, 103, 104, 105], [10000, 10000, 10000, 10000, 10000],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="SELL")
+        assert result["confidence_modifier"] > 0
+        assert result["confidence_modifier"] <= OrderBookAnalyzer.MAX_BOOK_MODIFIER
 
-    def test_cap_engages_on_large_boost(self):
-        """When cross-pair boosts +0.15 and book boosts +0.07, cap should engage."""
-        original = 0.55
-        after_book = 0.77        # +0.22 total from cross-pair + book
-        max_boost = 0.15
-        capped = min(after_book, original + max_boost)
-        assert round(capped, 4) == 0.70  # capped back to original + 0.15
+    def test_agent_clamp_floor_at_zero(self):
+        """Agent-level clamp: conf + negative modifier must not go below 0.0.
 
-    def test_floor_at_zero(self):
-        """Confidence should never go below 0.0 after negative modifiers."""
-        original = 0.10
-        after_modifiers = -0.05  # modifiers pushed it negative
-        final = max(0.0, after_modifiers)
-        assert final == 0.0
+        This tests the formula from hydra_agent.py line ~2007:
+            new_conf = max(0.0, min(1.0, old_conf + confidence_modifier))
+        We drive the analyzer to produce a real negative modifier and apply
+        the agent formula to a low starting confidence.
+        """
+        depth = make_depth(
+            [100, 99, 98, 97, 96], [1, 1, 1, 1, 1],
+            [101, 102, 103, 104, 105], [10000, 10000, 10000, 10000, 10000],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        mod = result["confidence_modifier"]
+        assert mod < 0  # confirm it's negative
+        # Simulate agent-level clamp with a very low starting confidence
+        old_conf = 0.02
+        new_conf = max(0.0, min(1.0, old_conf + mod))
+        assert new_conf == 0.0
+
+    def test_agent_clamp_ceiling_at_one(self):
+        """Agent-level clamp: conf + positive modifier must not exceed 1.0.
+
+        Same agent formula as above, applied to a high starting confidence.
+        """
+        depth = make_depth(
+            [100, 99, 98, 97, 96], [10000, 10000, 10000, 10000, 10000],
+            [101, 102, 103, 104, 105], [1, 1, 1, 1, 1],
+        )
+        result = OrderBookAnalyzer.analyze(depth, signal_action="BUY")
+        mod = result["confidence_modifier"]
+        assert mod > 0  # confirm it's positive
+        # Simulate agent-level clamp with a near-ceiling starting confidence
+        old_conf = 0.99
+        new_conf = max(0.0, min(1.0, old_conf + mod))
+        assert new_conf == 1.0
 
 
 # ═══════════════════════════════════════════════════════════════

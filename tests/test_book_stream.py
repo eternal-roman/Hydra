@@ -160,6 +160,18 @@ class TestBookStreamDispatch:
         })
         assert bs._last_heartbeat > time.monotonic() - 1.0
 
+    def test_btc_usdc_maps_to_xbt_usdc(self):
+        bs = _make_stream()
+        bs._on_message({
+            "channel": "book", "type": "snapshot",
+            "data": [{"symbol": "BTC/USDC",
+                       "bids": [{"price": 95000.0, "qty": 0.5}],
+                       "asks": [{"price": 95100.0, "qty": 0.5}]}],
+        })
+        book = bs.latest_book("XBT/USDC")
+        assert book is not None
+        assert book["bids"][0][0] == 95000.0
+
 
 class TestBookStreamBuildCmd:
 

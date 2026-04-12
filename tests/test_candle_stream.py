@@ -99,6 +99,7 @@ class TestCandleStreamDispatch:
         cs = _make_stream()
         cs._on_message({"method": "subscribe", "success": True})
         # No crash, no candle stored
+        assert cs.latest_candle("SOL/USDC") is None
 
     def test_non_dict_data_entries_skipped(self):
         cs = _make_stream()
@@ -121,6 +122,17 @@ class TestCandleStreamDispatch:
                        "high": 82.0, "low": 82.0, "volume": 1.0}],
         })
         assert cs._last_heartbeat > time.monotonic() - 1.0
+
+    def test_btc_usdc_maps_to_xbt_usdc(self):
+        cs = _make_stream()
+        cs._on_message({
+            "channel": "ohlc", "type": "snapshot",
+            "data": [{"symbol": "BTC/USDC", "close": 95000.0, "open": 94500.0,
+                       "high": 95500.0, "low": 94000.0, "volume": 10.0}],
+        })
+        candle = cs.latest_candle("XBT/USDC")
+        assert candle is not None
+        assert candle["close"] == 95000.0
 
 
 class TestCandleStreamBuildCmd:

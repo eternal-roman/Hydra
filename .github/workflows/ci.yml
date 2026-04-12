@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
-        run: pip install anthropic openai
+        run: pip install "anthropic>=0.40,<1.0" "openai>=1.50,<2.0"
 
       - name: Run engine test suite
         run: python tests/test_engine.py
@@ -45,6 +45,33 @@ jobs:
       - name: Run ExecutionStream health & restart tests
         run: python tests/test_execution_stream.py
 
+      - name: Run status gate tests
+        run: python tests/test_status_gate.py
+
+      - name: Run pair constants tests
+        run: python tests/test_pair_constants.py
+
+      - name: Run reconciliation tests
+        run: python tests/test_reconciliation.py
+
+      - name: Run resume reconciliation tests
+        run: python tests/test_resume_reconcile.py
+
+      - name: Run CandleStream tests
+        run: python tests/test_candle_stream.py
+
+      - name: Run TickerStream tests
+        run: python tests/test_ticker_stream.py
+
+      - name: Run BalanceStream tests
+        run: python tests/test_balance_stream.py
+
+      - name: Run BookStream tests
+        run: python tests/test_book_stream.py
+
+      - name: Run P&L reconciliation tests
+        run: python tests/test_pnl_reconcile.py
+
       - name: Run live-execution harness (smoke + mock)
         run: |
           python tests/live_harness/harness.py --mode smoke
@@ -58,6 +85,7 @@ jobs:
           python -c "import hydra_engine; print('hydra_engine OK')"
           python -c "import hydra_tuner; print('hydra_tuner OK')"
           python -c "import hydra_brain; print('hydra_brain OK')"
+          python -c "import hydra_agent; print('hydra_agent OK')"
 
   dashboard-build:
     name: Dashboard Build (Node)
