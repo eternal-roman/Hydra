@@ -296,6 +296,106 @@ class TestOrderAmendArgs:
 
 
 # ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.system_status — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.asset_pairs — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.query_orders — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+class TestQueryOrders:
+    def test_query_orders_txids(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.query_orders("TXID1", "TXID2"))
+        assert stub.calls == [["query-orders", "TXID1", "TXID2"]]
+
+    def test_query_orders_userref(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.query_orders(userref=12345))
+        assert stub.calls == [["query-orders", "--userref", "12345"]]
+
+    def test_query_orders_trades_flag(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.query_orders("TX1", trades=True))
+        assert stub.calls == [["query-orders", "TX1", "--trades"]]
+
+    def test_query_orders_combined(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.query_orders("TX1", userref=99, trades=True))
+        assert stub.calls == [["query-orders", "TX1", "--userref", "99", "--trades"]]
+
+    def test_query_orders_error_passthrough(self):
+        err = {"error": "EOrder:Unknown order"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.query_orders("FAKE"))
+        assert result == err
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.cancel_order — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+class TestCancelOrder:
+    def test_cancel_order_single_txid(self):
+        _, stub = _with_stub({"count": 1}, lambda: KrakenCLI.cancel_order("TXID1"))
+        assert stub.calls == [["order", "cancel", "TXID1", "--yes"]]
+
+    def test_cancel_order_multiple_txids(self):
+        _, stub = _with_stub({"count": 2}, lambda: KrakenCLI.cancel_order("TX1", "TX2"))
+        assert stub.calls == [["order", "cancel", "TX1", "TX2", "--yes"]]
+
+    def test_cancel_order_error_passthrough(self):
+        err = {"error": "EOrder:Unknown order"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.cancel_order("FAKE"))
+        assert result == err
+
+
+class TestAssetPairs:
+    def test_asset_pairs_no_filter(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.asset_pairs())
+        assert stub.calls == [["pairs"]]
+
+    def test_asset_pairs_with_pair_list(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.asset_pairs(["SOL/USDC", "SOL/XBT", "XBT/USDC"]))
+        assert stub.calls == [["pairs", "--pair", "SOL/USDC,SOLXBT,XBTUSDC"]]
+
+    def test_asset_pairs_returns_payload(self):
+        payload = {"SOL/USDC": {"pair_decimals": 2, "ordermin": "0.02"}}
+        result, _ = _with_stub(payload, lambda: KrakenCLI.asset_pairs())
+        assert result == payload
+
+    def test_asset_pairs_error_passthrough(self):
+        err = {"error": "EQuery:Unknown asset pair"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.asset_pairs(["FAKE/PAIR"]))
+        assert result == err
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.system_status — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+class TestSystemStatus:
+    def test_system_status_calls_bare_command(self):
+        _, stub = _with_stub({"status": "online", "timestamp": "2026-04-12T20:35:55Z"},
+                              lambda: KrakenCLI.system_status())
+        assert stub.calls == [["status"]]
+
+    def test_system_status_returns_payload(self):
+        payload = {"status": "online", "timestamp": "2026-04-12T20:35:55Z"}
+        result, _ = _with_stub(payload, lambda: KrakenCLI.system_status())
+        assert result == payload
+
+    def test_system_status_maintenance_passthrough(self):
+        payload = {"status": "maintenance", "timestamp": "2026-04-12T21:00:00Z"}
+        result, _ = _with_stub(payload, lambda: KrakenCLI.system_status())
+        assert result["status"] == "maintenance"
+
+    def test_system_status_error_passthrough(self):
+        err = {"error": "Command timed out", "retryable": True}
+        result, _ = _with_stub(err, lambda: KrakenCLI.system_status())
+        assert result == err
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST: HydraAgent._extract_fee_tier — defensive parsing
 # ═══════════════════════════════════════════════════════════════
 
@@ -495,6 +595,10 @@ def run_tests():
         TestSpreadsArgsAndParsing,
         TestPriceFormat,
         TestOrderAmendArgs,
+        TestQueryOrders,
+        TestCancelOrder,
+        TestAssetPairs,
+        TestSystemStatus,
         TestFeeTierExtraction,
         TestRecordSpreads,
     ]

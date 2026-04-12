@@ -164,6 +164,89 @@ class KrakenCLI:
         rounded = round(float(price), decimals)
         return f"{rounded:.8f}"
 
+    # ─── System Status ───
+
+    @staticmethod
+    def system_status() -> dict:
+        """Get Kraken system status.
+
+        Returns {"status": "online"|"cancel_only"|"post_only"|"maintenance",
+                 "timestamp": "..."} or {"error": "..."} on failure.
+        """
+        return KrakenCLI._run(["status"])
+
+    # ─── Asset Pair Info ───
+
+    @staticmethod
+    def asset_pairs(pairs: list = None) -> dict:
+        """Get tradable asset pair info.
+
+        Returns {pair_name: {pair_decimals, ordermin, costmin, base, quote, ...}}
+        or {"error": "..."} on failure.
+        """
+        args = ["pairs"]
+        if pairs:
+            resolved = ",".join(KrakenCLI._resolve_pair(p) for p in pairs)
+            args.extend(["--pair", resolved])
+        return KrakenCLI._run(args)
+
+    @classmethod
+    def load_pair_constants(cls, pairs: list) -> dict:
+        """Fetch pair info from Kraken and return normalized constants.
+
+        Returns {friendly_pair: {price_decimals, ordermin, costmin, base, quote,
+        lot_decimals, tick_size}} for each requested pair that Kraken knows about.
+        Returns {} on API failure (caller should use hardcoded fallbacks).
+        """
+        data = cls.asset_pairs(pairs)
+        if not isinstance(data, dict) or "error" in data:
+            return {}
+
+        # Build reverse map: every form Kraken might use → friendly pair name
+        friendly_map = {}
+        for fp in pairs:
+            resolved = cls._resolve_pair(fp)
+            friendly_map[fp] = fp
+            friendly_map[fp.replace("/", "")] = fp
+            friendly_map[resolved] = fp
+            friendly_map[resolved.replace("/", "")] = fp
+
+        result = {}
+        for kraken_name, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            friendly = (
+                friendly_map.get(info.get("wsname"))
+                or friendly_map.get(info.get("altname"))
+                or friendly_map.get(kraken_name)
+                or friendly_map.get(kraken_name.replace("/", ""))
+            )
+            if not friendly:
+                continue
+            base = cls._normalize_asset(info.get("base", ""))
+            quote = cls._normalize_asset(info.get("quote", ""))
+            result[friendly] = {
+                "price_decimals": int(info.get("pair_decimals", cls.PRICE_DECIMALS_DEFAULT)),
+                "ordermin": float(info.get("ordermin", 0.02)),
+                "costmin": float(info.get("costmin", 0.5)),
+                "base": base,
+                "quote": quote,
+                "lot_decimals": int(info.get("lot_decimals", 8)),
+                "tick_size": info.get("tick_size"),
+            }
+        return result
+
+    @classmethod
+    def apply_pair_constants(cls, loaded: dict):
+        """Merge dynamically loaded pair constants into class-level PRICE_DECIMALS."""
+        for friendly, info in loaded.items():
+            dec = info["price_decimals"]
+            cls.PRICE_DECIMALS[friendly] = dec
+            cls.PRICE_DECIMALS[friendly.replace("/", "")] = dec
+            resolved = cls._resolve_pair(friendly)
+            cls.PRICE_DECIMALS[resolved] = dec
+            cls.PRICE_DECIMALS[resolved.replace("/", "")] = dec
+
     # ─── Public Market Data ───
 
     @staticmethod
@@ -352,6 +435,33 @@ class KrakenCLI:
         return KrakenCLI._run(args)
 
     @staticmethod
+    def query_orders(*txids, userref: int = None, trades: bool = False) -> dict:
+        """Query specific orders by txid or userref.
+
+        Returns {txid: {status, vol_exec, price, fee, ...}} for each order,
+        or {"error": "..."} on failure.
+        """
+        args = ["query-orders"]
+        if txids:
+            args.extend([str(t) for t in txids])
+        if userref is not None:
+            args.extend(["--userref", str(userref)])
+        if trades:
+            args.append("--trades")
+        return KrakenCLI._run(args)
+
+    @staticmethod
+    def cancel_order(*txids) -> dict:
+        """Cancel specific order(s) by txid.
+
+        Returns Kraken response (typically {"count": N}) or {"error": "..."}.
+        """
+        args = ["order", "cancel"]
+        args.extend([str(t) for t in txids])
+        args.append("--yes")
+        return KrakenCLI._run(args)
+
+    @staticmethod
     def cancel_after(seconds: int = 60) -> dict:
         """Dead man's switch — cancel all orders after timeout."""
         return KrakenCLI._run(["order", "cancel-after", str(seconds)])
@@ -454,57 +564,20 @@ class DashboardBroadcaster:
 
 
 # ═══════════════════════════════════════════════════════════════
-# EXECUTION STREAM — kraken ws executions push reconciler
+# BASE STREAM — shared WS subprocess/reader/health infrastructure
 # ═══════════════════════════════════════════════════════════════
 
-class ExecutionStream:
-    """Consumes `kraken ws executions` and delivers push-based lifecycle
-    events to the agent tick loop.
+class BaseStream:
+    """Shared infrastructure for all Kraken WS CLI subprocess streams.
 
-    Architecture:
-        start()  - spawn the CLI subprocess (wsl -d Ubuntu -- bash -c "...")
-                   and a daemon reader thread that parses stdout line-by-line
-                   into an internal queue.
-        register(order_id, userref, journal_index, pair, side,
-                 placed_amount, engine_ref, pre_trade_snapshot)
-                 - correlate a freshly placed order with its in-memory
-                   journal entry and engine rollback handle.
-        drain_events() -> List[dict]
-                 - called every tick by the agent. Pops queued WS events,
-                   aggregates fills by order_id, emits one terminal event
-                   per order (FILLED / PARTIALLY_FILLED / CANCELLED_UNFILLED
-                   / REJECTED), hands them to the caller.
-        stop()   - terminate subprocess, join reader and stderr threads.
-        healthy  - True iff subprocess + reader alive AND a heartbeat was
-                   seen within HEARTBEAT_TIMEOUT_S.
-        health_status() -> (ok, reason)
-                 - same check, returning the diagnostic reason string so
-                   the agent's tick warning identifies WHICH check failed.
-        ensure_healthy() -> (ok, reason)
-                 - called every tick by the agent. If unhealthy, attempts
-                   one restart of the subprocess subject to RESTART_COOLDOWN_S
-                   so we don't thrash on a persistently broken environment.
-
-    Correlation keys: order_id (from REST placement response) is primary;
-    order_userref (numeric tag we passed on placement) is fallback. Both
-    are checked — whichever arrives first resolves the match.
-
-    Numeric fields on incoming WS events are real JSON floats/ints in CLI
-    v0.2.3 (confirmed by spike on 2026-04-11) — no string coercion needed.
-
-    Paper mode uses paper=True which short-circuits start() and lets the
-    place_order helper emit synthetic terminal events directly into the
-    event queue. No subprocess is spawned.
+    Subclasses override:
+        _build_cmd() -> str   — the bash command inside WSL
+        _on_message(msg)      — handle one parsed JSON message
+        _stream_label() -> str — short label for log lines (e.g. "EXECSTREAM")
     """
 
-    # 30s heartbeat threshold gives slow WSL cold-starts (and the few seconds
-    # kraken takes to authenticate + subscribe to the WS channel) headroom
-    # before we declare the stream stale. Real heartbeats arrive ~1/sec, so
-    # any healthy stream is well under this bound.
     HEARTBEAT_TIMEOUT_S = 30.0
     READER_JOIN_TIMEOUT_S = 5.0
-    # Minimum seconds between auto-restart attempts so we don't thrash when
-    # WSL or the network is genuinely down.
     RESTART_COOLDOWN_S = 30.0
 
     def __init__(self, paper: bool = False):
@@ -512,51 +585,44 @@ class ExecutionStream:
         self._proc: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
-        self._event_queue: "queue.Queue[tuple]" = queue.Queue()
-        # Correlation maps — primary by order_id, secondary by userref
-        self._known_orders: Dict[str, dict] = {}
-        self._userref_to_order_id: Dict[int, str] = {}
         self._last_heartbeat: float = 0.0
-        self._last_sequence: Optional[int] = None
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
-        # Diagnostic state for health_status() and auto-restart bookkeeping.
         self._reader_exit_reason: Optional[str] = None
         self._last_restart_attempt: float = 0.0
         self._restart_count: int = 0
 
+    def _build_cmd(self) -> str:
+        """Return the bash command to run inside WSL. Subclasses must override."""
+        raise NotImplementedError
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
+        """Handle one parsed JSON message. Subclasses must override."""
+        raise NotImplementedError
+
+    def _stream_label(self) -> str:
+        """Short label for log lines. Override for a better name."""
+        return "STREAM"
+
+    def _on_heartbeat(self) -> None:
+        """Bump the heartbeat timestamp. Call from _on_message on any
+        liveness-indicating traffic."""
+        self._last_heartbeat = time.monotonic()
+
     # ───────── lifecycle ─────────
 
     def start(self) -> bool:
-        """Spawn the subprocess and reader thread. Returns True on success.
-
-        Paper mode is a no-op (returns True). In live mode, if spawning or
-        reader-start fails, returns False and leaves self.healthy==False —
-        the caller should log and proceed (placements still work, the
-        journal just won't get terminal events until the stream recovers).
-        """
+        """Spawn the subprocess and reader/stderr threads. Returns True on success."""
         if self.paper:
             self._last_heartbeat = time.monotonic()
             return True
-        # Reset state in case start() is called as part of a restart.
-        # _last_sequence is reset because the new WS connection starts its
-        # own sequence numbering at 1, and we don't want a spurious
-        # "sequence gap" warning on the first executions message after
-        # restart. _known_orders is intentionally NOT cleared — in-flight
-        # orders need to remain correlated across restarts so the new
-        # subprocess's snapshot replay can finalize them.
         self._shutdown.clear()
         self._reader_exit_reason = None
-        self._last_sequence = None
-        # `exec` replaces bash with kraken in the same process so that when
-        # the wsl wrapper is terminated, the signal propagates to kraken
-        # itself instead of leaving it as an orphaned grandchild inside the
-        # WSL VM. Without exec, repeated auto-restarts would leak kraken
-        # processes and (worse) hold WS connection slots open.
+        self._on_start_reset()
+        label = self._stream_label()
         cmd = [
             "wsl", "-d", "Ubuntu", "--", "bash", "-c",
-            "source ~/.cargo/env && exec kraken ws executions -o json "
-            "--snap-orders true --snap-trades true",
+            f"source ~/.cargo/env && {self._build_cmd()}",
         ]
         try:
             self._proc = subprocess.Popen(
@@ -564,23 +630,23 @@ class ExecutionStream:
                 bufsize=1, text=True,
             )
         except Exception as e:
-            print(f"  [EXECSTREAM] failed to spawn subprocess: {type(e).__name__}: {e}")
+            print(f"  [{label}] failed to spawn subprocess: {type(e).__name__}: {e}")
             return False
         self._reader_thread = threading.Thread(
-            target=self._reader_loop, name="ExecutionStream-reader", daemon=True,
+            target=self._reader_loop, name=f"{label}-reader", daemon=True,
         )
         self._reader_thread.start()
-        # stderr drain thread — without this, anything kraken writes to stderr
-        # accumulates in the OS pipe buffer (~64 KB on Linux) and eventually
-        # blocks the subprocess on write, which silently freezes the stream.
-        # Draining also gives us visible kraken-side error messages.
         self._stderr_thread = threading.Thread(
-            target=self._stderr_loop, name="ExecutionStream-stderr", daemon=True,
+            target=self._stderr_loop, name=f"{label}-stderr", daemon=True,
         )
         self._stderr_thread.start()
         self._last_heartbeat = time.monotonic()
-        print("  [EXECSTREAM] kraken ws executions stream started")
+        print(f"  [{label}] stream started")
         return True
+
+    def _on_start_reset(self) -> None:
+        """Hook for subclasses to reset state on (re)start. Called before spawn."""
+        pass
 
     def stop(self) -> None:
         """Terminate subprocess, join reader and stderr threads. Idempotent."""
@@ -611,9 +677,6 @@ class ExecutionStream:
         return self.health_status()[0]
 
     def health_status(self) -> Tuple[bool, str]:
-        """Return (healthy, reason). When healthy, reason is the empty string.
-        When unhealthy, reason describes WHICH check failed so the warning
-        printed at the agent tick body is actionable rather than generic."""
         if self.paper:
             return True, ""
         if self._proc is None:
@@ -624,8 +687,6 @@ class ExecutionStream:
         if self._reader_thread is None or not self._reader_thread.is_alive():
             reason = self._reader_exit_reason or "exited (reason unknown)"
             return False, f"reader thread {reason}"
-        # monotonic clock so a wall-clock NTP correction or sleep/resume
-        # cannot spuriously trigger an unhealthy reading or restart.
         age = time.monotonic() - self._last_heartbeat
         if age > self.HEARTBEAT_TIMEOUT_S:
             return False, (
@@ -635,9 +696,6 @@ class ExecutionStream:
         return True, ""
 
     def ensure_healthy(self) -> Tuple[bool, str]:
-        """Check health and, if unhealthy, attempt one restart subject to a
-        cooldown so we don't thrash. Returns the post-action (healthy, reason)
-        tuple — i.e. the state the caller should report to the user."""
         if self.paper:
             return True, ""
         healthy, reason = self.health_status()
@@ -648,22 +706,28 @@ class ExecutionStream:
             return healthy, reason
         self._last_restart_attempt = now
         self._restart_count += 1
-        print(f"  [EXECSTREAM] auto-restart #{self._restart_count}: {reason}")
+        label = self._stream_label()
+        print(f"  [{label}] auto-restart #{self._restart_count}: {reason}")
         try:
             self.stop()
         except Exception as e:
-            print(f"  [EXECSTREAM] stop during restart failed: {type(e).__name__}: {e}")
+            print(f"  [{label}] stop during restart failed: {type(e).__name__}: {e}")
         if not self.start():
             return False, "restart spawn failed"
-        return self.health_status()
+        new_healthy, new_reason = self.health_status()
+        if new_healthy:
+            self._on_restart_success()
+        return new_healthy, new_reason
+
+    def _on_restart_success(self) -> None:
+        """Hook for subclasses to run post-restart logic (e.g. reconciliation)."""
+        pass
 
     # ───────── reader thread ─────────
 
     def _reader_loop(self) -> None:
-        """Daemon thread body. Line-iterates subprocess stdout, parses each
-        line as JSON, dispatches to the internal queue. Records exit reason
-        in self._reader_exit_reason so health_status() can report it."""
         assert self._proc is not None
+        label = self._stream_label()
         exit_reason = "EOF (subprocess closed stdout)"
         try:
             for raw in self._proc.stdout:  # type: ignore[union-attr]
@@ -676,46 +740,202 @@ class ExecutionStream:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
-                    # CLI diagnostic noise — log but keep reading.
-                    print(f"  [EXECSTREAM] non-JSON line: {line[:120]}")
+                    print(f"  [{label}] non-JSON line: {line[:120]}")
                     continue
-                self._dispatch(msg)
+                self._on_message(msg)
         except Exception as e:
             exit_reason = f"crashed: {type(e).__name__}: {e}"
             if not self._shutdown.is_set():
-                print(f"  [EXECSTREAM] reader thread error: {type(e).__name__}: {e}")
+                print(f"  [{label}] reader thread error: {type(e).__name__}: {e}")
         finally:
             self._reader_exit_reason = exit_reason
             if not self._shutdown.is_set():
-                print(f"  [EXECSTREAM] reader thread exited: {exit_reason}")
+                print(f"  [{label}] reader thread exited: {exit_reason}")
 
     def _stderr_loop(self) -> None:
-        """Daemon thread body for stderr. Drains and prints anything kraken
-        emits to stderr. Without this, the OS pipe buffer fills up and blocks
-        the subprocess on its next stderr write — which silently freezes
-        stdout (and therefore the heartbeat) too. Also gives us visibility
-        into kraken-side connection errors."""
         if self._proc is None or self._proc.stderr is None:
             return
+        label = self._stream_label()
         try:
             for raw in self._proc.stderr:  # type: ignore[union-attr]
                 if self._shutdown.is_set():
                     break
                 line = raw.rstrip()
                 if line:
-                    print(f"  [EXECSTREAM stderr] {line[:200]}")
+                    print(f"  [{label} stderr] {line[:200]}")
         except Exception as e:
             if not self._shutdown.is_set():
-                print(f"  [EXECSTREAM] stderr reader error: {type(e).__name__}: {e}")
+                print(f"  [{label}] stderr reader error: {type(e).__name__}: {e}")
 
-    def _dispatch(self, msg: Dict[str, Any]) -> None:
-        """Classify an incoming WS message and enqueue data events."""
+
+# ═══════════════════════════════════════════════════════════════
+# CANDLE STREAM — kraken ws ohlc push-based candle updates
+# ═══════════════════════════════════════════════════════════════
+
+class CandleStream(BaseStream):
+    """Push-based OHLC candle stream. Subscribes to all traded pairs in one
+    WS connection, stores the latest candle per pair, and exposes it via
+    latest_candle(pair). Falls back to REST ohlc() when unhealthy."""
+
+    # Reverse map: WS symbol (e.g. "SOL/USDC", "SOL/XBT") → friendly pair.
+    # Built dynamically from the pairs list at init.
+
+    def __init__(self, pairs: List[str], interval: int = 5, paper: bool = False):
+        super().__init__(paper=paper)
+        self._pairs = list(pairs)
+        self._interval = interval
+        self._latest: Dict[str, dict] = {}
+        # Build symbol → friendly pair reverse map
+        self._symbol_map: Dict[str, str] = {}
+        for p in pairs:
+            resolved = KrakenCLI._resolve_pair(p)
+            # WS uses "wsname" form (e.g. "SOL/XBT" not "SOLXBT")
+            # but the CLI resolves to whatever Kraken returns.
+            # Map both the friendly name and resolved form.
+            self._symbol_map[p] = p
+            self._symbol_map[resolved] = p
+            self._symbol_map[resolved.replace("/", "")] = p
+
+    def _build_cmd(self) -> str:
+        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
+        pairs_str = " ".join(resolved)
+        return (f"exec kraken ws ohlc {pairs_str} "
+                f"--interval {self._interval} -o json --snapshot true")
+
+    def _stream_label(self) -> str:
+        return "CANDLE_WS"
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
         channel = msg.get("channel")
         if channel == "heartbeat":
-            self._last_heartbeat = time.monotonic()
+            self._on_heartbeat()
+            return
+        if channel != "ohlc":
+            # status, subscribe confirmations — bump heartbeat on status
+            if channel == "status":
+                return
+            if msg.get("method") == "subscribe":
+                if not msg.get("success"):
+                    print(f"  [CANDLE_WS] subscribe failed: {msg}")
+                return
+            return
+        self._on_heartbeat()
+        for entry in msg.get("data", []):
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol", "")
+            pair = self._symbol_map.get(symbol)
+            if pair:
+                with self._lock:
+                    self._latest[pair] = entry
+
+    def latest_candle(self, pair: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent candle for the given pair, or None."""
+        with self._lock:
+            return self._latest.get(pair)
+
+
+# ═══════════════════════════════════════════════════════════════
+# TICKER STREAM — kraken ws ticker push-based price updates
+# ═══════════════════════════════════════════════════════════════
+
+class TickerStream(BaseStream):
+    """Push-based ticker stream. Subscribes to all traded pairs in one WS
+    connection, stores the latest ticker per pair, and exposes it via
+    latest_ticker(pair). Falls back to REST ticker() when unhealthy."""
+
+    def __init__(self, pairs: List[str], paper: bool = False):
+        super().__init__(paper=paper)
+        self._pairs = list(pairs)
+        self._latest: Dict[str, dict] = {}
+        self._symbol_map: Dict[str, str] = {}
+        for p in pairs:
+            resolved = KrakenCLI._resolve_pair(p)
+            self._symbol_map[p] = p
+            self._symbol_map[resolved] = p
+            self._symbol_map[resolved.replace("/", "")] = p
+
+    def _build_cmd(self) -> str:
+        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
+        pairs_str = " ".join(resolved)
+        return f"exec kraken ws ticker {pairs_str} -o json --snapshot true"
+
+    def _stream_label(self) -> str:
+        return "TICKER_WS"
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
+        channel = msg.get("channel")
+        if channel == "heartbeat":
+            self._on_heartbeat()
+            return
+        if channel != "ticker":
+            if channel == "status":
+                return
+            if msg.get("method") == "subscribe":
+                if not msg.get("success"):
+                    print(f"  [TICKER_WS] subscribe failed: {msg}")
+                return
+            return
+        self._on_heartbeat()
+        for entry in msg.get("data", []):
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol", "")
+            pair = self._symbol_map.get(symbol)
+            if pair:
+                with self._lock:
+                    self._latest[pair] = entry
+
+    def latest_ticker(self, pair: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent ticker for the given pair, or None."""
+        with self._lock:
+            return self._latest.get(pair)
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXECUTION STREAM — kraken ws executions push reconciler
+# ═══════════════════════════════════════════════════════════════
+
+class ExecutionStream(BaseStream):
+    """Consumes `kraken ws executions` and delivers push-based lifecycle
+    events to the agent tick loop.
+
+    Correlation keys: order_id (from REST placement response) is primary;
+    order_userref (numeric tag we passed on placement) is fallback. Both
+    are checked — whichever arrives first resolves the match.
+
+    Paper mode uses paper=True which short-circuits start() and lets the
+    place_order helper emit synthetic terminal events directly into the
+    event queue. No subprocess is spawned.
+    """
+
+    def __init__(self, paper: bool = False):
+        super().__init__(paper=paper)
+        self._event_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._known_orders: Dict[str, dict] = {}
+        self._userref_to_order_id: Dict[int, str] = {}
+        self._last_sequence: Optional[int] = None
+        self._pending_reconciliation: List[Dict[str, Any]] = []
+
+    def _build_cmd(self) -> str:
+        return ("exec kraken ws executions -o json "
+                "--snap-orders true --snap-trades true")
+
+    def _stream_label(self) -> str:
+        return "EXECSTREAM"
+
+    def _on_start_reset(self) -> None:
+        # Reset sequence on (re)start — new WS connection starts at seq 1.
+        # _known_orders intentionally NOT cleared — in-flight orders must
+        # survive restarts for snapshot replay to finalize them.
+        self._last_sequence = None
+
+    def _on_message(self, msg: Dict[str, Any]) -> None:
+        channel = msg.get("channel")
+        if channel == "heartbeat":
+            self._on_heartbeat()
             return
         if channel == "status":
-            # Connection status update; informational only
             return
         if msg.get("method") == "subscribe":
             if not msg.get("success"):
@@ -723,9 +943,7 @@ class ExecutionStream:
             return
         if channel != "executions":
             return
-        # Bump the heartbeat on any executions traffic — it's a liveness signal
-        self._last_heartbeat = time.monotonic()
-        # Sequence gap detection (warn only — subsequent snapshot recovers)
+        self._on_heartbeat()
         seq = msg.get("sequence")
         if isinstance(seq, int):
             if self._last_sequence is not None and seq != self._last_sequence + 1:
@@ -734,13 +952,98 @@ class ExecutionStream:
                     f"(executions may have been dropped; waiting for next snapshot)"
                 )
             self._last_sequence = seq
-        msg_type = msg.get("type")  # "snapshot" | "update"
+        msg_type = msg.get("type")
         data = msg.get("data") or []
         if not isinstance(data, list):
             return
         for entry in data:
             if isinstance(entry, dict):
                 self._event_queue.put((msg_type or "update", entry))
+
+    def _on_restart_success(self) -> None:
+        try:
+            gap_events = self.reconcile_restart_gap()
+            if gap_events:
+                self._pending_reconciliation.extend(gap_events)
+        except Exception as e:
+            print(f"  [EXECSTREAM] restart-gap reconcile failed: {type(e).__name__}: {e}")
+
+    # ───────── restart-gap reconciliation ─────────
+
+    def reconcile_restart_gap(self) -> List[Dict[str, Any]]:
+        """Query Kraken for orders in _known_orders that may have filled or
+        cancelled while the execution stream was down."""
+        if self.paper or not self._known_orders:
+            return []
+
+        with self._lock:
+            order_ids = [oid for oid in self._known_orders if oid != "unknown"]
+        if not order_ids:
+            return []
+
+        terminal_events: List[Dict[str, Any]] = []
+        BATCH = 20
+
+        for i in range(0, len(order_ids), BATCH):
+            batch = order_ids[i:i + BATCH]
+            time.sleep(2)
+            resp = KrakenCLI.query_orders(*batch, trades=True)
+            if not isinstance(resp, dict) or "error" in resp:
+                continue
+
+            for txid, order_info in resp.items():
+                if not isinstance(order_info, dict):
+                    continue
+                with self._lock:
+                    known = self._known_orders.get(txid)
+                if not known:
+                    continue
+
+                status = order_info.get("status", "")
+                if status not in ("closed", "canceled", "expired"):
+                    continue
+
+                vol_exec = float(order_info.get("vol_exec", 0))
+                placed = known["placed_amount"]
+                raw_price = float(order_info.get("price", 0))
+                avg_price = raw_price if raw_price > 0 else None
+                fee = float(order_info.get("fee", 0))
+
+                if status == "closed":
+                    tolerance = 0.01
+                    state = (
+                        "FILLED"
+                        if abs(vol_exec - placed) / max(placed, 1e-12) < tolerance
+                        else "PARTIALLY_FILLED"
+                    )
+                elif vol_exec > 0:
+                    state = "PARTIALLY_FILLED"
+                else:
+                    state = "CANCELLED_UNFILLED"
+
+                event = {
+                    "order_id": txid,
+                    "journal_index": known["journal_index"],
+                    "engine_ref": known["engine_ref"],
+                    "pre_trade_snapshot": known["pre_trade_snapshot"],
+                    "placed_amount": placed,
+                    "pair": known["pair"],
+                    "side": known["side"],
+                    "state": state,
+                    "vol_exec": vol_exec,
+                    "avg_fill_price": avg_price,
+                    "fee_quote": fee,
+                    "terminal_reason": f"reconciled after stream restart ({status})",
+                    "exec_ids": [],
+                    "timestamp": order_info.get("closetm") or order_info.get("opentm"),
+                }
+                terminal_events.append(event)
+                with self._lock:
+                    self._known_orders.pop(txid, None)
+
+        if terminal_events:
+            print(f"  [EXECSTREAM] reconciled {len(terminal_events)} order(s) after restart gap")
+        return terminal_events
 
     # ───────── registration ─────────
 
@@ -813,6 +1116,11 @@ class ExecutionStream:
             }
         """
         events: List[Dict[str, Any]] = []
+        # Prepend any events from restart-gap reconciliation so the agent
+        # processes them in the same tick the stream recovered.
+        if self._pending_reconciliation:
+            events.extend(self._pending_reconciliation)
+            self._pending_reconciliation.clear()
         while True:
             try:
                 _kind, entry = self._event_queue.get_nowait()
@@ -1071,10 +1379,19 @@ class HydraAgent:
         # synthetic fill events (inject_event) so the same code path
         # handles both real and paper flows.
         self.execution_stream = ExecutionStream(paper=paper)
+        # Push-based market data streams — candle + ticker. Each subscribes
+        # to all pairs in one WS connection. Paper mode short-circuits to
+        # no-op (REST fallback used instead).
+        self.candle_stream = CandleStream(pairs, interval=candle_interval, paper=paper)
+        self.ticker_stream = TickerStream(pairs, paper=paper)
         # Tracks the most recently logged unhealthy reason so the tick body
         # only prints on transitions instead of spamming the warning every
         # tick. None means "currently healthy or never warned".
         self._exec_stream_warned_reason: Optional[str] = None
+
+        # Kraken system status — tracks last known status for transition logging.
+        # None means "never checked". Only checked in live mode.
+        self._last_kraken_status: Optional[str] = None
 
         # Fee tier cache — refreshed at most once per hour from `kraken volume`.
         # Shape: {"volume_30d_usd": float|None, "pair_fees": {pair: {"maker_pct","taker_pct"}}}
@@ -1127,11 +1444,16 @@ class HydraAgent:
                     print("  [HYDRA] All open orders cancelled.")
             except Exception as e:
                 print(f"  [HYDRA] Cancel-all failed: {e}")
-        # Tear down the execution stream subprocess + reader thread
-        try:
-            self.execution_stream.stop()
-        except Exception as e:
-            print(f"  [HYDRA] ExecutionStream stop failed: {e}")
+        # Tear down all WS stream subprocesses
+        for stream, label in [
+            (self.execution_stream, "ExecutionStream"),
+            (self.candle_stream, "CandleStream"),
+            (self.ticker_stream, "TickerStream"),
+        ]:
+            try:
+                stream.stop()
+            except Exception as e:
+                print(f"  [HYDRA] {label} stop failed: {e}")
         # Flush session snapshot for --resume
         try:
             self._save_snapshot()
@@ -1282,6 +1604,24 @@ class HydraAgent:
             else:
                 print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
 
+        # Load dynamic pair constants from Kraken (PRICE_DECIMALS, ordermin, costmin).
+        # Hardcoded constants remain as fallbacks for any pair not returned.
+        if not self.paper:
+            print("\n  [HYDRA] Loading pair constants from Kraken...")
+            pair_constants = KrakenCLI.load_pair_constants(self.pairs)
+            if pair_constants:
+                KrakenCLI.apply_pair_constants(pair_constants)
+                for pair in self.pairs:
+                    self.engines[pair].sizer.apply_pair_limits(pair_constants)
+                loaded_pairs = ", ".join(
+                    f"{p}(dec={pair_constants[p]['price_decimals']},min={pair_constants[p]['ordermin']})"
+                    for p in pair_constants
+                )
+                print(f"  [HYDRA] Pair constants loaded: {loaded_pairs}")
+            else:
+                print("  [WARN] Pair constants unavailable — using hardcoded fallbacks")
+            time.sleep(2)  # Rate limit
+
         # Warmup: fetch historical candles for each pair (needed before balance conversion)
         print("\n  [HYDRA] Warming up with historical candles...")
         for pair in self.pairs:
@@ -1347,6 +1687,21 @@ class HydraAgent:
         if not self.execution_stream.start():
             print("  [WARN] ExecutionStream failed to start — placements will not auto-finalize")
 
+        # Start push-based market data streams (candle + ticker).
+        # Failure is non-fatal — _fetch_and_tick falls back to REST.
+        if not self.paper:
+            if not self.candle_stream.start():
+                print("  [WARN] CandleStream failed to start — falling back to REST ohlc")
+            if not self.ticker_stream.start():
+                print("  [WARN] TickerStream failed to start — falling back to REST ticker")
+
+        # Reconcile stale PLACED journal entries from previous sessions.
+        # After --resume, the journal may contain entries that finalized on
+        # the exchange while we were offline. Query the exchange and update
+        # lifecycle state; register still-open orders with the live stream.
+        if not self.paper:
+            self._reconcile_stale_placed()
+
         print(f"\n  [HYDRA] Starting LIVE trading loop")
         print(f"  [HYDRA] Pairs: {', '.join(self.pairs)}")
         print(f"  [HYDRA] Interval: {self.interval}s | Duration: {self.duration}s")
@@ -1368,16 +1723,41 @@ class HydraAgent:
                 ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
                 print(f"\n  === Tick {tick} | {ts} | Elapsed: {elapsed:.0f}s | Remaining: {remaining} ===")
 
+                # Phase 0: System status gate — skip tick during maintenance.
+                # post_only is fine (we only place post-only orders). API failure
+                # degrades gracefully to "online" so we never stall on a broken
+                # status endpoint.
+                if not self.paper:
+                    _status_resp = KrakenCLI.system_status()
+                    _kraken_status = (
+                        _status_resp.get("status", "online")
+                        if isinstance(_status_resp, dict) and "error" not in _status_resp
+                        else "online"
+                    )
+                    if _kraken_status not in ("online", "post_only"):
+                        if self._last_kraken_status != _kraken_status:
+                            print(f"  [HYDRA] Kraken status: {_kraken_status} — skipping tick")
+                        self._last_kraken_status = _kraken_status
+                        continue
+                    if self._last_kraken_status not in ("online", "post_only", None):
+                        print(f"  [HYDRA] Kraken back online (was {self._last_kraken_status})")
+                    self._last_kraken_status = _kraken_status
+                    time.sleep(2)  # Rate limit
+
                 # Refresh dead man's switch every tick (live mode only)
                 if not self.paper:
                     KrakenCLI.cancel_after(self._dms_timeout)
                     time.sleep(2)  # Rate limit
 
                 # Phase 1: Fetch data and run all engines (regimes, signals, positions)
+                # When candle stream is healthy, _fetch_and_tick uses WS data
+                # (no REST call) so we can skip the rate-limit sleep.
+                _candle_ws_ok = self.candle_stream.healthy
                 engine_states = {}
                 for pair in self.pairs:
                     engine_states[pair] = self._fetch_and_tick(pair)
-                    time.sleep(2)  # Rate limit after OHLC fetch
+                    if not _candle_ws_ok:
+                        time.sleep(2)  # Rate limit after REST OHLC fetch
 
                 # Capture engine's original signal before any external modifiers
                 original_signals = {}
@@ -1614,6 +1994,12 @@ class HydraAgent:
                 for term in self.execution_stream.drain_events():
                     self._apply_execution_event(term)
 
+                # Market data stream health — auto-restart if dead.
+                # No transition logging needed; REST fallback is seamless.
+                if not self.paper:
+                    self.candle_stream.ensure_healthy()
+                    self.ticker_stream.ensure_healthy()
+
                 # Rolling save — persist the order journal every tick so
                 # no data is lost on crash. Atomic write (.tmp + os.replace)
                 # so a crash mid-write cannot corrupt the file into
@@ -1670,30 +2056,63 @@ class HydraAgent:
     def _fetch_and_tick(self, pair: str) -> Optional[dict]:
         """Phase 1: Fetch latest data from Kraken and run engine tick.
 
+        Prefers WS candle stream when healthy (zero API calls, zero sleep).
+        Falls back to REST ohlc() → REST ticker() when stream is unavailable.
+
         When a brain is active, uses generate_only=True so the engine produces
         signals without executing trades internally. This prevents engine state
         from diverging when the brain later overrides a signal.
         """
         engine = self.engines[pair]
+        candle_ingested = False
 
-        # Fetch latest candle
-        candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
-        if candles:
-            engine.ingest_candle(candles[-1])
-        else:
-            # Fallback to ticker — assign a synthetic timestamp aligned to the
-            # candle interval so the dedup logic in ingest_candle works correctly.
-            # Without this, repeated ticker-fallback candles each get a unique
-            # time.time() and silently inflate the candle history.
-            ticker = KrakenCLI.ticker(pair)
-            if "price" in ticker:
-                p = ticker["price"]
-                interval_secs = self.candle_interval * 60
-                aligned_ts = (int(time.time()) // interval_secs) * interval_secs
-                engine.ingest_candle({
-                    "open": p, "high": p, "low": p, "close": p, "volume": 0,
-                    "timestamp": aligned_ts,
-                })
+        # Try WS candle stream first (no API call, no rate-limit sleep)
+        ws_candle = (
+            self.candle_stream.latest_candle(pair)
+            if self.candle_stream.healthy
+            else None
+        )
+        if ws_candle:
+            # Convert WS ohlc shape to engine candle format.
+            # WS uses interval_begin (ISO) or timestamp; parse to epoch.
+            ts_raw = ws_candle.get("interval_begin") or ws_candle.get("timestamp")
+            if isinstance(ts_raw, str):
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    ts = _dt.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = time.time()
+            elif isinstance(ts_raw, (int, float)):
+                ts = float(ts_raw)
+            else:
+                ts = time.time()
+            engine.ingest_candle({
+                "open": ws_candle.get("open", 0),
+                "high": ws_candle.get("high", 0),
+                "low": ws_candle.get("low", 0),
+                "close": ws_candle.get("close", 0),
+                "volume": ws_candle.get("volume", 0),
+                "timestamp": ts,
+            })
+            candle_ingested = True
+
+        if not candle_ingested:
+            # REST fallback — fetch latest candle via CLI
+            candles = KrakenCLI.ohlc(pair, interval=self.candle_interval)
+            if candles:
+                engine.ingest_candle(candles[-1])
+                candle_ingested = True
+            else:
+                # Last resort: ticker → synthetic candle
+                ticker = KrakenCLI.ticker(pair)
+                if "price" in ticker:
+                    p = ticker["price"]
+                    interval_secs = self.candle_interval * 60
+                    aligned_ts = (int(time.time()) // interval_secs) * interval_secs
+                    engine.ingest_candle({
+                        "open": p, "high": p, "low": p, "close": p, "volume": 0,
+                        "timestamp": aligned_ts,
+                    })
 
         # Snapshot position before tick so we can rollback if exchange order fails.
         # When generate_only=True (brain active), execute_signal happens later and
@@ -2044,6 +2463,142 @@ class HydraAgent:
             "exec_ids": [],
         }
         self.order_journal.append(entry)
+
+    def _reconcile_stale_placed(self):
+        """Query exchange for PLACED journal entries that have no ExecutionStream
+        registration — typically orders from a previous session that finalized
+        while we were offline.
+
+        For terminal orders (closed/canceled/expired): updates journal lifecycle
+        directly. Engine rollback is NOT possible for entries from previous
+        sessions (no pre_trade_snapshot persisted), so we log a warning.
+
+        For still-open orders: registers them with the live ExecutionStream so
+        WS events can finalize them normally.
+        """
+        # Collect PLACED entries with queryable order IDs
+        stale = []
+        for idx, entry in enumerate(self.order_journal):
+            lifecycle = entry.get("lifecycle", {})
+            if lifecycle.get("state") != "PLACED":
+                continue
+            order_id = entry.get("order_ref", {}).get("order_id")
+            if not order_id or order_id == "unknown":
+                continue
+            stale.append((idx, entry, order_id))
+
+        if not stale:
+            return
+
+        print(f"  [HYDRA] Reconciling {len(stale)} stale PLACED journal entries...")
+
+        # Dedup order_ids (shouldn't have duplicates, but be safe)
+        seen_ids = set()
+        unique_stale = []
+        for idx, entry, oid in stale:
+            if oid not in seen_ids:
+                seen_ids.add(oid)
+                unique_stale.append((idx, entry, oid))
+
+        # Batch query exchange
+        BATCH = 20
+        order_ids = [oid for _, _, oid in unique_stale]
+        # Build lookup: order_id → (journal_index, entry)
+        oid_to_entry = {oid: (idx, entry) for idx, entry, oid in unique_stale}
+
+        reconciled = 0
+        registered = 0
+        for i in range(0, len(order_ids), BATCH):
+            batch = order_ids[i:i + BATCH]
+            time.sleep(2)  # Rate limit
+            resp = KrakenCLI.query_orders(*batch, trades=True)
+            if not isinstance(resp, dict) or "error" in resp:
+                print(f"  [WARN] stale-placed query failed: {resp}")
+                continue
+
+            for txid, order_info in resp.items():
+                if not isinstance(order_info, dict):
+                    continue
+                if txid not in oid_to_entry:
+                    continue
+                idx, entry = oid_to_entry[txid]
+                status = order_info.get("status", "")
+
+                if status in ("closed", "canceled", "expired"):
+                    # Terminal — finalize journal entry
+                    vol_exec = float(order_info.get("vol_exec", 0))
+                    placed = entry.get("intent", {}).get("amount", 0)
+                    raw_price = float(order_info.get("price", 0))
+                    avg_price = raw_price if raw_price > 0 else None
+                    fee = float(order_info.get("fee", 0))
+
+                    if status == "closed":
+                        tolerance = 0.01
+                        state = (
+                            "FILLED"
+                            if placed > 0 and abs(vol_exec - placed) / max(placed, 1e-12) < tolerance
+                            else "PARTIALLY_FILLED"
+                        )
+                    elif vol_exec > 0:
+                        state = "PARTIALLY_FILLED"
+                    else:
+                        state = "CANCELLED_UNFILLED"
+
+                    entry["lifecycle"] = {
+                        "state": state,
+                        "vol_exec": vol_exec,
+                        "avg_fill_price": avg_price,
+                        "fee_quote": fee,
+                        "final_at": order_info.get("closetm") or datetime.now(timezone.utc).isoformat(),
+                        "terminal_reason": f"reconciled on resume ({status})",
+                        "exec_ids": [],
+                    }
+                    pair = entry.get("pair", "?")
+                    side = entry.get("side", "?")
+                    print(f"  [HYDRA] {pair} {side} {txid}: {state} "
+                          f"(vol={vol_exec:.8f}, reconciled on resume)")
+
+                    # Engine rollback is not possible for previous-session
+                    # entries (pre_trade_snapshot not persisted). If the order
+                    # was CANCELLED_UNFILLED, the engine's position may be
+                    # over-committed from the snapshot restore. Log loudly.
+                    if state in ("CANCELLED_UNFILLED", "REJECTED"):
+                        print(f"  [WARN] {pair} {side} was never filled — engine position may be "
+                              f"stale from snapshot. Operator should verify.")
+                    reconciled += 1
+
+                elif status in ("open", "pending", "pending_new", "new"):
+                    # Still live on the exchange — register with ExecutionStream
+                    # so the WS stream can finalize it normally.
+                    pair = entry.get("pair", "")
+                    side = entry.get("side", "")
+                    userref = entry.get("order_ref", {}).get("order_userref")
+                    placed_amount = entry.get("intent", {}).get("amount", 0)
+                    engine = self.engines.get(pair)
+                    if engine and pair:
+                        self.execution_stream.register(
+                            order_id=txid,
+                            userref=userref,
+                            journal_index=idx,
+                            pair=pair,
+                            side=side,
+                            placed_amount=float(placed_amount),
+                            engine_ref=engine,
+                            pre_trade_snapshot=None,  # unavailable after restart
+                        )
+                        registered += 1
+                        print(f"  [HYDRA] {pair} {side} {txid}: still open — "
+                              f"registered with execution stream")
+
+        parts = []
+        if reconciled:
+            parts.append(f"{reconciled} finalized")
+        if registered:
+            parts.append(f"{registered} re-registered")
+        if parts:
+            print(f"  [HYDRA] Stale PLACED reconciliation: {', '.join(parts)}")
+        else:
+            print(f"  [HYDRA] Stale PLACED reconciliation: all {len(stale)} entries still pending on exchange or query failed")
 
     def _apply_execution_event(self, event: Dict[str, Any]) -> None:
         """Apply one terminal event from the execution stream to the
