@@ -318,14 +318,12 @@ class TestPositionSizer:
     def test_kraken_min_order_size(self):
         self.setup()
         size = self.conservative.calculate(0.56, 100.0, 100.0, "SOL/USDC")
-        if size > 0:
-            assert size >= 0.02
+        assert size >= 0.02 or size == 0.0
 
     def test_xbt_min_order_size(self):
         self.setup()
         size = self.conservative.calculate(0.95, 1000.0, 67000.0, "XBT/USDC")
-        if size > 0:
-            assert size >= 0.00005
+        assert size >= 0.00005 or size == 0.0
 
     def test_zero_price(self):
         self.setup()
@@ -518,19 +516,22 @@ class TestHydraEngine:
 
     def test_sell_records_profit(self):
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
-        # Manually set a position
-        engine.position.size = 10.0
-        engine.position.avg_entry = 90.0
-        engine.balance = 9100.0
-        # Feed data that should trigger a sell (RSI > 50 in defensive, or above BB upper)
+        # Feed enough candle data for indicators
         for i in range(60):
             engine.ingest_candle({
                 "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100,
             })
-            state = engine.tick()
-            if state.get("last_trade") and state["last_trade"]["action"] == "SELL":
-                assert state["last_trade"]["profit"] is not None
-                break
+        # Manually set a position (bought at 90, now at 100 → profitable)
+        engine.position.size = 10.0
+        engine.position.avg_entry = 90.0
+        engine.position.params_at_entry = engine.snapshot_params()
+        engine.balance = 9100.0
+        # Execute a SELL directly and verify profit is recorded
+        trade = engine.execute_signal("SELL", 0.75, "test sell", "MOMENTUM")
+        assert trade is not None, "Expected SELL trade to be generated"
+        assert trade.action == "SELL"
+        assert trade.profit is not None
+        assert trade.profit > 0, "Selling at 100 with entry at 90 should be profitable"
 
 
 class TestSnapshotAndRollback:
@@ -603,10 +604,10 @@ class TestSnapshotAndRollback:
 
         # Partial sell (conf < 0.7 → sell 50%)
         trade = engine.execute_signal("SELL", 0.60, "test partial", "MOMENTUM")
-        if trade:
-            assert engine.win_count == 0, "Partial sell should not count as win"
-            assert engine.loss_count == 0, "Partial sell should not count as loss"
-            assert engine.position.realized_pnl > 0, "Partial should accumulate realized_pnl"
+        assert trade is not None, "Expected trade to be generated"
+        assert engine.win_count == 0, "Partial sell should not count as win"
+        assert engine.loss_count == 0, "Partial sell should not count as loss"
+        assert engine.position.realized_pnl > 0, "Partial should accumulate realized_pnl"
 
     def test_winning_round_trip_counted_correctly(self):
         """Full round trip (BUY → SELL close) with profit counts as WIN."""
@@ -708,17 +709,17 @@ class TestSnapshotAndRollback:
 
         # Execute a BUY (engine commits internally)
         trade = engine.execute_signal("BUY", 0.70, "test buy", "MOMENTUM")
-        if trade:
-            assert engine.position.size > orig_pos
-            assert engine.balance < orig_balance
-            # total_trades only increments on round-trip close, not BUY
-            assert engine.total_trades == orig_trades
+        assert trade is not None, "Expected BUY trade to be generated"
+        assert engine.position.size > orig_pos
+        assert engine.balance < orig_balance
+        # total_trades only increments on round-trip close, not BUY
+        assert engine.total_trades == orig_trades
 
-            # Simulate Kraken failure → rollback
-            engine.restore_position(snap)
-            assert engine.balance == orig_balance
-            assert engine.position.size == orig_pos
-            assert engine.total_trades == orig_trades
+        # Simulate Kraken failure → rollback
+        engine.restore_position(snap)
+        assert engine.balance == orig_balance
+        assert engine.position.size == orig_pos
+        assert engine.total_trades == orig_trades
 
     def test_rollback_restores_after_failed_sell(self):
         """Simulates engine commit + rollback for a failed SELL order."""
@@ -737,16 +738,16 @@ class TestSnapshotAndRollback:
 
         # Execute a full SELL (conf > 0.7 → 100%)
         trade = engine.execute_signal("SELL", 0.75, "test sell", "MOMENTUM")
-        if trade:
-            assert engine.position.size == 0.0
-            assert engine.win_count == 1  # profitable trade
+        assert trade is not None, "Expected SELL trade to be generated"
+        assert engine.position.size == 0.0
+        assert engine.win_count == 1  # profitable trade
 
-            # Simulate failure → rollback
-            engine.restore_position(snap)
-            assert engine.position.size == 5.0
-            assert engine.position.avg_entry == 95.0
-            assert engine.win_count == 0
-            assert engine.balance == 9525.0
+        # Simulate failure → rollback
+        engine.restore_position(snap)
+        assert engine.position.size == 5.0
+        assert engine.position.avg_entry == 95.0
+        assert engine.win_count == 0
+        assert engine.balance == 9525.0
 
     def test_realized_pnl_accumulates_across_partials(self):
         """Multiple partial sells accumulate realized_pnl; final close uses total."""
@@ -770,11 +771,10 @@ class TestSnapshotAndRollback:
 
         # Close remaining (this might need dust guard depending on size)
         t2 = engine.execute_signal("SELL", 0.75, "close", "MOMENTUM")
-        if t2:
-            # If position closed, win should be based on accumulated pnl
-            if engine.position.size == 0:
-                assert engine.win_count == 1
-                assert t2.profit > pnl_after_partial, "Close profit should be accumulated"
+        assert t2 is not None, "Expected closing SELL trade to be generated"
+        assert engine.position.size == 0, "Position should be fully closed"
+        assert engine.win_count == 1
+        assert t2.profit > pnl_after_partial, "Close profit should be accumulated"
 
 
 class TestCompetitionMode:

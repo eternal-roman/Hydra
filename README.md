@@ -261,7 +261,8 @@ hydra/
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
 ├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
-├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, order reconciler, --resume
+├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, execution stream, WS market data streams, --resume
+├── hydra_journal_migrator.py # Legacy trade log → order journal migration
 ├── hydra_tuner.py          # Self-tuning parameters via Bayesian updating
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
@@ -274,7 +275,17 @@ hydra/
 │   ├── test_tuner.py        # Self-tuning parameter tests
 │   ├── test_balance.py      # Balance & asset conversion tests
 │   ├── test_kraken_cli.py   # KrakenCLI wrapper tests (args, precision, fees)
-│   └── live_harness/        # Live-execution test harness (34 scenarios)
+│   ├── test_execution_stream.py  # ExecutionStream health + auto-restart
+│   ├── test_status_gate.py       # System status gate (maintenance, degradation)
+│   ├── test_pair_constants.py    # Dynamic pair constants (load, apply, fallback)
+│   ├── test_reconciliation.py    # Restart-gap reconciliation
+│   ├── test_resume_reconcile.py  # Resume reconciliation (stale PLACED entries)
+│   ├── test_candle_stream.py     # CandleStream (ws ohlc) dispatch + storage
+│   ├── test_ticker_stream.py     # TickerStream (ws ticker) dispatch + storage
+│   ├── test_balance_stream.py    # BalanceStream (ws balances) normalization
+│   ├── test_book_stream.py       # BookStream (ws book) dispatch + conversion
+│   ├── test_pnl_reconcile.py     # P&L reconciliation (trades-history matching)
+│   └── live_harness/        # Live-execution test harness (41+ scenarios)
 │       ├── harness.py       # Harness class, CLI entry, harness_execute wrapper
 │       ├── scenarios.py     # All scenarios + ALL_SCENARIOS registry
 │       ├── schemas.py       # Per-status trade log entry schemas
@@ -323,24 +334,35 @@ HYDRA tracks and reports per pair:
 ## Testing
 
 ```bash
-python tests/test_engine.py        # Indicators, regime, signals, sizing, circuit breaker
-python tests/test_cross_pair.py    # Cross-pair coordinator rules
-python tests/test_order_book.py    # Depth analyzer, imbalance, walls
-python tests/test_tuner.py         # Self-tuning Bayesian updates
-python tests/test_balance.py       # Staked asset, USD conversion, balance init
-python tests/test_kraken_cli.py    # KrakenCLI wrappers, price precision, fee parsing
-python hydra_engine.py             # Synthetic 300-tick demo (no API keys needed)
+python tests/test_engine.py            # Indicators, regime, signals, sizing, circuit breaker
+python tests/test_cross_pair.py        # Cross-pair coordinator rules
+python tests/test_order_book.py        # Depth analyzer, imbalance, walls
+python tests/test_tuner.py             # Self-tuning Bayesian updates
+python tests/test_balance.py           # Staked asset, USD conversion, balance init
+python tests/test_kraken_cli.py        # KrakenCLI wrappers, price precision, fee parsing
+python tests/test_execution_stream.py  # ExecutionStream health + auto-restart cooldown
+python tests/test_status_gate.py       # System status gate (maintenance, degradation, transitions)
+python tests/test_pair_constants.py    # Dynamic pair constants (load, apply, fallback)
+python tests/test_reconciliation.py    # Restart-gap reconciliation (query-orders recovery)
+python tests/test_resume_reconcile.py  # Resume reconciliation (stale PLACED from previous sessions)
+python tests/test_candle_stream.py     # CandleStream (ws ohlc) dispatch, storage, symbol mapping
+python tests/test_ticker_stream.py     # TickerStream (ws ticker) dispatch, storage, symbol mapping
+python tests/test_balance_stream.py    # BalanceStream (ws balances) dispatch, normalization, filtering
+python tests/test_book_stream.py       # BookStream (ws book) dispatch, REST-format conversion
+python tests/test_pnl_reconcile.py     # P&L reconciliation (trades-history matching)
+python hydra_engine.py                 # Synthetic 300-tick demo (no API keys needed)
 ```
 
 ### Live-execution test harness
 
-`tests/live_harness/` drives `HydraAgent._execute_trade` across 34 scenarios
-(happy, failure, edge, schema, rollback, historical regression, real Kraken).
+`tests/live_harness/` drives `HydraAgent._place_order` across 41+ scenarios
+(happy, failure, edge, schema, rollback, historical regression, WS execution
+stream lifecycle transitions, real Kraken).
 It is the canonical validation tool for any change to the execution path.
 
 ```bash
 python tests/live_harness/harness.py --mode smoke    # ~1.5s, import + agent
-python tests/live_harness/harness.py --mode mock     # ~1.5s, 26 scenarios (default)
+python tests/live_harness/harness.py --mode mock     # ~1.5s, 33+ scenarios (default)
 python tests/live_harness/harness.py --mode validate # ~10s, real Kraken read-only
 python tests/live_harness/harness.py --mode live --i-understand-this-places-real-orders
 ```

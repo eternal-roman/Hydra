@@ -16,7 +16,6 @@ Usage:
 
 import json
 import time
-import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -178,7 +177,8 @@ class HydraBrain:
         if not self.primary_client:
             raise ValueError("No AI provider available — need ANTHROPIC_API_KEY, OPENAI_API_KEY, or XAI_API_KEY")
 
-        self.model = self.primary_model  # for get_stats display
+        # External consumers (e.g., dashboard banner) may reference these
+        self.model = self.primary_model
         self.provider = self.primary_provider
         self.max_daily_cost = max_daily_cost
         self.call_interval = call_interval
@@ -274,6 +274,8 @@ class HydraBrain:
                     print(f"  [BRAIN] Strategist failed (continuing with Risk Manager decision): {e}")
 
             # Build final decision — strategist overrides risk manager when present
+            if needs_strategist and not strategist_output:
+                print(f"  [BRAIN] Strategist returned no usable output — falling back to Risk Manager")
             if strategist_output:
                 final_action = strategist_output.get("final_action", risk_output.get("final_action", state["signal"]["action"]))
                 final_decision = strategist_output.get("decision", risk_output.get("decision", "CONFIRM"))

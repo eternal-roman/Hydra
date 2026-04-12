@@ -36,8 +36,12 @@ if os.path.exists(_env_path):
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
+                _v = _v.strip()
+                # Strip surrounding quotes (single or double)
+                if len(_v) >= 2 and _v[0] == _v[-1] and _v[0] in ('"', "'"):
+                    _v = _v[1:-1]
                 if _v and _k.strip() not in os.environ:
-                    os.environ[_k.strip()] = _v.strip()
+                    os.environ[_k.strip()] = _v
 
 from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
 from hydra_tuner import ParameterTracker
@@ -537,7 +541,7 @@ class KrakenCLI:
 class DashboardBroadcaster:
     """Async WebSocket server that broadcasts agent state to dashboard clients."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
         self.host = host
         self.port = port
         self.clients = set()
@@ -574,8 +578,9 @@ class DashboardBroadcaster:
                 await websocket.send(json.dumps(self.latest_state))
             async for msg in websocket:
                 pass  # We only broadcast, don't receive
-        except Exception:
-            pass
+        except Exception as e:
+            if not isinstance(e, (ConnectionError, OSError)):
+                print(f"  [WS] Client handler error: {type(e).__name__}: {e}")
         finally:
             self.clients.discard(websocket)
             print(f"  [WS] Dashboard client disconnected ({len(self.clients)} total)")
@@ -1061,6 +1066,15 @@ class BalanceStream(BaseStream):
 # EXECUTION STREAM — kraken ws executions push reconciler
 # ═══════════════════════════════════════════════════════════════
 
+def _is_fully_filled(vol_exec: float, placed: float, tolerance: float = 0.01) -> bool:
+    """Shared fill-detection: True if vol_exec is within `tolerance` (1%)
+    of the placed amount. Used by ExecutionStream, restart-gap reconciliation,
+    and resume reconciliation so all paths agree."""
+    if placed <= 0:
+        return False
+    return abs(vol_exec - placed) / placed < tolerance
+
+
 class ExecutionStream(BaseStream):
     """Consumes `kraken ws executions` and delivers push-based lifecycle
     events to the agent tick loop.
@@ -1175,10 +1189,9 @@ class ExecutionStream(BaseStream):
                 fee = float(order_info.get("fee", 0))
 
                 if status == "closed":
-                    tolerance = 0.01
                     state = (
                         "FILLED"
-                        if abs(vol_exec - placed) / max(placed, 1e-12) < tolerance
+                        if _is_fully_filled(vol_exec, placed)
                         else "PARTIALLY_FILLED"
                     )
                 elif vol_exec > 0:
@@ -1350,11 +1363,10 @@ class ExecutionStream(BaseStream):
 
             vol_exec = known["vol_exec_running"]
             placed = known["placed_amount"]
-            eps = max(1e-9, placed * 1e-6)
             avg_price = (known["cost_running"] / vol_exec) if vol_exec > 0 else None
 
             if order_status == "filled":
-                if abs(vol_exec - placed) <= eps:
+                if _is_fully_filled(vol_exec, placed):
                     state = "FILLED"
                 else:
                     state = "PARTIALLY_FILLED"
@@ -1362,7 +1374,7 @@ class ExecutionStream(BaseStream):
             elif order_status in ("canceled", "expired"):
                 reason = entry.get("reason") or order_status
                 terminal_reason = str(reason)
-                if vol_exec <= eps:
+                if vol_exec <= 0:
                     state = "CANCELLED_UNFILLED"
                 else:
                     state = "PARTIALLY_FILLED"
@@ -1911,6 +1923,11 @@ class HydraAgent:
                         if self._last_kraken_status != _kraken_status:
                             print(f"  [HYDRA] Kraken status: {_kraken_status} — skipping tick")
                         self._last_kraken_status = _kraken_status
+                        # Sleep the full tick interval to avoid busy-looping
+                        next_tick_time = self.start_time + tick * self.interval
+                        _maint_sleep = next_tick_time - time.time()
+                        if _maint_sleep > 0 and self.running:
+                            time.sleep(_maint_sleep)
                         continue
                     if self._last_kraken_status not in ("online", "post_only", None):
                         print(f"  [HYDRA] Kraken back online (was {self._last_kraken_status})")
@@ -2256,8 +2273,7 @@ class HydraAgent:
             ts_raw = ws_candle.get("interval_begin") or ws_candle.get("timestamp")
             if isinstance(ts_raw, str):
                 try:
-                    from datetime import datetime as _dt, timezone as _tz
-                    ts = _dt.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
                 except Exception:
                     ts = time.time()
             elif isinstance(ts_raw, (int, float)):
@@ -2735,10 +2751,9 @@ class HydraAgent:
                     fee = float(order_info.get("fee", 0))
 
                     if status == "closed":
-                        tolerance = 0.01
                         state = (
                             "FILLED"
-                            if placed > 0 and abs(vol_exec - placed) / max(placed, 1e-12) < tolerance
+                            if _is_fully_filled(vol_exec, placed)
                             else "PARTIALLY_FILLED"
                         )
                     elif vol_exec > 0:
@@ -2898,10 +2913,27 @@ class HydraAgent:
         journal entry it came from AND the engine state. Called in the
         tick loop after drain_events()."""
         idx = event.get("journal_index")
-        if not isinstance(idx, int) or idx < 0 or idx >= len(self.order_journal):
-            print(f"  [EXEC] stale journal_index {idx} — event dropped")
+        order_id = event.get("order_id")
+        entry = None
+
+        # Primary: try index if it's still valid and matches the order_id
+        if isinstance(idx, int) and 0 <= idx < len(self.order_journal):
+            candidate = self.order_journal[idx]
+            cand_oid = candidate.get("order_ref", {}).get("order_id")
+            if cand_oid == order_id:
+                entry = candidate
+
+        # Fallback: reverse-scan by order_id (handles journal trimming)
+        if entry is None and order_id:
+            for e in reversed(self.order_journal):
+                if e.get("order_ref", {}).get("order_id") == order_id:
+                    entry = e
+                    break
+
+        if entry is None:
+            print(f"  [EXEC] journal entry not found for order_id={order_id} "
+                  f"idx={idx} — event dropped")
             return
-        entry = self.order_journal[idx]
         state_name = event["state"]
         entry["lifecycle"] = {
             "state": state_name,
@@ -3355,8 +3387,9 @@ class HydraAgent:
 
         if state.get("last_trade"):
             t = state["last_trade"]
-            profit_str = f" | Profit: ${t['profit']:+,.2f}" if t.get("profit") is not None else ""
-            print(f"  |  >>> SIGNAL: {t['action']} {t['amount']:.8f} @ ${t['price']:,.4f}{profit_str}")
+            _cur = "$" if is_usd else ""
+            profit_str = f" | Profit: {_cur}{t['profit']:+,.2f}" if t.get("profit") is not None else ""
+            print(f"  |  >>> SIGNAL: {t['action']} {t['amount']:.8f} @ {_cur}{t['price']:,.4f}{profit_str}")
             print(f"  |      Reason: {t['reason'][:75]}")
 
     def _print_banner(self):

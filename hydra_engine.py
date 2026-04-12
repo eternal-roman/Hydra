@@ -843,18 +843,23 @@ class HydraEngine:
         self.tick_count = 0
         self.halted = False
         self.halt_reason = ""
+        self.gross_profit = 0.0
+        self.gross_loss = 0.0
 
     def ingest_candle(self, raw: Dict[str, Any]) -> None:
         """Add a candle from kraken ohlc JSON output. Deduplicates by timestamp."""
         has_timestamp = "timestamp" in raw
-        candle = Candle(
-            open=float(raw.get("open", 0)),
-            high=float(raw.get("high", 0)),
-            low=float(raw.get("low", 0)),
-            close=float(raw.get("close", 0)),
-            volume=float(raw.get("volume", 0)),
-            timestamp=float(raw.get("timestamp", time.time())),
-        )
+        try:
+            candle = Candle(
+                open=float(raw.get("open") or 0),
+                high=float(raw.get("high") or 0),
+                low=float(raw.get("low") or 0),
+                close=float(raw.get("close") or 0),
+                volume=float(raw.get("volume") or 0),
+                timestamp=float(raw.get("timestamp") or time.time()),
+            )
+        except (TypeError, ValueError):
+            return  # Malformed candle data — skip silently
         # Deduplicate: if Kraken timestamp matches last candle, update in place (incomplete candle refresh)
         if has_timestamp and self.candles and self.candles[-1].timestamp == candle.timestamp:
             self.candles[-1] = candle
@@ -951,10 +956,11 @@ class HydraEngine:
                         self.position.avg_entry * self.position.size + current_price * size
                     ) / total_size
                     self.position.size = total_size
+                    # Update params to latest on average-in so tuner sees current params
+                    self.position.params_at_entry = self.snapshot_params()
                 else:
                     self.position.size = size
                     self.position.avg_entry = current_price
-                    # Snapshot tunable params at entry for self-tuning
                     self.position.params_at_entry = self.snapshot_params()
 
                 self.balance -= cost
@@ -972,7 +978,8 @@ class HydraEngine:
                 self.trades.append(trade)
                 return trade
 
-        elif signal.action == SignalAction.SELL and self.position.size > 0:
+        elif (signal.action == SignalAction.SELL and self.position.size > 0
+              and signal.confidence >= self.sizer.min_confidence):
             sell_pct = 1.0 if signal.confidence > 0.7 else 0.5
             sell_amount = self.position.size * sell_pct
             # Enforce Kraken ordermin: if the position itself is below ordermin,
@@ -995,7 +1002,8 @@ class HydraEngine:
             self.position.realized_pnl += profit
             total_profit = profit  # default: single-leg profit
             position_closed = False
-            if self.position.size < 0.00001:
+            dust_threshold = min_size * 0.1 if min_size > 0 else 0.00001
+            if self.position.size < dust_threshold:
                 self.position.size = 0.0
                 self.position.avg_entry = 0.0
                 position_closed = True
@@ -1007,10 +1015,12 @@ class HydraEngine:
                 self.total_trades += 1
                 if total_profit > 0:
                     self.win_count += 1
+                    self.gross_profit += total_profit
                 else:
                     # Break-even (== 0) counts as loss per industry standard:
                     # zero gain after fees and opportunity cost is not a win.
                     self.loss_count += 1
+                    self.gross_loss += abs(total_profit)
                 self.position.params_at_entry = None
                 self.position.realized_pnl = 0.0
 
@@ -1160,6 +1170,8 @@ class HydraEngine:
             "tick_count": self.tick_count,
             "halted": self.halted,
             "halt_reason": self.halt_reason,
+            "gross_profit": self.gross_profit,
+            "gross_loss": self.gross_loss,
             "equity_history": self.equity_history[-500:],
             "trades": [
                 {
@@ -1207,6 +1219,8 @@ class HydraEngine:
         self.tick_count = int(snapshot.get("tick_count", 0))
         self.halted = bool(snapshot.get("halted", False))
         self.halt_reason = str(snapshot.get("halt_reason", ""))
+        self.gross_profit = float(snapshot.get("gross_profit", 0.0))
+        self.gross_loss = float(snapshot.get("gross_loss", 0.0))
         self.equity_history = list(snapshot.get("equity_history", []))
         # HF-004 fix: restore trades list. Defensive: tolerate legacy snapshots
         # (no trades key), malformed rows, and missing optional fields.
@@ -1233,14 +1247,19 @@ class HydraEngine:
         self.candles = []
         self.prices = []
         for raw in snapshot.get("candles", []):
-            c = Candle(
-                open=float(raw["open"]), high=float(raw["high"]),
-                low=float(raw["low"]), close=float(raw["close"]),
-                volume=float(raw.get("volume", 0.0)),
-                timestamp=float(raw.get("timestamp", time.time())),
-            )
-            self.candles.append(c)
-            self.prices.append(c.close)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                c = Candle(
+                    open=float(raw.get("open", 0)), high=float(raw.get("high", 0)),
+                    low=float(raw.get("low", 0)), close=float(raw.get("close", 0)),
+                    volume=float(raw.get("volume", 0.0)),
+                    timestamp=float(raw.get("timestamp", time.time())),
+                )
+                self.candles.append(c)
+                self.prices.append(c.close)
+            except (TypeError, ValueError, KeyError):
+                continue  # silently drop malformed candle rows
 
     def _candle_status(self) -> str:
         """Check if the latest candle is still forming or closed."""
@@ -1405,9 +1424,7 @@ class HydraEngine:
         pnl_pct = (pnl / self.initial_balance) * 100
         win_rate = (self.win_count / (self.win_count + self.loss_count) * 100) if (self.win_count + self.loss_count) > 0 else 0
 
-        gross_profit = sum(t.profit for t in self.trades if t.profit and t.profit > 0)
-        gross_loss = abs(sum(t.profit for t in self.trades if t.profit and t.profit < 0))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        profit_factor = self.gross_profit / self.gross_loss if self.gross_loss > 0 else float("inf")
 
         w = 60  # inner width between ║ chars
         def row(label, value):

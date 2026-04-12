@@ -1,14 +1,14 @@
 # Hydra Live-Execution Test Harness
 
-Drives `HydraAgent._execute_trade` across every code path — happy, failure,
-edge, schema, rollback, historical regression, and real-Kraken — to catch
+Drives `HydraAgent._place_order` across every code path — happy, failure,
+edge, schema, rollback, WS lifecycle, historical regression, and real-Kraken — to catch
 wiring bugs that unit tests miss. **This harness surfaced HF-001 through
 HF-004 on its first run.** Any PR touching the execution path should use it.
 
 ## Mandatory for PRs touching
 
-`hydra_agent.py:_execute_trade`, `_execute_paper_trade`, `OrderReconciler`,
-the tick-loop wrapper at lines 876-909, any `trade_log.append` site, or
+`hydra_agent.py:_place_order`, `_place_paper_order`, `ExecutionStream`,
+the tick-loop wrapper at lines 876-909, any `order_journal.append` site, or
 `hydra_engine.py:execute_signal`/`_maybe_execute`/`snapshot_position`/
 `restore_position`/`PositionSizer.calculate`.
 
@@ -17,7 +17,7 @@ the tick-loop wrapper at lines 876-909, any `trade_log.append` site, or
 | Mode | Duration | Cost | What it runs |
 |---|---|---|---|
 | `smoke` | ~1.5s | $0 | Import + agent construction only |
-| `mock` *(default)* | ~1.5s | $0 | 26 scenarios via monkey-patched Kraken (H/F/E/S/R/Hp) |
+| `mock` *(default)* | ~1.5s | $0 | 33+ scenarios via monkey-patched Kraken (H/F/E/S/R/Hp/W) |
 | `validate` | ~10s | $0 | 3 scenarios hitting real Kraken read-only + `--validate` |
 | `live` | ~3min | <$0.01 | 7 scenarios with real post-only orders + immediate cancel |
 
@@ -44,20 +44,21 @@ Exit codes: `0` all passed, `1` scenario failure, `2` harness setup error.
 
 ## Scenario catalog
 
-Source of truth is `scenarios.py` → `ALL_SCENARIOS`. 34 scenarios across 7
+Source of truth is `scenarios.py` → `ALL_SCENARIOS`. 41+ scenarios across 8
 categories:
 
 | Prefix | Category | Count | What it tests |
 |---|---|---|---|
 | `H*` | Happy path | 6 | Paper/live buy/sell, mocked and real |
-| `F*` | Failure path | 7 | Each `_execute_trade` failure branch + 13-field rollback check |
+| `F*` | Failure path | 7 | Each `_place_order` failure branch + 13-field rollback check |
 | `E*` | Edge case | 7 | Txid shapes, halted engine, ordermin, unparseable JSON |
 | `S*` | Schema meta | 1 | Validator sanity check |
 | `R*` | Rollback meta | 1 | Comparator sanity check |
 | `Hp*` | Historical regression | 6 | Named for the commit that fixed the original bug |
 | `L*` | Live only | 6 | Real Kraken — ticker, validate, post-only + cancel per pair |
+| `W*` | WS lifecycle | 7 | ExecutionStream lifecycle transitions via FakeExecutionStream |
 
-Every `H/F/E` scenario calls `validate_entry(entry, expected_status=...)`,
+Every `H/F/E` scenario calls `validate_entry(entry, expected_state=...)`,
 so schema compliance is enforced implicitly for all production entries.
 Every `F` scenario runs through `_run_with_rollback_check`, which asserts
 all 13 engine fields restore exactly to pre-trade state.
@@ -68,15 +69,15 @@ all 13 engine fields restore exactly to pre-trade state.
 tests/live_harness/
 ├── __init__.py          Package marker
 ├── harness.py           Harness class, CLI entry, harness_execute wrapper
-├── scenarios.py         All 34 scenarios + ALL_SCENARIOS registry
-├── schemas.py           Per-status trade log schemas + validate_entry()
+├── scenarios.py         All 41+ scenarios + ALL_SCENARIOS registry
+├── schemas.py           Per-state order journal schemas + validate_entry()
 ├── state_comparator.py  13-field rollback comparator
 ├── stubs.py             StubRun + Kraken response builders
 └── README.md            This file
 ```
 
 **Isolation guarantees** (all in `harness.py`):
-1. **No `run()` call, ever.** Harness uses `_execute_trade` directly; the
+1. **No `run()` call, ever.** Harness uses `_place_order` directly; the
    rolling log file is written only by `run()`, so harness never touches it.
 2. **Tuner save neutralized** — `ParameterTracker._save` patched to no-op.
 3. **Brain disabled** — LLM API env vars unset; `HydraBrain` is always `None`.
@@ -84,9 +85,9 @@ tests/live_harness/
    doesn't call it anyway).
 
 **The execute wrapper** `harness_execute()` reproduces the tick-loop wrapper
-at `hydra_agent.py:876-909`: snapshot → `execute_signal` → `_execute_trade` →
+at `hydra_agent.py:876-909`: snapshot → `execute_signal` → `_place_order` →
 rollback on failure. Returns a report dict with `outcome`, `pre_snap`,
-`trade`, `trade_dict`, `last_trade_log_entry` for post-scenario assertions.
+`trade`, `trade_dict`, `last_journal_entry` for post-scenario assertions.
 
 ## Findings tracker
 
@@ -126,7 +127,7 @@ def scenario_H9_your_name(h: Harness):
         stub.restore()
 
     assert report["outcome"] == "success"
-    validate_entry(report["last_trade_log_entry"], expected_status="PAPER_EXECUTED")
+    validate_entry(report["last_journal_entry"], expected_state="FILLED")
 ```
 
 ### Failure-path template (with rollback check)
@@ -142,7 +143,7 @@ def scenario_F8_your_failure(h: Harness):
             "order": kraken_order_error("EOrder:Your specific error"),
         })),
         action="BUY", confidence=0.75,
-        expected_status="FAILED",
+        expected_state="PLACEMENT_FAILED",
     )
 ```
 
@@ -164,11 +165,11 @@ Fields: stable `code` (never reuse), `name`, `category` (one letter), `modes`
 
 | Change touches | Required modes |
 |---|---|
-| `_execute_trade`, `_execute_paper_trade`, trade log write sites | `mock` + `validate` + `live` for high-risk |
-| `OrderReconciler` | `mock` + `live` recommended |
+| `_place_order`, `_place_paper_order`, order journal write sites | `mock` + `validate` + `live` for high-risk |
+| `ExecutionStream` | `mock` + `live` recommended |
 | `execute_signal`, `_maybe_execute`, `snapshot_*`, `restore_*`, `PositionSizer.calculate` | `mock` |
 | `KrakenCLI.order_buy`/`order_sell`/`order_amend`/`ticker` | `mock` + `validate` |
-| Any trade_log entry schema | `mock` |
+| Any order_journal entry schema | `mock` |
 | Signal/regime/indicators | (not on execution path — `test_engine.py` covers this) |
 | Any field added to `snapshot_position`/`snapshot_runtime` | `mock` + update `state_comparator.py` **in the same PR** |
 

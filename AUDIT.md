@@ -31,6 +31,7 @@
 **Known limitations at audit time:** 5 (documented in section 9)
 
 Subsequent test suites and fix history are tracked in `CHANGELOG.md`.
+Current: 460+ tests across 16 suites (see `CLAUDE.md` Testing section for the full list).
 Post-audit bugs surfaced by the live-execution harness are tracked as
 `HF-###` entries in `tests/live_harness/README.md`.
 
@@ -181,18 +182,18 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 - **Notes:** Post-only ensures orders sit on the book as maker orders. If they would cross the spread, Kraken rejects them (preventing accidental taker execution).
 
 ### 5.2 Price Selection
-- **Location:** `_execute_trade()` lines 435-439
+- **Location:** `_place_order()` lines 435-439
 - **BUY:** Placed at current bid price (top of book, maker side)
 - **SELL:** Placed at current ask price (top of book, maker side)
 - **Result:** PASS
 
 ### 5.3 Validation Before Execution
-- **Location:** `_execute_trade()` lines 441-457
+- **Location:** `_place_order()` lines 441-457
 - **Flow:** Fetch ticker → validate with `--validate` flag → execute if valid
 - **Result:** PASS — validation failures are logged and skip execution.
 
 ### 5.4 Rate Limiting
-- **Location:** Throughout `_execute_trade()` and main loop
+- **Location:** Throughout `_place_order()` and main loop
 - **Spec:** Minimum 2 seconds between every Kraken API call
 - **Result:** PASS (after fix)
 - **Fix applied:** Added `time.sleep(2)` between every API call — ticker fetch, validation, execution, OHLC fetch, balance check, dead man's switch refresh.
@@ -202,8 +203,8 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 - **Behavior:** `kraken order cancel-after 60` refreshed every tick (30s default)
 - **Result:** PASS — 60s timeout with 30s refresh gives 30s safety margin.
 
-### 5.6 Trade Log Accuracy
-- **Location:** `_execute_trade()` lines 475-487
+### 5.6 Order Journal Accuracy
+- **Location:** `_place_order()` lines 475-487
 - **Test:** Logs `limit_price` (actual order price from bid/ask), not engine's internal price
 - **Result:** PASS (after fix)
 - **Fix applied:** Original logged `trade["price"]` (engine price). Changed to `limit_price`.
@@ -353,7 +354,7 @@ These are documented behaviors, not bugs:
 
 2. ~~**No partial fill handling**~~ — **Resolved in v2.5.0.** `ExecutionStream` tracks `PARTIALLY_FILLED` state with exact `vol_exec`. Engine remains optimistically committed; journal carries the true fill for P&L. `_reconcile_pnl()` (v2.6.0) can verify fills against `kraken trades-history`.
 
-3. ~~**Cross-pair swaps are advisory only**~~ — **Resolved in v2.1.0.** `_execute_coordinated_swap()` now executes both sell and buy legs via `execute_signal()` + `_execute_trade()`.
+3. ~~**Cross-pair swaps are advisory only**~~ — **Resolved in v2.1.0.** `_execute_coordinated_swap()` now executes both sell and buy legs via `execute_signal()` + `_place_order()`.
 
 4. **DEFENSIVE strategy never buys** — BUY confidence is 0.4 (below the 0.55 execution threshold). This is by design — in a downtrend, the agent preserves capital rather than catching falling knives.
 
