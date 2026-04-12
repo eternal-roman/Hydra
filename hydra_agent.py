@@ -323,9 +323,17 @@ class KrakenCLI:
         return KrakenCLI._run(["open-orders"])
 
     @staticmethod
-    def trades_history() -> dict:
-        """Get trade history."""
-        return KrakenCLI._run(["trades-history"])
+    def trades_history(start: float = None, end: float = None) -> dict:
+        """Get trade history, optionally filtered by time range.
+
+        start/end: Unix timestamps. Returns {"count": N, "trades": {trade_id: {...}}}.
+        """
+        args = ["trades-history"]
+        if start is not None:
+            args.extend(["--start", str(start)])
+        if end is not None:
+            args.extend(["--end", str(end)])
+        return KrakenCLI._run(args)
 
     @staticmethod
     def spreads(pair: str, since=None) -> dict:
@@ -458,6 +466,24 @@ class KrakenCLI:
         """
         args = ["order", "cancel"]
         args.extend([str(t) for t in txids])
+        args.append("--yes")
+        return KrakenCLI._run(args)
+
+    @staticmethod
+    def order_batch(json_file: str, pair: str = None, validate: bool = False) -> dict:
+        """Submit batch orders from a JSON file (2–15 orders, single pair).
+
+        The JSON file should contain an array of order objects. Each order
+        must specify side, order_type, volume, and optionally price/oflags.
+        All orders in a batch must be for the same pair.
+
+        Returns Kraken response with order results, or {"error": "..."}.
+        """
+        args = ["order", "batch", json_file]
+        if pair:
+            args.extend(["--pair", KrakenCLI._resolve_pair(pair)])
+        if validate:
+            args.append("--validate")
         args.append("--yes")
         return KrakenCLI._run(args)
 
@@ -2748,6 +2774,97 @@ class HydraAgent:
             print(f"  [HYDRA] Stale PLACED reconciliation: {', '.join(parts)}")
         else:
             print(f"  [HYDRA] Stale PLACED reconciliation: all {len(stale)} entries still pending on exchange or query failed")
+
+    def _reconcile_pnl(self) -> Dict[str, Any]:
+        """Compare journal fill data against Kraken trades-history to detect
+        P&L discrepancies. Returns a summary dict with match/mismatch counts.
+
+        Only checks terminal journal entries (FILLED/PARTIALLY_FILLED) that
+        have a valid order_id. Compares vol_exec and fee_quote against
+        Kraken's authoritative trade records.
+        """
+        # Collect terminal journal entries with order IDs
+        journal_fills: Dict[str, dict] = {}  # order_id → journal entry
+        for entry in self.order_journal:
+            lc = entry.get("lifecycle", {})
+            if lc.get("state") not in ("FILLED", "PARTIALLY_FILLED"):
+                continue
+            oid = entry.get("order_ref", {}).get("order_id")
+            if not oid or oid == "unknown":
+                continue
+            journal_fills[oid] = entry
+
+        if not journal_fills:
+            return {"checked": 0, "matched": 0, "mismatched": 0, "missing": 0, "details": []}
+
+        # Fetch trades-history from Kraken
+        time.sleep(2)  # Rate limit
+        resp = KrakenCLI.trades_history()
+        if not isinstance(resp, dict) or "error" in resp:
+            print(f"  [PNL] trades-history query failed: {resp}")
+            return {"checked": 0, "matched": 0, "mismatched": 0, "missing": 0,
+                    "details": [], "error": str(resp)}
+
+        # Build order_id → aggregated fills from Kraken trades
+        kraken_fills: Dict[str, dict] = {}  # ordertxid → {vol, cost, fee}
+        trades = resp.get("trades", {})
+        for _tid, trade in trades.items():
+            if not isinstance(trade, dict):
+                continue
+            ordertxid = trade.get("ordertxid", "")
+            if ordertxid not in journal_fills:
+                continue
+            if ordertxid not in kraken_fills:
+                kraken_fills[ordertxid] = {"vol": 0.0, "cost": 0.0, "fee": 0.0}
+            kraken_fills[ordertxid]["vol"] += float(trade.get("vol", 0))
+            kraken_fills[ordertxid]["cost"] += float(trade.get("cost", 0))
+            kraken_fills[ordertxid]["fee"] += float(trade.get("fee", 0))
+
+        # Compare
+        matched = 0
+        mismatched = 0
+        missing = 0
+        details = []
+        for oid, entry in journal_fills.items():
+            lc = entry["lifecycle"]
+            j_vol = lc.get("vol_exec", 0)
+            j_fee = lc.get("fee_quote", 0) or 0
+
+            if oid not in kraken_fills:
+                missing += 1
+                details.append({
+                    "order_id": oid, "status": "missing_from_kraken",
+                    "journal_vol": j_vol, "journal_fee": j_fee,
+                })
+                continue
+
+            k = kraken_fills[oid]
+            vol_match = abs(j_vol - k["vol"]) / max(j_vol, 1e-12) < 0.01
+            fee_match = abs(j_fee - k["fee"]) < 0.01  # absolute tolerance for fees
+
+            if vol_match and fee_match:
+                matched += 1
+            else:
+                mismatched += 1
+                details.append({
+                    "order_id": oid, "status": "mismatch",
+                    "journal_vol": j_vol, "kraken_vol": k["vol"],
+                    "journal_fee": j_fee, "kraken_fee": k["fee"],
+                })
+
+        checked = matched + mismatched + missing
+        summary = {"checked": checked, "matched": matched,
+                   "mismatched": mismatched, "missing": missing, "details": details}
+
+        if mismatched or missing:
+            print(f"  [PNL] Reconciliation: {checked} checked, {matched} matched, "
+                  f"{mismatched} mismatched, {missing} missing from Kraken")
+            for d in details[:5]:
+                print(f"  [PNL]   {d['order_id']}: {d['status']}")
+        else:
+            print(f"  [PNL] Reconciliation: {checked} checked, all matched")
+
+        return summary
 
     def _apply_execution_event(self, event: Dict[str, Any]) -> None:
         """Apply one terminal event from the execution stream to the

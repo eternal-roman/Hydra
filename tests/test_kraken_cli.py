@@ -349,6 +349,61 @@ class TestCancelOrder:
         assert result == err
 
 
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.order_batch — argument construction & passthrough
+# ═══════════════════════════════════════════════════════════════
+
+class TestOrderBatch:
+    def test_order_batch_basic(self):
+        _, stub = _with_stub({"results": []},
+                              lambda: KrakenCLI.order_batch("/tmp/orders.json"))
+        assert stub.calls == [["order", "batch", "/tmp/orders.json", "--yes"]]
+
+    def test_order_batch_with_pair(self):
+        _, stub = _with_stub({},
+                              lambda: KrakenCLI.order_batch("/tmp/o.json", pair="SOL/USDC"))
+        assert stub.calls == [["order", "batch", "/tmp/o.json", "--pair", "SOL/USDC", "--yes"]]
+
+    def test_order_batch_validate(self):
+        _, stub = _with_stub({},
+                              lambda: KrakenCLI.order_batch("/tmp/o.json", validate=True))
+        assert stub.calls == [["order", "batch", "/tmp/o.json", "--validate", "--yes"]]
+
+    def test_order_batch_resolves_pair(self):
+        _, stub = _with_stub({},
+                              lambda: KrakenCLI.order_batch("/tmp/o.json", pair="XBT/USDC"))
+        assert "--pair" in stub.calls[0]
+        assert "XBTUSDC" in stub.calls[0]
+
+    def test_order_batch_error_passthrough(self):
+        err = {"error": "EGeneral:Invalid arguments"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.order_batch("/tmp/o.json"))
+        assert result == err
+
+
+# ═══════════════════════════════════════════════════════════════
+# TEST: KrakenCLI.trades_history — argument construction
+# ═══════════════════════════════════════════════════════════════
+
+class TestTradesHistory:
+    def test_trades_history_no_args(self):
+        _, stub = _with_stub({"trades": {}}, lambda: KrakenCLI.trades_history())
+        assert stub.calls == [["trades-history"]]
+
+    def test_trades_history_with_start(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.trades_history(start=1700000000))
+        assert stub.calls == [["trades-history", "--start", "1700000000"]]
+
+    def test_trades_history_with_start_and_end(self):
+        _, stub = _with_stub({}, lambda: KrakenCLI.trades_history(start=1700000000, end=1700100000))
+        assert stub.calls == [["trades-history", "--start", "1700000000", "--end", "1700100000"]]
+
+    def test_trades_history_error_passthrough(self):
+        err = {"error": "EAPI:Rate limit"}
+        result, _ = _with_stub(err, lambda: KrakenCLI.trades_history())
+        assert result == err
+
+
 class TestAssetPairs:
     def test_asset_pairs_no_filter(self):
         _, stub = _with_stub({}, lambda: KrakenCLI.asset_pairs())
@@ -597,6 +652,8 @@ def run_tests():
         TestOrderAmendArgs,
         TestQueryOrders,
         TestCancelOrder,
+        TestOrderBatch,
+        TestTradesHistory,
         TestAssetPairs,
         TestSystemStatus,
         TestFeeTierExtraction,

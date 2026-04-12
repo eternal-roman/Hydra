@@ -95,6 +95,8 @@ python hydra_engine.py
 - Push-based market data: `CandleStream` (ws ohlc) and `TickerStream` (ws ticker) each subscribe to ALL traded pairs in one WS connection. `_fetch_and_tick()` checks the candle stream first (zero REST calls, zero rate-limit sleep); falls back to REST `ohlc()` when the stream is unhealthy. Per-tick rate-limit sleep is skipped when the candle stream is healthy. Both streams are auto-restarted on failure via `ensure_healthy()` each tick.
 - Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy; falls back to REST polling every 5th tick. Asset names are normalized (BTC→XBT) and equities/ETFs are filtered out.
 - Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Phase 1.75 (order book intelligence) uses WS data when healthy; falls back to REST `depth()`. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
+- Order batch: `KrakenCLI.order_batch(json_file, pair, validate)` wraps `kraken order batch` for submitting 2–15 orders atomically. Single-pair only (Kraken limitation) — not usable for cross-pair swaps, but available for future same-pair batch scenarios.
+- P&L reconciliation: `_reconcile_pnl()` compares journal fill data (vol_exec, fee_quote) against `kraken trades-history`. Aggregates multiple Kraken trades per order_id, reports matched/mismatched/missing counts. Available on-demand; not wired into the tick loop (call manually or add periodic trigger).
 - Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
 
@@ -136,6 +138,7 @@ python tests/test_candle_stream.py # CandleStream (ws ohlc) dispatch, storage, s
 python tests/test_ticker_stream.py # TickerStream (ws ticker) dispatch, storage, symbol mapping
 python tests/test_balance_stream.py # BalanceStream (ws balances) dispatch, normalization, filtering
 python tests/test_book_stream.py   # BookStream (ws book) dispatch, REST-format conversion, analyzer compat
+python tests/test_pnl_reconcile.py # P&L reconciliation (trades-history matching, discrepancy detection)
 python hydra_engine.py             # Synthetic engine demo (no API keys needed)
 ```
 
