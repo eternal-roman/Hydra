@@ -87,6 +87,7 @@ python hydra_engine.py
 - Rate limiting: 2-second minimum between every Kraken API call — do not remove or reduce
 - Order journal persistence: `order_journal` is snapshotted immediately after any tick that appends (not just on the periodic N-tick cadence), so a subsequent crash cannot lose entries since the last successful tick. The rolling file `hydra_order_journal.json` is merged on startup so restarts preserve full history.
 - Execution stream: lifecycle finalization flows from `kraken ws executions` via the `ExecutionStream` class — push-based, not polling. Placement stays REST (`KrakenCLI.order_buy/sell` with `--userref` for correlation); WS events drive entries from `PLACED` to `FILLED` / `PARTIALLY_FILLED` / `CANCELLED_UNFILLED` / `REJECTED` and handle engine rollback on non-fills.
+- Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
 
 ### Dashboard
@@ -118,6 +119,7 @@ python tests/test_order_book.py    # Depth analyzer, imbalance, walls, confidenc
 python tests/test_tuner.py         # Self-tuning Bayesian updates
 python tests/test_balance.py       # Staked asset handling, USD conversion, engine balance init
 python tests/test_kraken_cli.py    # KrakenCLI wrappers: args, parsing, price precision, fee extraction
+python tests/test_execution_stream.py # ExecutionStream health diagnostics + auto-restart cooldown
 python hydra_engine.py             # Synthetic engine demo (no API keys needed)
 ```
 
