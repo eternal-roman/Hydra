@@ -117,7 +117,7 @@ class TestBookStreamDispatch:
                 {"symbol": "SOL/USDC",
                  "bids": [{"price": 82.0, "qty": 1.0}],
                  "asks": [{"price": 83.0, "qty": 1.0}]},
-                {"symbol": "SOL/XBT",
+                {"symbol": "SOL/BTC",  # WS v2 returns BTC not XBT
                  "bids": [{"price": 0.00116, "qty": 5.0}],
                  "asks": [{"price": 0.00117, "qty": 5.0}]},
             ],

@@ -63,18 +63,19 @@ class TestCandleStreamDispatch:
         assert cs.latest_candle("SOL/USDC")["close"] == 85.0
 
     def test_multi_pair_stored_independently(self):
+        """WS v2 returns SOL/BTC and BTC/USDC — mapped to our SOL/XBT and XBT/USDC."""
         cs = _make_stream()
         cs._on_message({
             "channel": "ohlc", "type": "snapshot",
             "data": [
                 {"symbol": "SOL/USDC", "close": 82.0, "open": 82.0,
                  "high": 82.0, "low": 82.0, "volume": 1.0},
-                {"symbol": "SOL/XBT", "close": 0.00117, "open": 0.00117,
+                {"symbol": "SOL/BTC", "close": 0.00117, "open": 0.00117,
                  "high": 0.00117, "low": 0.00117, "volume": 0.5},
             ],
         })
         sol = cs.latest_candle("SOL/USDC")
-        xbt = cs.latest_candle("SOL/XBT")
+        xbt = cs.latest_candle("SOL/XBT")  # queried by friendly name
         assert sol is not None and sol["close"] == 82.0
         assert xbt is not None and xbt["close"] == 0.00117
 

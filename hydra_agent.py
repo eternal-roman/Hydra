@@ -68,6 +68,18 @@ class KrakenCLI:
         "BTC/USD": "XBT/USD",
     }
 
+    # WS v2 uses Kraken's canonical pair names (BTC not XBT, slashed).
+    # REST uses the PAIR_MAP-resolved forms (SOLXBT, XBTUSDC).
+    WS_PAIR_MAP = {
+        "SOL/USDC": "SOL/USDC",
+        "SOL/XBT": "SOL/BTC",
+        "SOL/BTC": "SOL/BTC",
+        "XBT/USDC": "BTC/USDC",
+        "BTC/USDC": "BTC/USDC",
+        "BTC/USD": "BTC/USD",
+        "XBT/USD": "BTC/USD",
+    }
+
     # Suffixes Kraken uses for non-tradable (staked/bonded/locked) assets
     STAKED_SUFFIXES = ('.B', '.S', '.M')
 
@@ -142,7 +154,13 @@ class KrakenCLI:
 
     @staticmethod
     def _resolve_pair(pair: str) -> str:
+        """Resolve to REST API pair format (e.g. SOLXBT, XBTUSDC)."""
         return KrakenCLI.PAIR_MAP.get(pair, pair)
+
+    @staticmethod
+    def _resolve_ws_pair(pair: str) -> str:
+        """Resolve to WS v2 pair format (e.g. SOL/BTC, BTC/USDC)."""
+        return KrakenCLI.WS_PAIR_MAP.get(pair, pair)
 
     @staticmethod
     def _format_price(pair: str, price: float) -> str:
@@ -811,20 +829,17 @@ class CandleStream(BaseStream):
         self._pairs = list(pairs)
         self._interval = interval
         self._latest: Dict[str, dict] = {}
-        # Build symbol → friendly pair reverse map
+        # Build symbol → friendly pair reverse map.
+        # WS v2 returns symbols like "SOL/BTC", "BTC/USDC" (canonical names).
         self._symbol_map: Dict[str, str] = {}
         for p in pairs:
-            resolved = KrakenCLI._resolve_pair(p)
-            # WS uses "wsname" form (e.g. "SOL/XBT" not "SOLXBT")
-            # but the CLI resolves to whatever Kraken returns.
-            # Map both the friendly name and resolved form.
+            ws_name = KrakenCLI._resolve_ws_pair(p)
             self._symbol_map[p] = p
-            self._symbol_map[resolved] = p
-            self._symbol_map[resolved.replace("/", "")] = p
+            self._symbol_map[ws_name] = p
 
     def _build_cmd(self) -> str:
-        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
-        pairs_str = " ".join(resolved)
+        ws_pairs = [KrakenCLI._resolve_ws_pair(p) for p in self._pairs]
+        pairs_str = " ".join(ws_pairs)
         return (f"exec kraken ws ohlc {pairs_str} "
                 f"--interval {self._interval} -o json --snapshot true")
 
@@ -876,14 +891,13 @@ class TickerStream(BaseStream):
         self._latest: Dict[str, dict] = {}
         self._symbol_map: Dict[str, str] = {}
         for p in pairs:
-            resolved = KrakenCLI._resolve_pair(p)
+            ws_name = KrakenCLI._resolve_ws_pair(p)
             self._symbol_map[p] = p
-            self._symbol_map[resolved] = p
-            self._symbol_map[resolved.replace("/", "")] = p
+            self._symbol_map[ws_name] = p
 
     def _build_cmd(self) -> str:
-        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
-        pairs_str = " ".join(resolved)
+        ws_pairs = [KrakenCLI._resolve_ws_pair(p) for p in self._pairs]
+        pairs_str = " ".join(ws_pairs)
         return f"exec kraken ws ticker {pairs_str} -o json --snapshot true"
 
     def _stream_label(self) -> str:
@@ -938,14 +952,13 @@ class BookStream(BaseStream):
         self._latest: Dict[str, dict] = {}
         self._symbol_map: Dict[str, str] = {}
         for p in pairs:
-            resolved = KrakenCLI._resolve_pair(p)
+            ws_name = KrakenCLI._resolve_ws_pair(p)
             self._symbol_map[p] = p
-            self._symbol_map[resolved] = p
-            self._symbol_map[resolved.replace("/", "")] = p
+            self._symbol_map[ws_name] = p
 
     def _build_cmd(self) -> str:
-        resolved = [KrakenCLI._resolve_pair(p) for p in self._pairs]
-        pairs_str = " ".join(resolved)
+        ws_pairs = [KrakenCLI._resolve_ws_pair(p) for p in self._pairs]
+        pairs_str = " ".join(ws_pairs)
         return (f"exec kraken ws book {pairs_str} "
                 f"--depth {self._depth} -o json --snapshot true")
 

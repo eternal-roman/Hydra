@@ -58,12 +58,13 @@ class TestTickerStreamDispatch:
         assert ts.latest_ticker("SOL/USDC")["bid"] == 85.0
 
     def test_multi_pair_stored_independently(self):
+        """WS v2 returns SOL/BTC — mapped to our friendly SOL/XBT."""
         ts = _make_stream()
         ts._on_message({
             "channel": "ticker", "type": "snapshot",
             "data": [
                 {"symbol": "SOL/USDC", "bid": 82.0, "ask": 82.1, "last": 82.0},
-                {"symbol": "SOL/XBT", "bid": 0.00116, "ask": 0.00117, "last": 0.00117},
+                {"symbol": "SOL/BTC", "bid": 0.00116, "ask": 0.00117, "last": 0.00117},
             ],
         })
         sol = ts.latest_ticker("SOL/USDC")
