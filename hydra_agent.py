@@ -536,14 +536,26 @@ class ExecutionStream:
         journal just won't get terminal events until the stream recovers).
         """
         if self.paper:
-            self._last_heartbeat = time.time()
+            self._last_heartbeat = time.monotonic()
             return True
         # Reset state in case start() is called as part of a restart.
+        # _last_sequence is reset because the new WS connection starts its
+        # own sequence numbering at 1, and we don't want a spurious
+        # "sequence gap" warning on the first executions message after
+        # restart. _known_orders is intentionally NOT cleared — in-flight
+        # orders need to remain correlated across restarts so the new
+        # subprocess's snapshot replay can finalize them.
         self._shutdown.clear()
         self._reader_exit_reason = None
+        self._last_sequence = None
+        # `exec` replaces bash with kraken in the same process so that when
+        # the wsl wrapper is terminated, the signal propagates to kraken
+        # itself instead of leaving it as an orphaned grandchild inside the
+        # WSL VM. Without exec, repeated auto-restarts would leak kraken
+        # processes and (worse) hold WS connection slots open.
         cmd = [
             "wsl", "-d", "Ubuntu", "--", "bash", "-c",
-            "source ~/.cargo/env && kraken ws executions -o json "
+            "source ~/.cargo/env && exec kraken ws executions -o json "
             "--snap-orders true --snap-trades true",
         ]
         try:
@@ -566,7 +578,7 @@ class ExecutionStream:
             target=self._stderr_loop, name="ExecutionStream-stderr", daemon=True,
         )
         self._stderr_thread.start()
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = time.monotonic()
         print("  [EXECSTREAM] kraken ws executions stream started")
         return True
 
@@ -612,7 +624,9 @@ class ExecutionStream:
         if self._reader_thread is None or not self._reader_thread.is_alive():
             reason = self._reader_exit_reason or "exited (reason unknown)"
             return False, f"reader thread {reason}"
-        age = time.time() - self._last_heartbeat
+        # monotonic clock so a wall-clock NTP correction or sleep/resume
+        # cannot spuriously trigger an unhealthy reading or restart.
+        age = time.monotonic() - self._last_heartbeat
         if age > self.HEARTBEAT_TIMEOUT_S:
             return False, (
                 f"no heartbeat for {age:.0f}s "
@@ -629,7 +643,7 @@ class ExecutionStream:
         healthy, reason = self.health_status()
         if healthy:
             return True, ""
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_restart_attempt < self.RESTART_COOLDOWN_S:
             return healthy, reason
         self._last_restart_attempt = now
@@ -698,7 +712,7 @@ class ExecutionStream:
         """Classify an incoming WS message and enqueue data events."""
         channel = msg.get("channel")
         if channel == "heartbeat":
-            self._last_heartbeat = time.time()
+            self._last_heartbeat = time.monotonic()
             return
         if channel == "status":
             # Connection status update; informational only
@@ -710,7 +724,7 @@ class ExecutionStream:
         if channel != "executions":
             return
         # Bump the heartbeat on any executions traffic — it's a liveness signal
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = time.monotonic()
         # Sequence gap detection (warn only — subsequent snapshot recovers)
         seq = msg.get("sequence")
         if isinstance(seq, int):
@@ -921,7 +935,7 @@ class FakeExecutionStream(ExecutionStream):
         super().__init__(paper=False)
         # Override so healthy reports True without a subprocess
         self._fake_healthy = True
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = time.monotonic()
 
     def start(self) -> bool:
         # No-op — tests drive events via inject_event.
