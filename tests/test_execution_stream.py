@@ -278,26 +278,26 @@ class TestDispatchHeartbeat:
     def test_heartbeat_channel_bumps_timestamp(self):
         es = ExecutionStream(paper=False)
         es._last_heartbeat = 0.0  # ancient
-        es._dispatch({"channel": "heartbeat"})
+        es._on_message({"channel": "heartbeat"})
         # Production uses monotonic; the bump must be a recent monotonic value.
         assert es._last_heartbeat > time.monotonic() - 1.0
 
     def test_executions_channel_bumps_timestamp(self):
         es = ExecutionStream(paper=False)
         es._last_heartbeat = 0.0
-        es._dispatch({"channel": "executions", "type": "update", "data": []})
+        es._on_message({"channel": "executions", "type": "update", "data": []})
         assert es._last_heartbeat > time.monotonic() - 1.0
 
     def test_status_channel_does_not_bump(self):
         es = ExecutionStream(paper=False)
         es._last_heartbeat = 12345.0  # canary value
-        es._dispatch({"channel": "status", "data": []})
+        es._on_message({"channel": "status", "data": []})
         assert es._last_heartbeat == 12345.0
 
     def test_subscribe_response_does_not_bump(self):
         es = ExecutionStream(paper=False)
         es._last_heartbeat = 12345.0
-        es._dispatch({"method": "subscribe", "success": True})
+        es._on_message({"method": "subscribe", "success": True})
         assert es._last_heartbeat == 12345.0
 
 

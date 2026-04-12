@@ -349,9 +349,9 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 
 These are documented behaviors, not bugs:
 
-1. ~~**No position reconciliation**~~ — **Resolved in v2.4.0.** `OrderReconciler` polls `kraken open-orders` every 5 ticks and detects filled/cancelled orders. Session snapshots (`--resume`) preserve engine state across restarts.
+1. ~~**No position reconciliation**~~ — **Resolved in v2.4.0, fully replaced in v2.6.0.** `ExecutionStream` (ws executions) provides push-based lifecycle finalization. `reconcile_restart_gap()` queries the exchange after stream restarts. `_reconcile_stale_placed()` handles `--resume` sessions. Session snapshots preserve engine state across restarts.
 
-2. **No partial fill handling** — Limit post-only orders may not fill immediately (or at all). The engine records the trade as executed internally regardless. A fill-check mechanism is not yet implemented.
+2. ~~**No partial fill handling**~~ — **Resolved in v2.5.0.** `ExecutionStream` tracks `PARTIALLY_FILLED` state with exact `vol_exec`. Engine remains optimistically committed; journal carries the true fill for P&L. `_reconcile_pnl()` (v2.6.0) can verify fills against `kraken trades-history`.
 
 3. ~~**Cross-pair swaps are advisory only**~~ — **Resolved in v2.1.0.** `_execute_coordinated_swap()` now executes both sell and buy legs via `execute_signal()` + `_execute_trade()`.
 

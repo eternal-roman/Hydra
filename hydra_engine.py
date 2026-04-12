@@ -510,6 +510,21 @@ class PositionSizer:
         self.min_confidence = min_confidence
         self.max_position_pct = max_position_pct
 
+    def apply_pair_limits(self, pair_constants: dict):
+        """Update MIN_ORDER_SIZE and MIN_COST from dynamically loaded pair data.
+
+        Mutates the class-level dicts so all PositionSizer instances see
+        the updated values.  Hardcoded defaults remain for any asset not
+        present in pair_constants.
+        """
+        for _friendly, info in pair_constants.items():
+            base = info.get("base", "")
+            quote = info.get("quote", "")
+            if base and "ordermin" in info:
+                PositionSizer.MIN_ORDER_SIZE[base] = info["ordermin"]
+            if quote and "costmin" in info:
+                PositionSizer.MIN_COST[quote] = info["costmin"]
+
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using Kelly criterion."""
