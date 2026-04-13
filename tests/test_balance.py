@@ -49,11 +49,14 @@ class TestStakedAssets:
 # ═══════════════════════════════════════════════════════════════
 
 class TestNormalizeAsset:
-    def test_xxbt_normalizes_to_xbt(self):
-        assert KrakenCLI._normalize_asset("XXBT") == "XBT"
+    def test_xxbt_normalizes_to_btc(self):
+        assert KrakenCLI._normalize_asset("XXBT") == "BTC"
 
-    def test_xbt_passes_through(self):
-        assert KrakenCLI._normalize_asset("XBT") == "XBT"
+    def test_xbt_normalizes_to_btc(self):
+        assert KrakenCLI._normalize_asset("XBT") == "BTC"
+
+    def test_btc_passes_through(self):
+        assert KrakenCLI._normalize_asset("BTC") == "BTC"
 
     def test_usdc_passes_through(self):
         assert KrakenCLI._normalize_asset("USDC") == "USDC"
@@ -71,21 +74,18 @@ class TestNormalizeAsset:
         assert KrakenCLI._normalize_asset("XSOL") == "SOL"
 
     def test_staked_suffix_stripped_then_normalized(self):
-        """XBT.B → strip .B → XBT → passthrough."""
-        assert KrakenCLI._normalize_asset("XBT.B") == "XBT"
+        """XBT.B → strip .B → XBT → normalize to BTC."""
+        assert KrakenCLI._normalize_asset("XBT.B") == "BTC"
 
     def test_staked_xxbt_suffix_stripped_then_normalized(self):
-        """XXBT.B → strip .B → XXBT → normalize to XBT."""
-        assert KrakenCLI._normalize_asset("XXBT.B") == "XBT"
+        """XXBT.B → strip .B → XXBT → normalize to BTC."""
+        assert KrakenCLI._normalize_asset("XXBT.B") == "BTC"
 
     def test_sol_staked_normalizes(self):
         assert KrakenCLI._normalize_asset("SOL.S") == "SOL"
 
     def test_unknown_asset_passes_through(self):
         assert KrakenCLI._normalize_asset("DOGE") == "DOGE"
-
-    def test_btc_alias_normalizes_to_xbt(self):
-        assert KrakenCLI._normalize_asset("BTC") == "XBT"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -101,7 +101,7 @@ class TestComputeBalanceUsd:
         agent.engines = {}
 
         # Create engines with known prices (no full init, just set prices)
-        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 84000.0), ("SOL/XBT", 0.001547)]:
+        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 84000.0), ("SOL/BTC", 0.001547)]:
             engine = object.__new__(HydraEngine)
             engine.prices = [price]
             agent.engines[pair] = engine
@@ -120,16 +120,16 @@ class TestComputeBalanceUsd:
         result = agent._compute_balance_usd({"SOL": 10.0})
         assert result["total_usd"] == 1300.0  # 10 * 130
 
-    def test_xbt_converted_using_engine_price(self):
+    def test_btc_converted_using_engine_price(self):
         agent = self._make_agent()
-        result = agent._compute_balance_usd({"XBT": 1.0})
+        result = agent._compute_balance_usd({"BTC": 1.0})
         assert result["total_usd"] == 84000.0
 
     def test_staked_excluded_from_tradable(self):
         agent = self._make_agent()
         result = agent._compute_balance_usd({
-            "XBT": 1.0,
-            "XBT.B": 0.5,
+            "BTC": 1.0,
+            "BTC.B": 0.5,
             "USDC": 100.0,
         })
         # Total includes staked: 84000 + 42000 + 100 = 126100
@@ -142,7 +142,7 @@ class TestComputeBalanceUsd:
     def test_multiple_staked_assets(self):
         agent = self._make_agent()
         result = agent._compute_balance_usd({
-            "XBT.B": 0.5,
+            "BTC.B": 0.5,
             "SOL.S": 5.0,
         })
         expected_staked = 0.5 * 84000.0 + 5.0 * 130.0  # 42650
@@ -168,27 +168,27 @@ class TestComputeBalanceUsd:
     def test_assets_sorted_tradable_first(self):
         agent = self._make_agent()
         result = agent._compute_balance_usd({
-            "XBT.B": 0.5,
+            "BTC.B": 0.5,
             "USDC": 100.0,
             "SOL": 10.0,
         })
         assets = result["assets"]
-        # Tradable assets first (SOL, USDC alphabetical), then staked (XBT.B)
+        # Tradable assets first (SOL, USDC alphabetical), then staked (BTC.B)
         assert assets[0]["asset"] == "SOL"
         assert assets[0]["staked"] is False
         assert assets[1]["asset"] == "USDC"
         assert assets[1]["staked"] is False
-        assert assets[2]["asset"] == "XBT.B"
+        assert assets[2]["asset"] == "BTC.B"
         assert assets[2]["staked"] is True
 
     def test_xxbt_normalized_for_price_lookup(self):
-        """Kraken returns 'XXBT' — should normalize and find XBT price."""
+        """Kraken returns 'XXBT' — should normalize and find BTC price."""
         agent = self._make_agent()
         result = agent._compute_balance_usd({"XXBT": 1.0})
         assert result["total_usd"] == 84000.0
 
     def test_staked_xxbt_normalized_for_price_lookup(self):
-        """XXBT.B should strip .B, normalize XXBT→XBT, use XBT price."""
+        """XXBT.B should strip .B, normalize XXBT→BTC, use BTC price."""
         agent = self._make_agent()
         result = agent._compute_balance_usd({"XXBT.B": 1.0})
         assert result["total_usd"] == 84000.0
@@ -211,16 +211,16 @@ class TestGetAssetPrices:
     def test_prices_from_usdc_pairs(self):
         agent = object.__new__(HydraAgent)
         agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 84000.0)]:
+        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 84000.0)]:
             engine = object.__new__(HydraEngine)
             engine.prices = [price]
             agent.engines[pair] = engine
         prices = agent._get_asset_prices()
         assert prices["SOL"] == 130.0
-        assert prices["XBT"] == 84000.0
+        assert prices["BTC"] == 84000.0
 
-    def test_xbt_derived_from_sol_xbt_when_no_direct_pair(self):
-        """If XBT/USDC engine has no prices, derive XBT from SOL/USDC and SOL/XBT."""
+    def test_btc_derived_from_sol_btc_when_no_direct_pair(self):
+        """If BTC/USDC engine has no prices, derive BTC from SOL/USDC and SOL/BTC."""
         agent = object.__new__(HydraAgent)
         agent.engines = {}
 
@@ -228,17 +228,17 @@ class TestGetAssetPrices:
         sol_usdc.prices = [130.0]
         agent.engines["SOL/USDC"] = sol_usdc
 
-        sol_xbt = object.__new__(HydraEngine)
-        sol_xbt.prices = [0.001547]  # 1 SOL = 0.001547 XBT
-        agent.engines["SOL/XBT"] = sol_xbt
+        sol_btc = object.__new__(HydraEngine)
+        sol_btc.prices = [0.001547]  # 1 SOL = 0.001547 BTC
+        agent.engines["SOL/BTC"] = sol_btc
 
-        xbt_usdc = object.__new__(HydraEngine)
-        xbt_usdc.prices = []  # No data yet
-        agent.engines["XBT/USDC"] = xbt_usdc
+        btc_usdc = object.__new__(HydraEngine)
+        btc_usdc.prices = []  # No data yet
+        agent.engines["BTC/USDC"] = btc_usdc
 
         prices = agent._get_asset_prices()
-        # XBT = SOL_USD / SOL_XBT = 130 / 0.001547 ≈ 84034
-        assert abs(prices["XBT"] - 130.0 / 0.001547) < 1.0
+        # BTC = SOL_USD / SOL_BTC = 130 / 0.001547 ≈ 84034
+        assert abs(prices["BTC"] - 130.0 / 0.001547) < 1.0
 
     def test_empty_engine_prices_skipped(self):
         agent = object.__new__(HydraAgent)
@@ -259,7 +259,7 @@ class TestEngineBalanceInit:
         then get overwritten with real exchange balance."""
         # Create engines with default $100 balance (as CLI arg would)
         engines = {}
-        pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
         for pair in pairs:
             engine = HydraEngine(initial_balance=33.33, asset=pair)
             engines[pair] = engine
@@ -296,14 +296,14 @@ class TestEngineBalanceInit:
         size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
         assert size == 0, "Tiny balance should fail to meet minimum order size"
 
-    def test_xbt_quoted_pair_balance_converted_from_usd(self):
-        """SOL/XBT engine balance must be in XBT, not USD.
+    def test_btc_quoted_pair_balance_converted_from_usd(self):
+        """SOL/BTC engine balance must be in BTC, not USD.
         Without conversion, position sizes are ~60,000x too large because
-        the sizer divides a USD balance by an XBT-denominated price."""
+        the sizer divides a USD balance by a BTC-denominated price."""
         agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
         agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
             engine = HydraEngine(initial_balance=100.0, asset=pair)
             engine.prices = [price]
             agent.engines[pair] = engine
@@ -311,69 +311,69 @@ class TestEngineBalanceInit:
         per_pair_usd = 100.0
         agent._set_engine_balances(per_pair_usd)
 
-        # SOL/USDC and XBT/USDC: balance stays in USD
+        # SOL/USDC and BTC/USDC: balance stays in USD
         assert agent.engines["SOL/USDC"].balance == 100.0
-        assert agent.engines["XBT/USDC"].balance == 100.0
+        assert agent.engines["BTC/USDC"].balance == 100.0
 
-        # SOL/XBT: balance converted from $100 USD to XBT
-        xbt_balance = agent.engines["SOL/XBT"].balance
-        expected_xbt = 100.0 / 60000.0  # ~0.001667 XBT
-        assert abs(xbt_balance - expected_xbt) < 1e-8, \
-            f"SOL/XBT balance should be ~{expected_xbt:.8f} XBT, got {xbt_balance:.8f}"
+        # SOL/BTC: balance converted from $100 USD to BTC
+        btc_balance = agent.engines["SOL/BTC"].balance
+        expected_btc = 100.0 / 60000.0  # ~0.001667 BTC
+        assert abs(btc_balance - expected_btc) < 1e-8, \
+            f"SOL/BTC balance should be ~{expected_btc:.8f} BTC, got {btc_balance:.8f}"
 
-    def test_xbt_quoted_pair_produces_sane_position_size(self):
-        """After balance conversion, SOL/XBT position size should be reasonable,
+    def test_btc_quoted_pair_produces_sane_position_size(self):
+        """After balance conversion, SOL/BTC position size should be reasonable,
         not the inflated 4000+ SOL that caused the 'api' failures."""
         agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
         agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
             engine = HydraEngine(initial_balance=100.0, asset=pair)
             engine.prices = [price]
             agent.engines[pair] = engine
 
         agent._set_engine_balances(100.0)
 
-        # Now calculate position size for SOL/XBT
-        engine = agent.engines["SOL/XBT"]
-        size = engine.sizer.calculate(0.58, engine.balance, 0.002167, "SOL/XBT")
+        # Now calculate position size for SOL/BTC
+        engine = agent.engines["SOL/BTC"]
+        size = engine.sizer.calculate(0.58, engine.balance, 0.002167, "SOL/BTC")
 
-        # With ~0.00167 XBT balance, position should be small (< 1 SOL),
+        # With ~0.00167 BTC balance, position should be small (< 1 SOL),
         # NOT the 4000+ SOL that was happening before
         assert size < 10, f"Position size should be small, got {size:.4f} SOL"
 
-    def test_xbt_quoted_no_conversion_without_xbt_price(self):
-        """If XBT price unavailable, SOL/XBT balance stays in USD (safe fallback)."""
+    def test_btc_quoted_no_conversion_without_btc_price(self):
+        """If BTC price unavailable, SOL/BTC balance stays in USD (safe fallback)."""
         agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/XBT"]
+        agent.pairs = ["SOL/BTC"]
         agent.engines = {}
-        engine = HydraEngine(initial_balance=100.0, asset="SOL/XBT")
+        engine = HydraEngine(initial_balance=100.0, asset="SOL/BTC")
         engine.prices = [0.002167]
-        agent.engines["SOL/XBT"] = engine
+        agent.engines["SOL/BTC"] = engine
 
-        # No XBT/USDC or SOL/USDC engines → can't derive XBT price
+        # No BTC/USDC or SOL/USDC engines → can't derive BTC price
         agent._set_engine_balances(100.0)
-        assert agent.engines["SOL/XBT"].balance == 100.0  # Unchanged (no price to convert)
+        assert agent.engines["SOL/BTC"].balance == 100.0  # Unchanged (no price to convert)
 
-    def test_xbt_quoted_resumed_with_position_pnl_sane(self):
-        """Resumed SOL/XBT engine with existing position must NOT show insane P&L.
+    def test_btc_quoted_resumed_with_position_pnl_sane(self):
+        """Resumed SOL/BTC engine with existing position must NOT show insane P&L.
         Bug: _set_engine_balances set initial_balance to converted cash only,
         ignoring the position value — causing equity >> initial_balance."""
         agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
         agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("XBT/USDC", 60000.0), ("SOL/XBT", 0.002167)]:
+        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
             engine = HydraEngine(initial_balance=100.0, asset=pair)
             engine.prices = [price]
             agent.engines[pair] = engine
 
-        # Simulate resumed position: 0.5 SOL held in SOL/XBT engine
-        agent.engines["SOL/XBT"].position.size = 0.5
-        agent.engines["SOL/XBT"].position.avg_entry = 0.002100
+        # Simulate resumed position: 0.5 SOL held in SOL/BTC engine
+        agent.engines["SOL/BTC"].position.size = 0.5
+        agent.engines["SOL/BTC"].position.avg_entry = 0.002100
 
         agent._set_engine_balances(100.0)
 
-        engine = agent.engines["SOL/XBT"]
+        engine = agent.engines["SOL/BTC"]
         current_price = 0.002167
         equity = engine.balance + engine.position.size * current_price
         pnl_pct = ((equity - engine.initial_balance) / engine.initial_balance * 100)

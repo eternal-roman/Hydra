@@ -48,8 +48,8 @@ class TestInit:
             assert params[key] == DEFAULT_PARAMS[key]
 
     def test_pair_stored(self):
-        t = make_tracker("XBT/USDC")
-        assert t.pair == "XBT/USDC"
+        t = make_tracker("BTC/USDC")
+        assert t.pair == "BTC/USDC"
 
     def test_empty_observations(self):
         t = make_tracker()

@@ -50,7 +50,7 @@ const fmtPrice = (p, prefix = "$") => {
   return `${prefix}${p.toFixed(2)}`;
 };
 
-// Determine currency prefix for a pair — "$" for USD-quoted, "" for XBT-quoted
+// Determine currency prefix for a pair — "$" for USD-quoted, "" for BTC-quoted
 const pairPrefix = (pair) => (pair && (pair.endsWith("USDC") || pair.endsWith("USD"))) ? "$" : "";
 
 const fmtInd = (v) => {
@@ -211,7 +211,7 @@ export default function App() {
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
   // P&L: average of per-pair pnl_pct (each pair gets equal weight since balances
-  // are allocated equally). Direct equity summation would mix USD and XBT.
+  // are allocated equally). Direct equity summation would mix USD and BTC.
   const pairPnls = Object.values(pairs).map(p => p.portfolio?.pnl_pct || 0);
   const totalPnl = pairPnls.length > 0 ? pairPnls.reduce((s, v) => s + v, 0) / pairPnls.length : 0;
   const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
@@ -251,7 +251,7 @@ export default function App() {
           <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
           <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
           <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>Waiting for agent connection on {WS_URL}...</div>
-          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC</div>
+          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
         </div>
       )}
 

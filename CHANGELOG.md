@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.8.0] — 2026-04-12
+
+### XBT → BTC Canonical Migration
+
+- **refactor(all):** Migrated internal canonical pair names from XBT to BTC
+  - `SOL/XBT` → `SOL/BTC`, `XBT/USDC` → `BTC/USDC`
+  - ASSET_NORMALIZE now normalizes XBT/XXBT → BTC (was BTC → XBT)
+  - PAIR_MAP sends BTC slashed form to CLI natively (CLI rejects XBT slashed form)
+  - WS_PAIR_MAP is now identity (canonical matches WS v2 format)
+  - Legacy XBT aliases preserved for snapshot/journal migration
+  - `load_pair_constants` handles Kraken's XBT-format responses via alias mapping
+  - `_extract_fee_tier` handles Kraken's XBT-format fee keys via alias mapping
+  - `_normalize_pair_name()` migrates old snapshot/journal data on startup
+- **fix(agent):** Snapshot migration normalizes XBT pair names on `--resume`
+- **chore(tests):** Updated all 15 test suites + live harness for BTC canonical
+- **docs:** Updated CLAUDE.md, README.md, AUDIT.md, SKILL.md for BTC naming
+
+---
+
 ## [2.7.0] — 2026-04-12
 
 ### Architecture: Strip REST fallbacks, WS-native tick loop

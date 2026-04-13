@@ -71,14 +71,14 @@ class TestVolumeArgsAndParsing:
         assert stub.calls == [["volume", "--pair", "SOL/USDC"]]
 
     def test_volume_with_pair_list(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/USDC", "XBT/USDC"]))
-        # XBT/USDC is resolved to XBTUSDC via PAIR_MAP
-        assert stub.calls == [["volume", "--pair", "SOL/USDC,XBTUSDC"]]
+        _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/USDC", "BTC/USDC"]))
+        # BTC/USDC is resolved to BTC/USDC via PAIR_MAP
+        assert stub.calls == [["volume", "--pair", "SOL/USDC,BTC/USDC"]]
 
     def test_volume_resolves_pair_map(self):
-        # SOL/XBT should resolve to SOLXBT
-        _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/XBT"]))
-        assert stub.calls == [["volume", "--pair", "SOLXBT"]]
+        # SOL/BTC should resolve to SOL/BTC
+        _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/BTC"]))
+        assert stub.calls == [["volume", "--pair", "SOL/BTC"]]
 
     def test_volume_returns_passthrough_on_success(self):
         payload = {"volume": "500.00", "fees": {"SOLUSDC": {"fee": "0.26"}}}
@@ -120,18 +120,18 @@ class TestPriceFormat:
         # (which is actually ~80.4749999... in float, so banker's rounding goes down)
         assert KrakenCLI._format_price("SOL/USDC", 80.476) == "80.48000000"
 
-    def test_xbtusdc_rounds_to_1_decimal(self):
-        assert KrakenCLI._format_price("XBT/USDC", 73031.94) == "73031.90000000"
+    def test_btcusdc_rounds_to_1_decimal(self):
+        assert KrakenCLI._format_price("BTC/USDC", 73031.94) == "73031.90000000"
 
-    def test_xbtusdc_exact_1dp_preserved(self):
-        assert KrakenCLI._format_price("XBT/USDC", 72858.7) == "72858.70000000"
+    def test_btcusdc_exact_1dp_preserved(self):
+        assert KrakenCLI._format_price("BTC/USDC", 72858.7) == "72858.70000000"
 
-    def test_solxbt_rounds_to_7_decimals(self):
+    def test_solbtc_rounds_to_7_decimals(self):
         # 0.00116523 has 8 meaningful decimals → must round to 7
-        assert KrakenCLI._format_price("SOL/XBT", 0.00116523) == "0.00116520"
+        assert KrakenCLI._format_price("SOL/BTC", 0.00116523) == "0.00116520"
 
-    def test_solxbt_exact_7dp_preserved(self):
-        assert KrakenCLI._format_price("SOL/XBT", 0.0011629) == "0.00116290"
+    def test_solbtc_exact_7dp_preserved(self):
+        assert KrakenCLI._format_price("SOL/BTC", 0.0011629) == "0.00116290"
 
     def test_unknown_pair_falls_back_to_8dp(self):
         assert KrakenCLI._format_price("UNKNOWN/PAIR", 1.234567890123) == "1.23456789"
@@ -158,7 +158,7 @@ class TestPriceFormat:
 
     def test_order_sell_uses_rounded_price(self):
         _, stub = _with_stub({"txid": ["ABC"]},
-                              lambda: KrakenCLI.order_sell("XBT/USDC", 0.00005, price=73031.94))
+                              lambda: KrakenCLI.order_sell("BTC/USDC", 0.00005, price=73031.94))
         call = stub.calls[0]
         price_idx = call.index("--price")
         assert call[price_idx + 1] == "73031.90000000"
@@ -248,8 +248,8 @@ class TestAssetPairs:
         assert stub.calls == [["pairs"]]
 
     def test_asset_pairs_with_pair_list(self):
-        _, stub = _with_stub({}, lambda: KrakenCLI.asset_pairs(["SOL/USDC", "SOL/XBT", "XBT/USDC"]))
-        assert stub.calls == [["pairs", "--pair", "SOL/USDC,SOLXBT,XBTUSDC"]]
+        _, stub = _with_stub({}, lambda: KrakenCLI.asset_pairs(["SOL/USDC", "SOL/BTC", "BTC/USDC"]))
+        assert stub.calls == [["pairs", "--pair", "SOL/USDC,SOL/BTC,BTC/USDC"]]
 
     def test_asset_pairs_returns_payload(self):
         payload = {"SOL/USDC": {"pair_decimals": 2, "ordermin": "0.02"}}
@@ -295,7 +295,7 @@ class TestSystemStatus:
 class TestFeeTierExtraction:
     def _make_agent(self, pairs=None):
         agent = object.__new__(HydraAgent)
-        agent.pairs = pairs if pairs is not None else ["SOL/USDC", "XBT/USDC", "SOL/XBT"]
+        agent.pairs = pairs if pairs is not None else ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
         return agent
 
     def test_extract_fee_tier_empty_response(self):
@@ -330,10 +330,10 @@ class TestFeeTierExtraction:
             "fees_maker": {"XBTUSDC": {"fee": "0.16"}},
         }
         result = agent._extract_fee_tier(response)
-        # XBTUSDC reverse-maps back to XBT/USDC (first pair in list that resolves to XBTUSDC)
-        assert "XBT/USDC" in result["pair_fees"]
-        assert result["pair_fees"]["XBT/USDC"]["taker_pct"] == 0.26
-        assert result["pair_fees"]["XBT/USDC"]["maker_pct"] == 0.16
+        # XBTUSDC reverse-maps back to BTC/USDC (first pair in list that resolves to XBTUSDC)
+        assert "BTC/USDC" in result["pair_fees"]
+        assert result["pair_fees"]["BTC/USDC"]["taker_pct"] == 0.26
+        assert result["pair_fees"]["BTC/USDC"]["maker_pct"] == 0.16
 
     def test_extract_fee_tier_volume_parsed_float(self):
         agent = self._make_agent()
@@ -352,13 +352,13 @@ class TestFeeTierExtraction:
         # After slashless fix, "SOLUSDC" maps back to "SOL/USDC"
         assert result["pair_fees"]["SOL/USDC"]["taker_pct"] is None
 
-    def test_extract_fee_tier_reverse_maps_sol_xbt(self):
+    def test_extract_fee_tier_reverse_maps_sol_btc(self):
         agent = self._make_agent()
-        # SOLXBT resolved → SOL/XBT friendly
+        # SOLXBT resolved → SOL/BTC friendly
         response = {"fees": {"SOLXBT": {"fee": "0.20"}}}
         result = agent._extract_fee_tier(response)
-        assert "SOL/XBT" in result["pair_fees"]
-        assert result["pair_fees"]["SOL/XBT"]["taker_pct"] == 0.20
+        assert "SOL/BTC" in result["pair_fees"]
+        assert result["pair_fees"]["SOL/BTC"]["taker_pct"] == 0.20
 
     def test_extract_fee_tier_slashed_form_also_maps(self):
         """Kraken may also return keys in already-slashed form like 'SOL/USDC'."""

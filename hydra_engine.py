@@ -290,7 +290,7 @@ REGIME_STRATEGY_MAP = {
 
 def _fmt_price(p: float) -> str:
     """Format a price for human-readable signal reasons.
-    Uses full precision for small prices (e.g. SOL/XBT at 0.0012)."""
+    Uses full precision for small prices (e.g. SOL/BTC at 0.0012)."""
     if p < 0.01:
         return f"{p:.6f}"
     if p < 1:
@@ -319,7 +319,7 @@ class SignalGenerator:
         macd = Indicators.macd(prices)
         bb = Indicators.bollinger_bands(prices)
         current = prices[-1]
-        # Use full precision for small-price pairs (e.g. SOL/XBT at 0.0012)
+        # Use full precision for small-price pairs (e.g. SOL/BTC at 0.0012)
         price_decimals = 8 if current < 1 else 2
         indicators = {
             "rsi": round(rsi, 2),
@@ -491,7 +491,6 @@ class PositionSizer:
     # Kraken minimum order sizes per base asset (ordermin)
     MIN_ORDER_SIZE = {
         "SOL": 0.02,
-        "XBT": 0.00005,
         "BTC": 0.00005,
         "ETH": 0.001,
     }
@@ -500,7 +499,7 @@ class PositionSizer:
     MIN_COST = {
         "USDC": 0.5,
         "USD": 0.5,
-        "XBT": 0.00002,
+        "BTC": 0.00002,
     }
 
     def __init__(self, kelly_multiplier: float = 0.25,
@@ -528,7 +527,7 @@ class PositionSizer:
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using Kelly criterion."""
-        # Pair-aware costmin: use quote currency's minimum (e.g. 0.5 USDC, 0.00002 XBT)
+        # Pair-aware costmin: use quote currency's minimum (e.g. 0.5 USDC, 0.00002 BTC)
         quote = asset.split("/")[1] if "/" in asset else "USDC"
         costmin = self.MIN_COST.get(quote, 0.5)
 
@@ -612,7 +611,7 @@ class OrderBookAnalyzer:
                 bids_raw = depth_data["bids"]
                 asks_raw = depth_data["asks"]
             else:
-                # Nested format: {"XBTUSDC": {"bids": [...], "asks": [...]}}
+                # Nested format: {"BTCUSDC": {"bids": [...], "asks": [...]}}
                 for key, val in depth_data.items():
                     if isinstance(val, dict) and "bids" in val and "asks" in val:
                         bids_raw = val["bids"]
@@ -703,7 +702,7 @@ class CrossPairCoordinator:
 
     Monitors regime states across all trading pairs and produces override
     signals when cross-pair evidence contradicts a single pair's signal.
-    Designed for the SOL/USDC + SOL/XBT + XBT/USDC triangle.
+    Designed for the SOL/USDC + SOL/BTC + BTC/USDC triangle.
     """
 
     HISTORY_SIZE = 10
@@ -723,12 +722,12 @@ class CrossPairCoordinator:
         """Return signal overrides where cross-pair evidence contradicts single-pair signals.
 
         Rules:
-        1. BTC leads SOL down: If XBT/USDC is TREND_DOWN and SOL/USDC is
+        1. BTC leads SOL down: If BTC/USDC is TREND_DOWN and SOL/USDC is
            still TREND_UP or RANGING → override SOL/USDC to DEFENSIVE.
-        2. BTC recovery boost: If XBT/USDC is TREND_UP and SOL/USDC is
+        2. BTC recovery boost: If BTC/USDC is TREND_UP and SOL/USDC is
            TREND_DOWN → boost SOL/USDC confidence (recovery likely).
-        3. Coordinated swap: If SOL/USDC is TREND_DOWN and SOL/XBT is
-           TREND_UP → suggest selling SOL/USDC and buying SOL/XBT.
+        3. Coordinated swap: If SOL/USDC is TREND_DOWN and SOL/BTC is
+           TREND_UP → suggest selling SOL/USDC and buying SOL/BTC.
 
         Returns:
             {pair: {"action": str, "signal": str, "confidence_adj": float,
@@ -736,17 +735,17 @@ class CrossPairCoordinator:
         """
         overrides: Dict[str, dict] = {}
 
-        xbt_usdc = all_states.get("XBT/USDC") or all_states.get("BTC/USDC")
+        btc_usdc = all_states.get("BTC/USDC") or all_states.get("XBT/USDC")
         sol_usdc = all_states.get("SOL/USDC")
-        sol_xbt = all_states.get("SOL/XBT") or all_states.get("SOL/BTC")
+        sol_btc = all_states.get("SOL/BTC") or all_states.get("SOL/XBT")
 
-        xbt_regime = xbt_usdc.get("regime") if xbt_usdc else None
+        btc_regime = btc_usdc.get("regime") if btc_usdc else None
         sol_regime = sol_usdc.get("regime") if sol_usdc else None
-        sol_xbt_regime = sol_xbt.get("regime") if sol_xbt else None
+        sol_btc_regime = sol_btc.get("regime") if sol_btc else None
 
         # Rule 1: BTC leads SOL down
-        # XBT/USDC trending down while SOL/USDC hasn't reacted yet
-        if xbt_regime == "TREND_DOWN" and sol_regime in ("TREND_UP", "RANGING"):
+        # BTC/USDC trending down while SOL/USDC hasn't reacted yet
+        if btc_regime == "TREND_DOWN" and sol_regime in ("TREND_UP", "RANGING"):
             overrides["SOL/USDC"] = {
                 "action": "OVERRIDE",
                 "signal": "SELL",
@@ -755,8 +754,8 @@ class CrossPairCoordinator:
             }
 
         # Rule 2: BTC recovery boost
-        # XBT/USDC trending up while SOL/USDC is still down — recovery likely
-        if xbt_regime == "TREND_UP" and sol_regime == "TREND_DOWN":
+        # BTC/USDC trending up while SOL/USDC is still down — recovery likely
+        if btc_regime == "TREND_UP" and sol_regime == "TREND_DOWN":
             sol_conf = 0.5
             if sol_usdc and sol_usdc.get("signal"):
                 sol_conf = sol_usdc["signal"].get("confidence", 0.5)
@@ -768,8 +767,8 @@ class CrossPairCoordinator:
             }
 
         # Rule 3: Coordinated swap
-        # SOL weakening vs USDC but strengthening vs XBT — rotate into BTC
-        if sol_regime == "TREND_DOWN" and sol_xbt_regime == "TREND_UP":
+        # SOL weakening vs USDC but strengthening vs BTC — rotate into BTC
+        if sol_regime == "TREND_DOWN" and sol_btc_regime == "TREND_UP":
             sol_pos = 0.0
             if sol_usdc and sol_usdc.get("position"):
                 sol_pos = sol_usdc["position"].get("size", 0.0)
@@ -779,11 +778,11 @@ class CrossPairCoordinator:
                     "action": "OVERRIDE",
                     "signal": "SELL",
                     "confidence_adj": 0.85,
-                    "reason": "Cross-pair swap: SOL weakening vs USDC but strong vs XBT — rotate to BTC",
+                    "reason": "Cross-pair swap: SOL weakening vs USDC but strong vs BTC — rotate to BTC",
                     "swap": {
                         "sell_pair": "SOL/USDC",
-                        "buy_pair": "SOL/XBT",
-                        "reason": "SOL/USDC TREND_DOWN + SOL/XBT TREND_UP — coordinated rotation",
+                        "buy_pair": "SOL/BTC",
+                        "reason": "SOL/USDC TREND_DOWN + SOL/BTC TREND_UP — coordinated rotation",
                     },
                 }
 
@@ -1356,7 +1355,7 @@ class HydraEngine:
 
         if trade:
             # Prices and amounts always use full precision (8 decimals) — critical
-            # for BTC-denominated pairs like SOL/XBT where price ≈ 0.0015.
+            # for BTC-denominated pairs like SOL/BTC where price ≈ 0.0015.
             # Dollar values (value, profit) use 2 decimals for USDC/USD pairs,
             # 8 for crypto-denominated pairs.
             is_usd_pair = self.asset.endswith("USDC") or self.asset.endswith("USD")

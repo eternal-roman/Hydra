@@ -40,8 +40,8 @@ class TestBalanceStreamDispatch:
         assert bal["USDC"] == 432.70
         assert "ETH" not in bal  # zero balance excluded
 
-    def test_btc_normalized_to_xbt(self):
-        """WS returns 'BTC' but Hydra uses 'XBT' internally."""
+    def test_btc_stays_btc(self):
+        """WS returns 'BTC' which is now the canonical form — no normalization needed."""
         bs = _make_stream()
         bs._on_message({
             "channel": "balances",
@@ -49,9 +49,8 @@ class TestBalanceStreamDispatch:
             "data": [{"asset": "BTC", "balance": 0.003, "asset_class": "currency"}],
         })
         bal = bs.latest_balances()
-        assert "XBT" in bal
-        assert bal["XBT"] == 0.003
-        assert "BTC" not in bal
+        assert "BTC" in bal
+        assert bal["BTC"] == 0.003
 
     def test_equities_filtered_out(self):
         """Equity/ETF assets should not appear in balances."""
@@ -151,7 +150,7 @@ class TestBalanceStreamDispatch:
         })
         bal = bs.latest_balances()
         assert bal["SOL"] == 1.0
-        assert bal["XBT"] == 0.003  # BTC→XBT normalization
+        assert bal["BTC"] == 0.003
         assert bal["USDC"] == 500.0
 
 

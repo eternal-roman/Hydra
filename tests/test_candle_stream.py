@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hydra_agent import CandleStream
 
 
-PAIRS = ["SOL/USDC", "SOL/XBT", "XBT/USDC"]
+PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 def _make_stream(paper=False):
@@ -63,7 +63,7 @@ class TestCandleStreamDispatch:
         assert cs.latest_candle("SOL/USDC")["close"] == 85.0
 
     def test_multi_pair_stored_independently(self):
-        """WS v2 returns SOL/BTC and BTC/USDC — mapped to our SOL/XBT and XBT/USDC."""
+        """WS v2 returns SOL/BTC and BTC/USDC — matches our canonical pair names."""
         cs = _make_stream()
         cs._on_message({
             "channel": "ohlc", "type": "snapshot",
@@ -75,9 +75,9 @@ class TestCandleStreamDispatch:
             ],
         })
         sol = cs.latest_candle("SOL/USDC")
-        xbt = cs.latest_candle("SOL/XBT")  # queried by friendly name
+        btc = cs.latest_candle("SOL/BTC")  # queried by friendly name
         assert sol is not None and sol["close"] == 82.0
-        assert xbt is not None and xbt["close"] == 0.00117
+        assert btc is not None and btc["close"] == 0.00117
 
     def test_unknown_symbol_ignored(self):
         cs = _make_stream()
@@ -123,14 +123,14 @@ class TestCandleStreamDispatch:
         })
         assert cs._last_heartbeat > time.monotonic() - 1.0
 
-    def test_btc_usdc_maps_to_xbt_usdc(self):
+    def test_btc_usdc_maps_correctly(self):
         cs = _make_stream()
         cs._on_message({
             "channel": "ohlc", "type": "snapshot",
             "data": [{"symbol": "BTC/USDC", "close": 95000.0, "open": 94500.0,
                        "high": 95500.0, "low": 94000.0, "volume": 10.0}],
         })
-        candle = cs.latest_candle("XBT/USDC")
+        candle = cs.latest_candle("BTC/USDC")
         assert candle is not None
         assert candle["close"] == 95000.0
 

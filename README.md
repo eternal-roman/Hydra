@@ -47,8 +47,8 @@ HYDRA Agent Loop (5-min candles, 30s tick)
 | Pair | Description |
 |------|-------------|
 | **SOL/USDC** | Primary — SOL priced in stablecoin |
-| **SOL/XBT** | Cross — SOL priced in BTC, enables regime-driven rotation |
-| **XBT/USDC** | BTC priced in stablecoin, completes the triangle |
+| **SOL/BTC** | Cross — SOL priced in BTC, enables regime-driven rotation |
+| **BTC/USDC** | BTC priced in stablecoin, completes the triangle |
 
 ## Technical Indicators
 
@@ -78,8 +78,8 @@ position_value = kelly × balance
 | **Competition** | 0.50 half-Kelly | 50% | 40% of balance |
 
 **Exchange minimums enforced on both buy and sell paths:**
-- Pair-aware Kraken `ordermin` (SOL: 0.02, XBT: 0.00005, ETH: 0.001)
-- Pair-aware Kraken `costmin` (USDC/USD: 0.5, XBT: 0.00002)
+- Pair-aware Kraken `ordermin` (SOL: 0.02, BTC: 0.00005, ETH: 0.001)
+- Pair-aware Kraken `costmin` (USDC/USD: 0.5, BTC: 0.00002)
 - Partial sells below ordermin are auto-upgraded to full close to prevent dust
 
 ## Order Execution
@@ -176,7 +176,7 @@ cd ..
 cd dashboard && npm run dev
 
 # Terminal 2: Start the trading agent (5-min candles, runs forever)
-python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100
+python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100
 
 # Open http://localhost:3000 in your browser
 ```
@@ -191,7 +191,7 @@ start_all.bat
 ### CLI Options
 
 ```
---pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)
+--pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)
 --balance          Reference balance for position sizing in USD (default: 100)
 --candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 5)
 --interval         Seconds between ticks (default: 30)

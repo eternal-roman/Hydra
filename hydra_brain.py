@@ -435,7 +435,7 @@ class HydraBrain:
         parts = [f"  {p}: regime={d['regime']}, signal={d['signal']}({d['confidence']:.2f}), pos={d['position_size']:.4f}"
                  for p, d in sibling_pairs.items()]
         lines = "\nCROSS-PAIR CONTEXT:\n" + "\n".join(parts)
-        lines += f"\n  Net SOL exposure: {net_exp.get('SOL', 0):.4f} | Net XBT exposure: {net_exp.get('XBT', 0):.4f}"
+        lines += f"\n  Net SOL exposure: {net_exp.get('SOL', 0):.4f} | Net BTC exposure: {net_exp.get('BTC', 0):.4f}"
         return lines
 
     def _build_analyst_prompt(self, state: Dict) -> str:

@@ -125,7 +125,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 - **Location:** `SignalGenerator._momentum()` lines 325-350
 - **BUY:** RSI 30-70, MACD histogram > 0, price > BB middle — PASS
 - **SELL:** RSI > 75 OR MACD histogram < 0 — PASS
-- **Confidence:** `min(0.95, 0.5 + |histogram|/price * 1000)` — scales proportionally to price magnitude. Verified for SOL ($78), XBT ($67k), SOL/XBT ($0.0012).
+- **Confidence:** `min(0.95, 0.5 + |histogram|/price * 1000)` — scales proportionally to price magnitude. Verified for SOL ($78), BTC ($67k), SOL/BTC ($0.0012).
 
 ### 3.2 MEAN_REVERSION Strategy
 - **Location:** `SignalGenerator._mean_reversion()` lines 353-378
@@ -164,7 +164,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 | Max position | 30% of balance | `MAX_POSITION_PCT = 0.30` | PASS |
 | Min confidence | 0.55 | `MIN_CONFIDENCE = 0.55` | PASS |
 | Min trade value | $0.50 (Kraken costmin) | `MIN_TRADE_VALUE = 0.50` | PASS |
-| Min order size | Per-asset (SOL:0.02, XBT:0.00005) | `MIN_ORDER_SIZE` dict | PASS |
+| Min order size | Per-asset (SOL:0.02, BTC:0.00005) | `MIN_ORDER_SIZE` dict | PASS |
 
 ### 4.3 Circuit Breaker
 - **Location:** `HydraEngine.tick()` lines 574-578
@@ -263,7 +263,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 ### 7.6 Indicator Row
 - **Components:** RSI (colored at 30/70), MACD histogram (green/red), BB range, BB width (highlighted at 6%)
 - **Formatting:** `fmtInd()` auto-formats based on magnitude (6 decimals for <0.01, 4 for <1, 2 otherwise)
-- **Result:** PASS — verified correct for SOL/XBT (0.0012), SOL/USDC ($78), XBT/USDC ($67k).
+- **Result:** PASS — verified correct for SOL/BTC (0.0012), SOL/USDC ($78), BTC/USDC ($67k).
 
 ### 7.7 Balance History Chart
 - **Location:** Lines 342-348
@@ -306,7 +306,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 ### 7.15 Price Formatting
 - **Location:** `fmtPrice()` lines 43-50
 - **Test:** $0 for zero, 8 decimals for <0.001, 6 for <0.01, 4 for <1, locale-formatted for >10000, 2 decimals otherwise
-- **Result:** PASS — handles SOL/XBT ($0.0012), SOL/USDC ($78), XBT/USDC ($67,000).
+- **Result:** PASS — handles SOL/BTC ($0.0012), SOL/USDC ($78), BTC/USDC ($67,000).
 
 ---
 
@@ -326,7 +326,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 
 ### 8.3 Pair Mapping
 - **Location:** `KrakenCLI.PAIR_MAP` lines 39-46
-- **Test:** SOL/USDC → SOL/USDC, SOL/XBT → SOLXBT, XBT/USDC → XBTUSDC
+- **Test:** SOL/USDC → SOL/USDC, SOL/BTC → SOL/BTC, BTC/USDC → BTC/USDC
 - **Result:** PASS — verified all 3 pairs resolve correctly for ticker, OHLC, and order commands.
 
 ### 8.4 OHLC Parsing
@@ -373,6 +373,6 @@ These are documented behaviors, not bugs:
 | 5 | Trade log price | Logged engine price, not order price | Changed to log actual limit_price |
 | 6 | Dead man's switch | Refreshed every 2nd tick (could expire) | Refreshed every tick |
 | 7 | Dashboard balance | Extra API call every tick | Cached every 5th tick |
-| 8 | Indicator precision | BB bands rounded to 2 decimals (0.00 for SOL/XBT) | Dynamic precision based on price magnitude |
+| 8 | Indicator precision | BB bands rounded to 2 decimals (0.00 for SOL/BTC) | Dynamic precision based on price magnitude |
 | 9 | Continuous mode | Duration=0 caused TypeError on remaining | Fixed string/float handling |
 | 10 | Performance report | Box-drawing characters misaligned | Rewrote with clean ASCII formatting |

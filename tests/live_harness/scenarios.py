@@ -1033,12 +1033,12 @@ def scenario_L3_live_buy_cancel_SOLUSDC(h: Harness):
         raise
 
 
-def scenario_L4_live_buy_cancel_XBTUSDC(h: Harness):
-    """L3 for XBT/USDC."""
-    agent = h.new_agent(pairs=["XBT/USDC"], paper=False, initial_balance=200.0)
-    h.seed_candles(agent, "XBT/USDC", base_price=70000.0)
+def scenario_L4_live_buy_cancel_BTCUSDC(h: Harness):
+    """L3 for BTC/USDC."""
+    agent = h.new_agent(pairs=["BTC/USDC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "BTC/USDC", base_price=70000.0)
     try:
-        report = harness_execute(agent, "XBT/USDC", "BUY", 0.60, "L4 real buy XBT + cancel")
+        report = harness_execute(agent, "BTC/USDC", "BUY", 0.60, "L4 real buy BTC + cancel")
         assert report["outcome"] in ("success", "failed_and_rolled_back")
         if report["outcome"] == "success":
             entry = report["last_journal_entry"]
@@ -1051,12 +1051,12 @@ def scenario_L4_live_buy_cancel_XBTUSDC(h: Harness):
         raise
 
 
-def scenario_L5_live_buy_cancel_SOLXBT(h: Harness):
-    """L3 for SOL/XBT."""
-    agent = h.new_agent(pairs=["SOL/XBT"], paper=False, initial_balance=0.01)
-    h.seed_candles(agent, "SOL/XBT", base_price=0.001)
+def scenario_L5_live_buy_cancel_SOLBTC(h: Harness):
+    """L3 for SOL/BTC."""
+    agent = h.new_agent(pairs=["SOL/BTC"], paper=False, initial_balance=0.01)
+    h.seed_candles(agent, "SOL/BTC", base_price=0.001)
     try:
-        report = harness_execute(agent, "SOL/XBT", "BUY", 0.60, "L5 real buy SOL/XBT + cancel")
+        report = harness_execute(agent, "SOL/BTC", "BUY", 0.60, "L5 real buy SOL/BTC + cancel")
         assert report["outcome"] in ("success", "failed_and_rolled_back")
         if report["outcome"] == "success":
             entry = report["last_journal_entry"]
@@ -1142,7 +1142,7 @@ ALL_SCENARIOS: list[Scenario] = [
     Scenario("L1", "Live ticker SOL/USDC", "L", LIVE, scenario_L1_live_ticker_SOLUSDC),
     Scenario("L2", "Live --validate buy SOL/USDC", "L", LIVE, scenario_L2_live_validate_buy_SOLUSDC),
     Scenario("L3", "Live post-only buy SOL/USDC + cancel", "L", LIVE_ONLY, scenario_L3_live_buy_cancel_SOLUSDC),
-    Scenario("L4", "Live post-only buy XBT/USDC + cancel", "L", LIVE_ONLY, scenario_L4_live_buy_cancel_XBTUSDC),
-    Scenario("L5", "Live post-only buy SOL/XBT + cancel", "L", LIVE_ONLY, scenario_L5_live_buy_cancel_SOLXBT),
+    Scenario("L4", "Live post-only buy BTC/USDC + cancel", "L", LIVE_ONLY, scenario_L4_live_buy_cancel_BTCUSDC),
+    Scenario("L5", "Live post-only buy SOL/BTC + cancel", "L", LIVE_ONLY, scenario_L5_live_buy_cancel_SOLBTC),
     Scenario("L6", "Live --validate below costmin", "L", VALIDATE_ONLY, scenario_L6_live_validate_below_costmin),
 ]
