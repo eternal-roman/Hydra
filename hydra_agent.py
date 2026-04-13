@@ -1472,22 +1472,14 @@ class HydraAgent:
         # One engine per pair — apply tuned params if available
         self.engines: Dict[str, HydraEngine] = {}
         for pair in pairs:
-            # Scale regime thresholds for candle interval
-            # 15-min+ bars have ~1.7× the ATR of 5-min — raise thresholds to
-            # prevent over-classifying VOLATILE regime on wider candles.
-            if candle_interval >= 15:
-                vol_atr, vol_bb = 4.5, 0.09
-            elif candle_interval >= 5:
-                vol_atr, vol_bb = 3.0, 0.06
-            else:
-                vol_atr, vol_bb = 4.0, 0.08
+            # Volatility thresholds are now adaptive (multiplier on median
+            # ATR%) — no candle-interval branching needed; the median
+            # self-adjusts for wider candle bars.
             self.engines[pair] = HydraEngine(
                 initial_balance=initial_balance / len(pairs),
                 asset=pair,
                 sizing=sizing,
                 candle_interval=candle_interval,
-                volatile_atr_pct=vol_atr,
-                volatile_bb_width=vol_bb,
             )
             # Apply any previously learned tuned params
             tuned = self.trackers[pair].get_tunable_params()

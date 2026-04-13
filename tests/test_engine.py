@@ -215,15 +215,19 @@ class TestRegimeDetection:
         assert regime == Regime.RANGING
 
     def test_volatile_overrides_trend(self):
-        # Volatile should override even if there's a trend
-        prices = make_volatile(100)
-        # Create candles with extreme high/low swings for high ATR
-        candles = []
-        for i, p in enumerate(prices):
-            candles.append(Candle(
-                open=p, high=p + 15.0, low=p - 15.0, close=p, volume=100.0, timestamp=float(i),
+        # Adaptive detection: VOLATILE fires when current ATR% is a spike
+        # above the asset's own median.  Build calm history then a sudden spike.
+        calm_prices = [100.0 + 0.5 * i for i in range(80)]
+        calm_candles = make_candles(calm_prices)
+        # Append 20 extremely volatile candles at the end
+        for i in range(20):
+            p = calm_prices[-1] + (15.0 if i % 2 == 0 else -15.0)
+            calm_prices.append(p)
+            calm_candles.append(Candle(
+                open=p, high=p + 20.0, low=p - 20.0, close=p, volume=100.0,
+                timestamp=float(80 + i),
             ))
-        regime = RegimeDetector.detect(candles, prices)
+        regime = RegimeDetector.detect(calm_candles, calm_prices)
         assert regime == Regime.VOLATILE
 
 
@@ -424,17 +428,100 @@ class TestHydraEngine:
         assert len(engine.candles) == 2
 
     def test_configurable_regime_thresholds(self):
-        """Regime thresholds can be overridden for different candle intervals."""
+        """Adaptive volatile multipliers can be tuned to control sensitivity."""
+        # Build data with a volatile tail so adaptive detection has a spike
+        calm = [100.0 + 0.3 * i for i in range(80)]
+        calm_candles = make_candles(calm)
+        for i in range(20):
+            p = calm[-1] + (10.0 if i % 2 == 0 else -10.0)
+            calm.append(p)
+            calm_candles.append(Candle(open=p, high=p+12, low=p-12, close=p, volume=100, timestamp=float(80+i)))
+        # With very low multiplier (1.01), small variance triggers VOLATILE
+        regime = RegimeDetector.detect(calm_candles, calm, volatile_atr_mult=1.01, volatile_bb_mult=1.01)
+        assert regime == Regime.VOLATILE
+        # With very high multiplier, even the spike is not "exceptional" enough
+        regime2 = RegimeDetector.detect(calm_candles, calm, volatile_atr_mult=999.0, volatile_bb_mult=999.0)
+        assert regime2 != Regime.VOLATILE
+
+    def test_atr_pct_series_length(self):
+        """atr_pct_series returns one value per candle from period onward."""
         prices = make_ranging(100)
         candles = make_candles(prices)
-        # With very low thresholds, even ranging data should be VOLATILE
-        regime = RegimeDetector.detect(candles, prices, volatile_atr_pct=0.01, volatile_bb_width=0.001)
+        series = Indicators.atr_pct_series(candles, period=14)
+        assert len(series) == len(candles) - 14
+        # Too few candles → empty
+        assert Indicators.atr_pct_series(candles[:14], period=14) == []
+
+    def test_bb_width_series_length(self):
+        """bb_width_series returns one value per price from period onward."""
+        prices = make_ranging(100)
+        series = Indicators.bb_width_series(prices, period=20)
+        assert len(series) == len(prices) - 20 + 1  # inclusive window
+        assert Indicators.bb_width_series(prices[:19], period=20) == []
+
+    def test_adaptive_sol_not_always_volatile(self):
+        """SOL-like data (high but steady ATR) should NOT be perpetually VOLATILE."""
+        # Simulate SOL: base ~150, natural swing +/-8 (ATR ~5-6% of price)
+        prices = []
+        for i in range(100):
+            prices.append(150.0 + 8.0 * math.sin(i * 0.5))
+        candles = []
+        for i, p in enumerate(prices):
+            candles.append(Candle(
+                open=p - 4.0, high=p + 5.0, low=p - 5.0, close=p,
+                volume=100.0, timestamp=float(i),
+            ))
+        regime = RegimeDetector.detect(candles, prices)
+        # With adaptive detection, steady high-vol should be RANGING (or TREND),
+        # NOT perpetually VOLATILE
+        assert regime != Regime.VOLATILE
+
+    def test_adaptive_btc_spike_detected(self):
+        """BTC-like data with sudden spike should trigger VOLATILE."""
+        # 80 calm candles (BTC-like ATR ~1%)
+        prices = [50000.0 + 50.0 * math.sin(i * 0.2) for i in range(80)]
+        candles = []
+        for i, p in enumerate(prices):
+            candles.append(Candle(
+                open=p - 100, high=p + 200, low=p - 200, close=p,
+                volume=100.0, timestamp=float(i),
+            ))
+        # 20 spiking candles (ATR jumps 5x)
+        for i in range(20):
+            p = prices[-1] + (2000 if i % 2 == 0 else -2000)
+            prices.append(p)
+            candles.append(Candle(
+                open=p, high=p + 3000, low=p - 3000, close=p,
+                volume=100.0, timestamp=float(80 + i),
+            ))
+        regime = RegimeDetector.detect(candles, prices)
         assert regime == Regime.VOLATILE
-        # With very high thresholds, volatile data should NOT be VOLATILE
-        vol_prices = make_volatile(100)
-        vol_candles = [Candle(open=p, high=p+15, low=p-15, close=p, volume=100, timestamp=float(i)) for i, p in enumerate(vol_prices)]
-        regime2 = RegimeDetector.detect(vol_candles, vol_prices, volatile_atr_pct=999.0, volatile_bb_width=999.0)
-        assert regime2 != Regime.VOLATILE
+
+    def test_uniform_volatility_not_volatile(self):
+        """Constant ATR% → current equals median → multiplier > 1 never triggers."""
+        # Every candle has identical range relative to price
+        prices = [100.0 + 0.01 * i for i in range(100)]
+        candles = []
+        for i, p in enumerate(prices):
+            candles.append(Candle(
+                open=p, high=p + 2.0, low=p - 2.0, close=p,
+                volume=100.0, timestamp=float(i),
+            ))
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime != Regime.VOLATILE
+
+    def test_floor_prevents_degenerate(self):
+        """Dead market (tiny ATR%) should not trigger VOLATILE on trivial moves."""
+        # Stablecoin-like: ATR ~0.01% of price
+        prices = [1.000 + 0.0001 * math.sin(i * 0.3) for i in range(100)]
+        candles = []
+        for i, p in enumerate(prices):
+            candles.append(Candle(
+                open=p, high=p + 0.0002, low=p - 0.0002, close=p,
+                volume=100.0, timestamp=float(i),
+            ))
+        regime = RegimeDetector.detect(candles, prices)
+        assert regime != Regime.VOLATILE
 
     def test_candle_status(self):
         """Candle status reports forming/closed based on age."""
@@ -561,7 +648,7 @@ class TestSnapshotAndRollback:
         engine.position.size = 5.0
         engine.position.avg_entry = 95.0
         engine.position.realized_pnl = 1.23
-        engine.position.params_at_entry = {"volatile_atr_pct": 2.0}
+        engine.position.params_at_entry = {"volatile_atr_mult": 2.0}
         engine.balance = 9500.0
         engine.total_trades = 7
         engine.win_count = 3
@@ -586,7 +673,7 @@ class TestSnapshotAndRollback:
         assert engine.position.size == 5.0
         assert engine.position.avg_entry == 95.0
         assert engine.position.realized_pnl == 1.23
-        assert engine.position.params_at_entry == {"volatile_atr_pct": 2.0}
+        assert engine.position.params_at_entry == {"volatile_atr_mult": 2.0}
         assert engine.balance == 9500.0
         assert engine.total_trades == 7
         assert engine.win_count == 3

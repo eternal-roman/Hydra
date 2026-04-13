@@ -57,11 +57,11 @@ class TestInit:
         assert t.update_count == 0
 
     def test_custom_defaults(self):
-        custom = {"volatile_atr_pct": 5.0, "volatile_bb_width": 0.10}
+        custom = {"volatile_atr_mult": 2.5, "volatile_bb_mult": 2.2}
         d = tempfile.mkdtemp()
         t = ParameterTracker(pair="SOL/USDC", save_dir=d, defaults={**DEFAULT_PARAMS, **custom})
-        assert t.current_params["volatile_atr_pct"] == 5.0
-        assert t.current_params["volatile_bb_width"] == 0.10
+        assert t.current_params["volatile_atr_mult"] == 2.5
+        assert t.current_params["volatile_bb_mult"] == 2.2
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -84,9 +84,9 @@ class TestRecording:
 
     def test_params_snapshot_stored(self):
         t = make_tracker()
-        params = {"volatile_atr_pct": 3.5, **{k: v for k, v in DEFAULT_PARAMS.items() if k != "volatile_atr_pct"}}
+        params = {"volatile_atr_mult": 3.5, **{k: v for k, v in DEFAULT_PARAMS.items() if k != "volatile_atr_mult"}}
         t.record_trade(params, "SELL", "win", 5.0)
-        assert t.observations[0]["params"]["volatile_atr_pct"] == 3.5
+        assert t.observations[0]["params"]["volatile_atr_mult"] == 3.5
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -127,19 +127,19 @@ class TestMinObservations:
 
 class TestShiftDirection:
     def test_shifts_toward_winning_values(self):
-        """Wins with high ATR threshold should shift current value upward."""
+        """Wins with high multiplier should shift current value upward."""
         t = make_tracker()
         win_params = dict(DEFAULT_PARAMS)
-        win_params["volatile_atr_pct"] = 6.0  # Wins happened at higher ATR
+        win_params["volatile_atr_mult"] = 2.6  # Wins happened at higher mult
         loss_params = dict(DEFAULT_PARAMS)
-        loss_params["volatile_atr_pct"] = 2.0  # Losses at lower ATR
+        loss_params["volatile_atr_mult"] = 1.3  # Losses at lower mult
         record_trades(t, n_wins=20, n_losses=10, win_params=win_params, loss_params=loss_params)
 
-        old_atr = t.current_params["volatile_atr_pct"]
+        old_atr = t.current_params["volatile_atr_mult"]
         t.update()
-        new_atr = t.current_params["volatile_atr_pct"]
+        new_atr = t.current_params["volatile_atr_mult"]
 
-        # Should shift toward winning mean (6.0), so new > old
+        # Should shift toward winning mean (2.6), so new > old
         assert new_atr > old_atr
 
     def test_shifts_toward_lower_winning_values(self):
@@ -160,14 +160,12 @@ class TestShiftDirection:
         """Shift should be exactly 10% of the distance to winning mean."""
         t = make_tracker()
         win_params = dict(DEFAULT_PARAMS)
-        win_params["volatile_atr_pct"] = 6.0
+        win_params["volatile_atr_mult"] = 2.6
         record_trades(t, n_wins=20, n_losses=0, win_params=win_params)
 
-        # Pin against literal expected value (4.0 old + 0.1 * (6.0 - 4.0) = 4.2)
-        # rather than re-applying SHIFT_RATE in the test — a tautological test
-        # cannot detect a bug that changes SHIFT_RATE in both places at once.
+        # Pin against literal expected value (1.8 old + 0.1 * (2.6 - 1.8) = 1.88)
         t.update()
-        assert abs(t.current_params["volatile_atr_pct"] - 4.2) < 1e-6
+        assert abs(t.current_params["volatile_atr_mult"] - 1.88) < 1e-6
 
     def test_no_shift_when_wins_match_current(self):
         """If winning trades used the same params as current, no shift."""
@@ -189,12 +187,12 @@ class TestClamping:
         """Even with extreme winning values, params stay within bounds."""
         t = make_tracker()
         extreme_params = dict(DEFAULT_PARAMS)
-        extreme_params["volatile_atr_pct"] = 100.0  # Way above max bound of 8.0
+        extreme_params["volatile_atr_mult"] = 100.0  # Way above max bound of 3.0
         extreme_params["momentum_rsi_lower"] = 1.0  # Way below min bound of 10.0
         record_trades(t, n_wins=20, n_losses=0, win_params=extreme_params)
         t.update()
 
-        assert t.current_params["volatile_atr_pct"] <= PARAM_BOUNDS["volatile_atr_pct"][1]
+        assert t.current_params["volatile_atr_mult"] <= PARAM_BOUNDS["volatile_atr_mult"][1]
         assert t.current_params["momentum_rsi_lower"] >= PARAM_BOUNDS["momentum_rsi_lower"][0]
 
     def test_all_params_within_bounds_after_update(self):
@@ -219,23 +217,23 @@ class TestPersistence:
         d = tempfile.mkdtemp()
         t1 = ParameterTracker(pair="SOL/USDC", save_dir=d)
         win_params = dict(DEFAULT_PARAMS)
-        win_params["volatile_atr_pct"] = 6.0
+        win_params["volatile_atr_mult"] = 2.6
         record_trades(t1, n_wins=20, n_losses=10, win_params=win_params)
         t1.update()
 
         # Load from same path
         t2 = ParameterTracker(pair="SOL/USDC", save_dir=d)
-        assert abs(t2.current_params["volatile_atr_pct"] - t1.current_params["volatile_atr_pct"]) < 1e-8
+        assert abs(t2.current_params["volatile_atr_mult"] - t1.current_params["volatile_atr_mult"]) < 1e-8
         assert t2.update_count == 1
 
     def test_load_clamps_invalid_saved_values(self):
         d = tempfile.mkdtemp()
         path = os.path.join(d, "hydra_params_SOL_USDC.json")
         with open(path, "w") as f:
-            json.dump({"pair": "SOL/USDC", "params": {"volatile_atr_pct": 999.0}}, f)
+            json.dump({"pair": "SOL/USDC", "params": {"volatile_atr_mult": 999.0}}, f)
 
         t = ParameterTracker(pair="SOL/USDC", save_dir=d)
-        assert t.current_params["volatile_atr_pct"] <= PARAM_BOUNDS["volatile_atr_pct"][1]
+        assert t.current_params["volatile_atr_mult"] <= PARAM_BOUNDS["volatile_atr_mult"][1]
 
     def test_load_handles_corrupt_json(self):
         d = tempfile.mkdtemp()
@@ -250,7 +248,7 @@ class TestPersistence:
         d = tempfile.mkdtemp()
         t = ParameterTracker(pair="SOL/USDC", save_dir=d)
         win_params = dict(DEFAULT_PARAMS)
-        win_params["volatile_atr_pct"] = 6.0
+        win_params["volatile_atr_mult"] = 2.6
         record_trades(t, n_wins=20, n_losses=10, win_params=win_params)
         t.update()
         assert os.path.exists(t.save_path)
@@ -276,7 +274,7 @@ class TestEngineIntegration:
     def test_apply_tuned_params(self):
         engine = HydraEngine(initial_balance=10000, asset="BTC/USD")
         new_params = {
-            "volatile_atr_pct": 5.5,
+            "volatile_atr_mult": 2.5,
             "trend_ema_ratio": 1.008,
             "momentum_rsi_lower": 25.0,
             "momentum_rsi_upper": 75.0,
@@ -285,7 +283,7 @@ class TestEngineIntegration:
             "min_confidence_threshold": 0.50,
         }
         engine.apply_tuned_params(new_params)
-        assert engine.volatile_atr_pct == 5.5
+        assert engine.volatile_atr_mult == 2.5
         assert engine.trend_ema_ratio == 1.008
         assert engine.momentum_rsi_lower == 25.0
         assert engine.momentum_rsi_upper == 75.0
@@ -315,7 +313,7 @@ class TestEngineIntegration:
         trade = engine._maybe_execute(buy_signal)
         if trade:
             assert engine.position.params_at_entry is not None
-            assert "volatile_atr_pct" in engine.position.params_at_entry
+            assert "volatile_atr_mult" in engine.position.params_at_entry
 
     def test_params_at_entry_cleared_on_full_sell(self):
         """When position is fully closed, params_at_entry should be cleared."""
@@ -349,14 +347,10 @@ class TestEngineIntegration:
 
         # Default ratio (1.005) — gentle trend should register as TREND_UP
         regime_default = RegimeDetector.detect(candles, prices,
-                                               volatile_atr_pct=4.0,
-                                               volatile_bb_width=0.08,
                                                trend_ema_ratio=1.005)
 
         # Strict ratio (1.02) — same data should NOT register as TREND_UP
         regime_strict = RegimeDetector.detect(candles, prices,
-                                              volatile_atr_pct=4.0,
-                                              volatile_bb_width=0.08,
                                               trend_ema_ratio=1.02)
 
         assert regime_default == "TREND_UP", f"Expected TREND_UP with default ratio, got {regime_default}"
@@ -365,13 +359,13 @@ class TestEngineIntegration:
     def test_changes_log(self):
         t = make_tracker()
         win_params = dict(DEFAULT_PARAMS)
-        win_params["volatile_atr_pct"] = 6.0
+        win_params["volatile_atr_mult"] = 2.6
         record_trades(t, n_wins=20, n_losses=10, win_params=win_params)
         old_params = t.get_tunable_params()
         t.update()
         changes = t.get_changes_log(old_params)
         assert len(changes) > 0
-        assert any("volatile_atr_pct" in c for c in changes)
+        assert any("volatile_atr_mult" in c for c in changes)
 
 
 # ═══════════════════════════════════════════════════════════════

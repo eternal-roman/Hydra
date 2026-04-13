@@ -77,6 +77,7 @@ python hydra_engine.py
 - Priority: VOLATILE > TREND_UP > TREND_DOWN > RANGING
 - Volatile check must come first — it overrides trend signals
 - Warmup requires 50 candles before regime detection activates
+- **Adaptive volatility threshold**: VOLATILE triggers when current ATR% exceeds `volatile_atr_mult` (default 1.8) times the asset's own median ATR% over the candle history. Same logic for BB width. This means SOL (naturally high ATR) and BTC (naturally low ATR) are evaluated against their own baselines, not a fixed absolute number. The tuner learns the optimal multiplier per pair. Floor values (1.5% ATR, 0.03 BB width) prevent degenerate behavior in dead markets.
 
 ### Trading
 - Confidence threshold: 0.65 both modes. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY. Signals below 0.65 (< 15% Kelly edge) are filtered as negative-EV after costs.
