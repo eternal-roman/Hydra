@@ -213,7 +213,20 @@ export default function App() {
   // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
   // across --resume (engine pnl_pct resets because initial_balance gets re-split).
   const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
-  const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
+  // Max drawdown: engine tracks historical max per pair (persists across --resume).
+  // Supplement with max drawdown from the dashboard's own balance history so
+  // exchange-level drops (across all pairs) are also captured.
+  const engineDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
+  let histDD = 0;
+  if (history.length > 1) {
+    let peak = history[0];
+    for (let i = 1; i < history.length; i++) {
+      if (history[i] > peak) peak = history[i];
+      const dd = peak > 0 ? ((peak - history[i]) / peak * 100) : 0;
+      if (dd > histDD) histDD = dd;
+    }
+  }
+  const maxDD = Math.max(engineDD, histDD);
   // Engine round-trip trades (position fully closed)
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
