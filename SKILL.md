@@ -9,7 +9,7 @@ description: >
   HYDRA (Hyper-adaptive Dynamic Regime-switching Universal Agent) is an autonomous
   crypto trading agent for Kraken CLI that detects market regimes and switches between
   four strategies: Momentum, Mean Reversion, Grid, and Defensive. Trades SOL/USDC,
-  SOL/XBT, and XBT/USDC using limit post-only orders. Use when: (1) running a live
+  SOL/BTC, and BTC/USDC using limit post-only orders. Use when: (1) running a live
   trading session via Kraken CLI (WSL), (2) analyzing current market regime from OHLC
   data, (3) generating trade signals with quarter-Kelly position sizing, (4) monitoring
   performance via the React dashboard. Requires kraken-cli installed in WSL. NOT for:
@@ -106,8 +106,8 @@ position_size = position_value / current_price
 
 **Hard limits:**
 - Never allocate more than 30% of capital to a single trade (conservative) / 40% (competition)
-- Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 XBT)
-- Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 XBT)
+- Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 BTC)
+- Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 BTC)
 - Sell-side dust prevention: partial sells below ordermin force full close; positions below ordermin are unsellable
 - Confidence threshold to execute: 0.55 (conservative) / 0.50 (competition)
 

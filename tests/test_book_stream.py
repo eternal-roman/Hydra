@@ -13,7 +13,7 @@ from hydra_agent import BookStream
 from hydra_engine import OrderBookAnalyzer
 
 
-PAIRS = ["SOL/USDC", "SOL/XBT", "XBT/USDC"]
+PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 def _make_stream(paper=False):
@@ -123,9 +123,9 @@ class TestBookStreamDispatch:
             ],
         })
         sol = bs.latest_book("SOL/USDC")
-        xbt = bs.latest_book("SOL/XBT")
+        btc = bs.latest_book("SOL/BTC")
         assert sol["bids"][0][0] == 82.0
-        assert xbt["bids"][0][0] == 0.00116
+        assert btc["bids"][0][0] == 0.00116
 
     def test_unknown_symbol_ignored(self):
         bs = _make_stream()
@@ -160,7 +160,7 @@ class TestBookStreamDispatch:
         })
         assert bs._last_heartbeat > time.monotonic() - 1.0
 
-    def test_btc_usdc_maps_to_xbt_usdc(self):
+    def test_btc_usdc_maps_correctly(self):
         bs = _make_stream()
         bs._on_message({
             "channel": "book", "type": "snapshot",
@@ -168,7 +168,7 @@ class TestBookStreamDispatch:
                        "bids": [{"price": 95000.0, "qty": 0.5}],
                        "asks": [{"price": 95100.0, "qty": 0.5}]}],
         })
-        book = bs.latest_book("XBT/USDC")
+        book = bs.latest_book("BTC/USDC")
         assert book is not None
         assert book["bids"][0][0] == 95000.0
 

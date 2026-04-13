@@ -4,7 +4,7 @@ This file provides context for Claude Code and other AI agents working on this r
 
 ## Project Overview
 
-HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market conditions (trending, ranging, volatile) and switches between four strategies (Momentum, Mean Reversion, Grid, Defensive) to execute limit post-only orders on SOL/USDC, SOL/XBT, and XBT/USDC.
+HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market conditions (trending, ranging, volatile) and switches between four strategies (Momentum, Mean Reversion, Grid, Defensive) to execute limit post-only orders on SOL/USDC, SOL/BTC, and BTC/USDC.
 
 ## Repository Structure
 
@@ -46,7 +46,7 @@ If `HYDRA_MEMORY.md` does not exist on this machine (e.g., fresh clone), it has 
 cd dashboard && npm install && npm run dev
 
 # Agent — conservative (default, 5-min candles, runs forever)
-python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --balance 100
+python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100
 
 # Agent — competition mode (half-Kelly, lower threshold)
 python hydra_agent.py --mode competition
@@ -81,8 +81,8 @@ python hydra_engine.py
 ### Trading
 - Confidence threshold: 0.55 conservative mode, 0.50 competition mode. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY.
 - Position sizing: quarter-Kelly conservative, half-Kelly competition (`(confidence*2 - 1) * multiplier * balance`)
-- Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 XBT), `costmin` per quote (0.5 USDC, 0.00002 XBT). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
-- Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, XBT/USDC=2, SOL/XBT=7). Hardcoded `PRICE_DECIMALS` remain as fallbacks; at startup `KrakenCLI.load_pair_constants()` dynamically loads the true values from `kraken pairs` and patches them via `apply_pair_constants()`.
+- Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 BTC), `costmin` per quote (0.5 USDC, 0.00002 BTC). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
+- Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, BTC/USDC=2, SOL/BTC=7). Hardcoded `PRICE_DECIMALS` remain as fallbacks; at startup `KrakenCLI.load_pair_constants()` dynamically loads the true values from `kraken pairs` and patches them via `apply_pair_constants()`.
 - Dynamic pair constants: at startup (live mode), the agent calls `kraken pairs` to load `pair_decimals`, `ordermin`, and `costmin` for each traded pair. These override the hardcoded `PRICE_DECIMALS`, `MIN_ORDER_SIZE`, and `MIN_COST` class-level dicts. If the API call fails, hardcoded fallbacks are used — no degradation in behavior.
 - System status gate: each tick (live mode) checks `kraken status` before doing any work. If Kraken reports `"maintenance"` or `"cancel_only"`, the tick is skipped with a log message. `"post_only"` is treated as normal (we only place post-only orders). API errors degrade gracefully to `"online"`. Status transitions are logged once per change, not every tick.
 - Circuit breaker: 15% max drawdown halts the engine permanently for the session. Both `tick()` and `_maybe_execute` check the halt flag.
@@ -93,7 +93,7 @@ python hydra_engine.py
 - Resume reconciliation: on `--resume`, `_reconcile_stale_placed()` scans the journal for PLACED entries from the previous session and queries the exchange. Terminal orders (closed/canceled/expired) have their journal lifecycle updated directly. Still-open orders are re-registered with the ExecutionStream so WS events finalize them. Engine rollback is not possible for previous-session entries (no `pre_trade_snapshot` persisted) — a warning is logged if an unfilled order is found.
 - BaseStream superclass: `ExecutionStream`, `CandleStream`, `TickerStream`, `BalanceStream`, and `BookStream` all inherit from `BaseStream` which provides subprocess spawn/stop, reader/stderr threads, heartbeat-based health checks, and auto-restart with cooldown. Subclasses override `_build_cmd()`, `_on_message(msg)`, and `_stream_label()`.
 - Push-based market data: `CandleStream` (ws ohlc) and `TickerStream` (ws ticker) each subscribe to ALL traded pairs in one WS connection. `_fetch_and_tick()` uses the candle stream (zero REST calls, zero rate-limit sleep). Both streams are auto-restarted on failure via `ensure_healthy()` each tick. If a WS stream is unhealthy, the agent skips that data source until auto-restart recovers it. Order placement is blocked when TickerStream is unavailable.
-- Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy. If the stream is unhealthy, the agent skips balance updates until auto-restart recovers it. Asset names are normalized (BTC→XBT) and equities/ETFs are filtered out.
+- Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy. If the stream is unhealthy, the agent skips balance updates until auto-restart recovers it. Asset names are normalized (XXBT→BTC, XBT→BTC) and equities/ETFs are filtered out.
 - Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Phase 1.75 (order book intelligence) uses WS data when healthy. If the stream is unhealthy, the agent skips order book data until auto-restart recovers it. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
 - Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
@@ -178,4 +178,4 @@ See AUDIT.md for the full verification checklist.
 - `hydra_session_snapshot.json` is the session snapshot for `--resume` — it's gitignored
 - On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this
 - `start_hydra.bat` uses `--mode competition --resume` for production — do not remove these flags
-- **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) and Rule 3 (coordinated swap SELL) can theoretically conflict if BTC is TREND_UP + SOL TREND_DOWN + SOL/XBT TREND_UP simultaneously — Rule 3 overwrites Rule 2. Current behavior favors the safer SELL. Future work: add explicit priority or merge logic.
+- **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) and Rule 3 (coordinated swap SELL) can theoretically conflict if BTC is TREND_UP + SOL TREND_DOWN + SOL/BTC TREND_UP simultaneously — Rule 3 overwrites Rule 2. Current behavior favors the safer SELL. Future work: add explicit priority or merge logic.

@@ -30,7 +30,7 @@ def make_depth(bid_prices, bid_volumes, ask_prices, ask_volumes, nested=False):
     asks = [[str(p), str(v), 1000000] for p, v in zip(ask_prices, ask_volumes)]
     data = {"bids": bids, "asks": asks}
     if nested:
-        return {"XBTUSDC": data}
+        return {"BTCUSDC": data}
     return data
 
 
@@ -336,7 +336,7 @@ class TestEdgeCases:
         assert result["ask_volume"] == 10.5
 
     def test_very_small_prices(self):
-        """SOL/XBT trades at ~0.0012 — verify no division issues."""
+        """SOL/BTC trades at ~0.0012 — verify no division issues."""
         depth = make_depth(
             [0.001200, 0.001199], [100, 100],
             [0.001201, 0.001202], [100, 100],

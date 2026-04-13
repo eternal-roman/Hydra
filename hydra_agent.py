@@ -3,12 +3,12 @@
 HYDRA Agent — Kraken CLI Integration Layer (Live Trading)
 
 Connects the HYDRA engine to live Kraken market data via kraken-cli (WSL).
-Supports live trading on SOL/USDC, SOL/XBT, and XBT/USDC.
+Supports live trading on SOL/USDC, SOL/BTC, and BTC/USDC.
 Broadcasts state over WebSocket for the React dashboard.
 
 Usage:
-    python hydra_agent.py --pairs SOL/USDC,SOL/XBT --balance 100 --duration 600
-    python hydra_agent.py --pairs SOL/USDC,SOL/XBT,XBT/USDC --interval 60
+    python hydra_agent.py --pairs SOL/USDC,SOL/BTC --balance 100 --duration 600
+    python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60
 """
 
 import subprocess
@@ -60,26 +60,26 @@ except ImportError:
 class KrakenCLI:
     """Wraps kraken-cli v0.2.3 running in WSL Ubuntu."""
 
-    # REST API pair resolution: friendly name → Kraken REST format.
-    # Internal canonical uses XBT (Kraken REST convention). BTC aliases
-    # are kept for defensive compatibility — any code that accidentally
-    # uses BTC-form still resolves correctly.
+    # REST & WS pair resolution: friendly name → CLI format.
+    # Internal canonical uses BTC (modern Kraken convention). The CLI
+    # accepts slashed BTC form natively (SOL/BTC, BTC/USDC). Legacy XBT
+    # aliases are kept so old snapshots/journals resolve correctly.
     PAIR_MAP = {
         "SOL/USDC": "SOL/USDC",
-        "SOL/XBT": "SOLXBT",
-        "SOL/BTC": "SOLXBT",       # alias
-        "XBT/USDC": "XBTUSDC",
-        "BTC/USDC": "XBTUSDC",     # alias
-        "BTC/USD": "XBT/USD",      # alias
+        "SOL/BTC": "SOL/BTC",
+        "BTC/USDC": "BTC/USDC",
+        "BTC/USD": "BTC/USD",
+        # Legacy XBT aliases — resolve to BTC canonical
+        "SOL/XBT": "SOL/BTC",
+        "XBT/USDC": "BTC/USDC",
     }
 
     # WS v2 API pair resolution: friendly name → WS v2 format.
-    # WS v2 uses BTC (not XBT) and slashed names. Separate from PAIR_MAP
-    # because REST and WS accept different formats for the same pairs.
+    # With BTC as canonical, WS v2 format matches internal names directly.
     WS_PAIR_MAP = {
         "SOL/USDC": "SOL/USDC",
-        "SOL/XBT": "SOL/BTC",
-        "XBT/USDC": "BTC/USDC",
+        "SOL/BTC": "SOL/BTC",
+        "BTC/USDC": "BTC/USDC",
     }
 
     # Suffixes Kraken uses for non-tradable (staked/bonded/locked) assets
@@ -87,22 +87,23 @@ class KrakenCLI:
 
     # Kraken sometimes returns extended asset names — normalize to canonical form
     ASSET_NORMALIZE = {
-        'XXBT': 'XBT', 'XBTC': 'XBT', 'BTC': 'XBT',
+        'XXBT': 'BTC', 'XBTC': 'BTC', 'XBT': 'BTC',
         'XETH': 'ETH', 'XSOL': 'SOL',
         'ZUSD': 'USD', 'ZUSDC': 'USDC',
     }
 
     # Per-pair price precision (hardcoded fallbacks). Dynamically overridden
     # at startup by load_pair_constants() → apply_pair_constants() from
-    # `kraken pairs`. Entries duplicated for friendly, slashless, and
-    # BTC-alias forms so _format_price works regardless of caller's format.
+    # `kraken pairs`. Legacy XBT aliases kept so _format_price works with
+    # old journal/snapshot data.
     PRICE_DECIMALS = {
         'SOL/USDC': 2, 'SOLUSDC': 2,
-        'XBT/USDC': 1, 'XBTUSDC': 1,
         'BTC/USDC': 1, 'BTCUSDC': 1,
-        'SOL/XBT': 7, 'SOLXBT': 7,
         'SOL/BTC': 7, 'SOLBTC': 7,
         'BTC/USD': 1, 'BTCUSD': 1,
+        # Legacy XBT aliases
+        'XBT/USDC': 1, 'XBTUSDC': 1,
+        'SOL/XBT': 7, 'SOLXBT': 7,
         'XBT/USD': 1, 'XBTUSD': 1,
     }
     PRICE_DECIMALS_DEFAULT = 8  # conservative fallback for unknown pairs
@@ -114,7 +115,7 @@ class KrakenCLI:
 
     @staticmethod
     def _normalize_asset(asset: str) -> str:
-        """Normalize Kraken asset name to canonical form (e.g. XXBT → XBT).
+        """Normalize Kraken asset name to canonical form (e.g. XXBT → BTC).
         Strips staked suffixes first, then applies name mapping."""
         name = asset
         for suffix in KrakenCLI.STAKED_SUFFIXES:
@@ -148,7 +149,7 @@ class KrakenCLI:
 
     @staticmethod
     def _resolve_pair(pair: str) -> str:
-        """Resolve to REST API pair format (e.g. SOLXBT, XBTUSDC)."""
+        """Resolve to CLI pair format (e.g. SOL/BTC, BTC/USDC)."""
         return KrakenCLI.PAIR_MAP.get(pair, pair)
 
     @staticmethod
@@ -214,7 +215,9 @@ class KrakenCLI:
         if not isinstance(data, dict) or "error" in data:
             return {}
 
-        # Build reverse map: every form Kraken might use → friendly pair name
+        # Build reverse map: every form Kraken might use → friendly pair name.
+        # Includes legacy XBT aliases so Kraken's wsname/altname (which still
+        # use XBT internally) resolve to our BTC canonical pairs.
         friendly_map = {}
         for fp in pairs:
             resolved = cls._resolve_pair(fp)
@@ -222,6 +225,15 @@ class KrakenCLI:
             friendly_map[fp.replace("/", "")] = fp
             friendly_map[resolved] = fp
             friendly_map[resolved.replace("/", "")] = fp
+        # Add legacy XBT alias entries: Kraken pairs API returns wsname="XBT/USDC",
+        # altname="XBTUSDC" etc. Map those back to our BTC canonical pairs.
+        for alias, target in cls.PAIR_MAP.items():
+            if alias != target:  # only aliases (XBT→BTC mappings)
+                for fp in pairs:
+                    if cls._resolve_pair(fp) == target:
+                        friendly_map[alias] = fp
+                        friendly_map[alias.replace("/", "")] = fp
+                        break
 
         result = {}
         for kraken_name, info in data.items():
@@ -335,7 +347,7 @@ class KrakenCLI:
     def volume(pairs=None) -> dict:
         """Get 30-day trade volume and current fee tier.
 
-        pairs: optional list of friendly pair symbols (e.g. ["SOL/USDC","XBT/USDC"])
+        pairs: optional list of friendly pair symbols (e.g. ["SOL/USDC","BTC/USDC"])
         or a pre-formatted comma-separated string. Returns raw Kraken response dict,
         or {"error": ...} on failure.
         """
@@ -734,7 +746,7 @@ class CandleStream(BaseStream):
     WS connection, stores the latest candle per pair, and exposes it via
     latest_candle(pair). Falls back to REST ohlc() when unhealthy."""
 
-    # Reverse map: WS symbol (e.g. "SOL/USDC", "SOL/XBT") → friendly pair.
+    # Reverse map: WS symbol (e.g. "SOL/USDC", "SOL/BTC") → friendly pair.
     # Built dynamically from the pairs list at init.
 
     def __init__(self, pairs: List[str], interval: int = 5, paper: bool = False):
@@ -928,7 +940,7 @@ class BalanceStream(BaseStream):
     assets. latest_balances() returns {asset: amount} for non-zero currency
     balances, matching the shape of KrakenCLI.balance().
 
-    WS returns asset names like "BTC" (not "XBT"), "USD", "USDC", "SOL" etc.
+    WS returns asset names like "BTC", "USD", "USDC", "SOL" etc.
     We normalize via KrakenCLI._normalize_asset so callers see canonical names.
     Only currency assets are included (equities/ETFs filtered out)."""
 
@@ -1408,8 +1420,8 @@ class HydraAgent:
 
     # Pair configuration
     PRIMARY_PAIR = "SOL/USDC"       # Main trading pair
-    CROSS_PAIR = "SOL/XBT"          # Opportunistic regime-driven swaps
-    BTC_PAIR = "XBT/USDC"           # For BTC/USDC when we can afford it
+    CROSS_PAIR = "SOL/BTC"          # Opportunistic regime-driven swaps
+    BTC_PAIR = "BTC/USDC"           # BTC priced in stablecoin
     ORDER_JOURNAL_CAP = 2000        # Bound in-memory order journal
     SNAPSHOT_EVERY_N_TICKS = 120    # ~1h at 30s ticks
 
@@ -1612,6 +1624,23 @@ class HydraAgent:
         except Exception as e:
             print(f"  [SNAPSHOT] Save failed: {e}")
 
+    @staticmethod
+    def _normalize_pair_name(pair: str) -> str:
+        """Normalize legacy XBT pair names to BTC canonical form.
+
+        Handles snapshot/journal data written before the XBT→BTC migration.
+        """
+        if "XBT" not in pair:
+            return pair
+        return pair.replace("XBT/USDC", "BTC/USDC").replace("SOL/XBT", "SOL/BTC").replace("XBT/", "BTC/")
+
+    @staticmethod
+    def _normalize_journal_pairs(journal: list):
+        """Normalize pair names in journal entries from XBT to BTC canonical."""
+        for entry in journal:
+            if isinstance(entry, dict) and "pair" in entry:
+                entry["pair"] = HydraAgent._normalize_pair_name(entry["pair"])
+
     def _load_snapshot(self):
         """Restore engine + coordinator state from snapshot file."""
         path = self._snapshot_path()
@@ -1624,13 +1653,20 @@ class HydraAgent:
             if snapshot.get("version") != 1:
                 print(f"  [SNAPSHOT] Unknown version {snapshot.get('version')}, skipping.")
                 return
-            for pair, eng_snap in snapshot.get("engines", {}).items():
+            # Normalize legacy XBT pair names in engine keys
+            engines_raw = snapshot.get("engines", {})
+            engines = {self._normalize_pair_name(k): v for k, v in engines_raw.items()}
+            for pair, eng_snap in engines.items():
                 if pair in self.engines:
                     self.engines[pair].restore_runtime(eng_snap)
-            for pair, history in snapshot.get("coordinator_regime_history", {}).items():
-                if pair in self.coordinator.regime_history:
-                    self.coordinator.regime_history[pair] = list(history)
+            # Normalize coordinator regime history keys
+            coord_raw = snapshot.get("coordinator_regime_history", {})
+            for pair, history in coord_raw.items():
+                norm_pair = self._normalize_pair_name(pair)
+                if norm_pair in self.coordinator.regime_history:
+                    self.coordinator.regime_history[norm_pair] = list(history)
             self.order_journal = list(snapshot.get("order_journal", []))
+            self._normalize_journal_pairs(self.order_journal)
             if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
@@ -1701,6 +1737,7 @@ class HydraAgent:
         if len(merged) > self.ORDER_JOURNAL_CAP:
             merged = merged[-self.ORDER_JOURNAL_CAP:]
         self.order_journal = merged
+        self._normalize_journal_pairs(self.order_journal)
         if merged_count or overwritten_count:
             parts = []
             if merged_count:
@@ -1793,10 +1830,10 @@ class HydraAgent:
             print(f"  [WARN] Balance check failed: {bal} — using --balance fallback: ${self.initial_balance:,.2f}")
 
         # Convert engine balances from USD to quote currency for non-USD pairs
-        # (e.g. SOL/XBT engine needs balance in XBT, not USD).
+        # (e.g. SOL/BTC engine needs balance in BTC, not USD).
         # Skip if _set_engine_balances was already called above (live mode with
         # exchange data).  Resumed sessions still need conversion because old
-        # snapshots (pre-multi-currency fix) stored USD values for XBT-quoted pairs.
+        # snapshots (pre-multi-currency fix) stored USD values for BTC-quoted pairs.
         if not balances_converted:
             per_pair_usd = self.initial_balance / len(self.pairs)
             self._set_engine_balances(per_pair_usd)
@@ -2290,7 +2327,7 @@ class HydraAgent:
         """Build cross-pair context summary for brain deliberation."""
         pairs = {}
         sol_exposure = 0.0
-        xbt_exposure = 0.0
+        btc_exposure = 0.0
 
         for pair, state in all_states.items():
             if state is None:
@@ -2301,11 +2338,11 @@ class HydraAgent:
             # Net asset exposure across the triangle
             if pair == "SOL/USDC":
                 sol_exposure += pos
-            elif pair == "SOL/XBT":
+            elif pair == "SOL/BTC":
                 sol_exposure += pos
-                xbt_exposure -= pos * price  # long SOL/XBT = short XBT
-            elif pair == "XBT/USDC":
-                xbt_exposure += pos
+                btc_exposure -= pos * price  # long SOL/BTC = short BTC
+            elif pair == "BTC/USDC":
+                btc_exposure += pos
 
             # Sibling pair summaries (exclude current pair)
             if pair != current_pair:
@@ -2321,7 +2358,7 @@ class HydraAgent:
             "pairs": pairs,
             "net_exposure": {
                 "SOL": round(sol_exposure, 6),
-                "XBT": round(xbt_exposure, 6),
+                "BTC": round(btc_exposure, 6),
             },
         }
 
@@ -2892,11 +2929,11 @@ class HydraAgent:
                 # Opportunistic cross-pair logic:
                 # If SOL/USDC shifts to TREND_DOWN and we hold SOL, consider selling SOL for BTC
                 if pair == "SOL/USDC" and current_regime == "TREND_DOWN":
-                    if "SOL/XBT" in all_states:
-                        xbt_regime = all_states["SOL/XBT"].get("regime")
-                        if xbt_regime in ("TREND_UP", "RANGING"):
+                    if "SOL/BTC" in all_states:
+                        btc_regime = all_states["SOL/BTC"].get("regime")
+                        if btc_regime in ("TREND_UP", "RANGING"):
                             print(f"  [REGIME] Cross-pair opportunity: SOL weakening vs USDC but "
-                                  f"SOL/XBT is {xbt_regime} — consider selling SOL for BTC")
+                                  f"SOL/BTC is {btc_regime} — consider selling SOL for BTC")
 
                 # If SOL/USDC shifts to TREND_UP, consider buying SOL with USDC
                 if pair == "SOL/USDC" and current_regime == "TREND_UP":
@@ -2908,9 +2945,9 @@ class HydraAgent:
         """Set engine balances, converting USD to quote currency for non-USD pairs.
 
         The engine's internal bookkeeping (balance -= cost) uses the quote currency,
-        so SOL/XBT must have its balance in XBT, not USD. Without this conversion,
-        position sizes for XBT-quoted pairs are wildly inflated (dividing USD by an
-        XBT-denominated price).
+        so SOL/BTC must have its balance in BTC, not USD. Without this conversion,
+        position sizes for BTC-quoted pairs are wildly inflated (dividing USD by a
+        BTC-denominated price).
 
         When an engine already holds a position (e.g. from --resume), we set
         initial_balance = cash + position_value so that P&L starts at 0% from
@@ -2946,13 +2983,13 @@ class HydraAgent:
                 base, quote = pair.split("/")
                 if quote in ("USDC", "USD"):
                     prices[base] = engine.prices[-1]
-        # Derive XBT price from SOL/XBT if XBT/USDC not available
-        if "XBT" not in prices and "SOL" in prices:
-            sol_xbt_engine = self.engines.get("SOL/XBT")
-            if sol_xbt_engine and sol_xbt_engine.prices:
-                sol_per_xbt = sol_xbt_engine.prices[-1]
-                if sol_per_xbt > 0:
-                    prices["XBT"] = prices["SOL"] / sol_per_xbt
+        # Derive BTC price from SOL/BTC if BTC/USDC not available
+        if "BTC" not in prices and "SOL" in prices:
+            sol_btc_engine = self.engines.get("SOL/BTC")
+            if sol_btc_engine and sol_btc_engine.prices:
+                sol_per_btc = sol_btc_engine.prices[-1]
+                if sol_per_btc > 0:
+                    prices["BTC"] = prices["SOL"] / sol_per_btc
         return prices
 
     def _extract_fee_tier(self, vol_response: dict) -> dict:
@@ -2977,7 +3014,7 @@ class HydraAgent:
             fees_taker = {}
         if not isinstance(fees_maker, dict):
             fees_maker = {}
-        # Kraken may return fee keys in several forms ("SOLUSDC", "SOL/USDC", "XBTUSDC",
+        # Kraken may return fee keys in several forms ("SOLUSDC", "SOL/USDC", "BTCUSDC",
         # "XXBTZUSD" historically). Build a forgiving reverse map that accepts both the
         # PAIR_MAP-resolved form and the slashless form of the original friendly pair.
         pair_reverse = {}
@@ -2986,6 +3023,14 @@ class HydraAgent:
             pair_reverse[resolved] = p
             pair_reverse[p.replace("/", "")] = p  # slashless fallback ("SOLUSDC" → "SOL/USDC")
             pair_reverse[p] = p                   # passthrough
+        # Add legacy XBT alias forms so Kraken fee keys like "XBTUSDC", "SOLXBT" resolve
+        for alias, target in KrakenCLI.PAIR_MAP.items():
+            if alias != target:
+                for p in getattr(self, "pairs", []):
+                    if KrakenCLI._resolve_pair(p) == target:
+                        pair_reverse[alias] = p
+                        pair_reverse[alias.replace("/", "")] = p
+                        break
         seen_keys = set(fees_taker.keys()) | set(fees_maker.keys())
         for raw_key in seen_keys:
             friendly = pair_reverse.get(raw_key, raw_key)
@@ -3342,8 +3387,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="HYDRA — Live Regime-Adaptive Trading Agent for Kraken CLI",
     )
-    parser.add_argument("--pairs", type=str, default="SOL/USDC,SOL/XBT,XBT/USDC",
-                        help="Comma-separated trading pairs (default: SOL/USDC,SOL/XBT,XBT/USDC)")
+    parser.add_argument("--pairs", type=str, default="SOL/USDC,SOL/BTC,BTC/USDC",
+                        help="Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)")
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,

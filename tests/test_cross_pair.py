@@ -15,7 +15,7 @@ from hydra_engine import CrossPairCoordinator, HydraEngine, Candle
 # HELPERS
 # ═══════════════════════════════════════════════════════════════
 
-PAIRS = ["SOL/USDC", "SOL/XBT", "XBT/USDC"]
+PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 def make_state(regime, signal_action="HOLD", confidence=0.5, position_size=0.0, price=100.0):
@@ -75,12 +75,12 @@ class TestRegimeHistory:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRule1BtcLeadsDown:
-    def test_xbt_down_sol_up_triggers_override(self):
+    def test_btc_down_sol_up_triggers_override(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_DOWN"),
+            "BTC/USDC": make_state("TREND_DOWN"),
             "SOL/USDC": make_state("TREND_UP"),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides
@@ -88,24 +88,24 @@ class TestRule1BtcLeadsDown:
         assert overrides["SOL/USDC"]["signal"] == "SELL"
         assert overrides["SOL/USDC"]["confidence_adj"] == 0.8
 
-    def test_xbt_down_sol_ranging_triggers_override(self):
+    def test_btc_down_sol_ranging_triggers_override(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_DOWN"),
+            "BTC/USDC": make_state("TREND_DOWN"),
             "SOL/USDC": make_state("RANGING"),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides
         assert overrides["SOL/USDC"]["signal"] == "SELL"
 
-    def test_xbt_down_sol_also_down_no_override(self):
+    def test_btc_down_sol_also_down_no_override(self):
         """If SOL is already trending down, no override needed."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_DOWN"),
+            "BTC/USDC": make_state("TREND_DOWN"),
             "SOL/USDC": make_state("TREND_DOWN"),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         # Rule 1 should NOT fire (SOL already down), Rule 3 won't fire (no position)
@@ -117,12 +117,12 @@ class TestRule1BtcLeadsDown:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRule2BtcRecovery:
-    def test_xbt_up_sol_down_boosts_confidence(self):
+    def test_btc_up_sol_down_boosts_confidence(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_UP"),
+            "BTC/USDC": make_state("TREND_UP"),
             "SOL/USDC": make_state("TREND_DOWN", confidence=0.4),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides
@@ -133,20 +133,20 @@ class TestRule2BtcRecovery:
     def test_confidence_capped_at_095(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_UP"),
+            "BTC/USDC": make_state("TREND_UP"),
             "SOL/USDC": make_state("TREND_DOWN", confidence=0.9),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert overrides["SOL/USDC"]["confidence_adj"] == 0.95
 
-    def test_xbt_up_sol_up_no_boost(self):
+    def test_btc_up_sol_up_no_boost(self):
         """No boost needed if SOL is already trending up."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_UP"),
+            "BTC/USDC": make_state("TREND_UP"),
             "SOL/USDC": make_state("TREND_UP"),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" not in overrides
@@ -157,12 +157,12 @@ class TestRule2BtcRecovery:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRule3CoordinatedSwap:
-    def test_sol_down_solxbt_up_with_position_triggers_swap(self):
+    def test_sol_down_solbtc_up_with_position_triggers_swap(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("RANGING"),
+            "BTC/USDC": make_state("RANGING"),
             "SOL/USDC": make_state("TREND_DOWN", position_size=5.0),
-            "SOL/XBT": make_state("TREND_UP"),
+            "SOL/BTC": make_state("TREND_UP"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides
@@ -171,28 +171,28 @@ class TestRule3CoordinatedSwap:
         assert "swap" in overrides["SOL/USDC"]
         swap = overrides["SOL/USDC"]["swap"]
         assert swap["sell_pair"] == "SOL/USDC"
-        assert swap["buy_pair"] == "SOL/XBT"
+        assert swap["buy_pair"] == "SOL/BTC"
 
     def test_no_swap_without_position(self):
         """Don't suggest a swap if we don't hold any SOL via SOL/USDC."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("RANGING"),
+            "BTC/USDC": make_state("RANGING"),
             "SOL/USDC": make_state("TREND_DOWN", position_size=0.0),
-            "SOL/XBT": make_state("TREND_UP"),
+            "SOL/BTC": make_state("TREND_UP"),
         }
         overrides = coord.get_overrides(states)
         # Without position, rule 3 shouldn't fire. Rule 1 also doesn't apply
-        # (XBT isn't down). So no overrides.
+        # (BTC isn't down). So no overrides.
         assert "SOL/USDC" not in overrides
 
-    def test_sol_down_solxbt_also_down_no_swap(self):
-        """No swap if SOL/XBT is also trending down."""
+    def test_sol_down_solbtc_also_down_no_swap(self):
+        """No swap if SOL/BTC is also trending down."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("RANGING"),
+            "BTC/USDC": make_state("RANGING"),
             "SOL/USDC": make_state("TREND_DOWN", position_size=5.0),
-            "SOL/XBT": make_state("TREND_DOWN"),
+            "SOL/BTC": make_state("TREND_DOWN"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" not in overrides or "swap" not in overrides.get("SOL/USDC", {})
@@ -206,9 +206,9 @@ class TestNoOverride:
     def test_all_ranging_no_override(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("RANGING"),
+            "BTC/USDC": make_state("RANGING"),
             "SOL/USDC": make_state("RANGING"),
-            "SOL/XBT": make_state("RANGING"),
+            "SOL/BTC": make_state("RANGING"),
         }
         overrides = coord.get_overrides(states)
         assert len(overrides) == 0
@@ -216,9 +216,9 @@ class TestNoOverride:
     def test_all_trending_up_no_override(self):
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_UP"),
+            "BTC/USDC": make_state("TREND_UP"),
             "SOL/USDC": make_state("TREND_UP"),
-            "SOL/XBT": make_state("TREND_UP"),
+            "SOL/BTC": make_state("TREND_UP"),
         }
         overrides = coord.get_overrides(states)
         assert len(overrides) == 0
@@ -243,14 +243,14 @@ class TestNoOverride:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRulePriority:
-    def test_rule1_fires_when_sol_up_and_xbt_down(self):
-        """Rule 1 fires when XBT is down and SOL is still up. Rule 3 cannot fire
+    def test_rule1_fires_when_sol_up_and_btc_down(self):
+        """Rule 1 fires when BTC is down and SOL is still up. Rule 3 cannot fire
         simultaneously because it requires SOL/USDC TREND_DOWN."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("TREND_DOWN"),
+            "BTC/USDC": make_state("TREND_DOWN"),
             "SOL/USDC": make_state("TREND_UP", position_size=5.0),
-            "SOL/XBT": make_state("TREND_UP"),
+            "SOL/BTC": make_state("TREND_UP"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides
@@ -263,9 +263,9 @@ class TestRulePriority:
         """Rule 3 fires when SOL/USDC is TREND_DOWN (Rule 1 doesn't apply)."""
         coord = CrossPairCoordinator(PAIRS)
         states = {
-            "XBT/USDC": make_state("RANGING"),  # Not TREND_DOWN, so Rule 1 doesn't fire
+            "BTC/USDC": make_state("RANGING"),  # Not TREND_DOWN, so Rule 1 doesn't fire
             "SOL/USDC": make_state("TREND_DOWN", position_size=5.0),
-            "SOL/XBT": make_state("TREND_UP"),
+            "SOL/BTC": make_state("TREND_UP"),
         }
         overrides = coord.get_overrides(states)
         assert "SOL/USDC" in overrides

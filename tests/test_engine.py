@@ -320,9 +320,9 @@ class TestPositionSizer:
         size = self.conservative.calculate(0.56, 100.0, 100.0, "SOL/USDC")
         assert size >= 0.02 or size == 0.0
 
-    def test_xbt_min_order_size(self):
+    def test_btc_min_order_size(self):
         self.setup()
-        size = self.conservative.calculate(0.95, 1000.0, 67000.0, "XBT/USDC")
+        size = self.conservative.calculate(0.95, 1000.0, 67000.0, "BTC/USDC")
         assert size >= 0.00005 or size == 0.0
 
     def test_zero_price(self):
@@ -951,20 +951,20 @@ class TestBrain:
         brain.decision_history["SOL/USDC"] = [
             {"tick": 1, "action": "CONFIRM", "signal": "BUY", "conviction": 0.7, "escalated": False},
         ]
-        brain.decision_history["XBT/USDC"] = [
+        brain.decision_history["BTC/USDC"] = [
             {"tick": 1, "action": "OVERRIDE", "signal": "HOLD", "conviction": 0.3, "escalated": True},
         ]
         # Verify per-pair isolation
         assert len(brain.decision_history["SOL/USDC"]) == 1
-        assert len(brain.decision_history["XBT/USDC"]) == 1
+        assert len(brain.decision_history["BTC/USDC"]) == 1
         assert brain.decision_history["SOL/USDC"][0]["signal"] == "BUY"
-        assert brain.decision_history["XBT/USDC"][0]["signal"] == "HOLD"
+        assert brain.decision_history["BTC/USDC"][0]["signal"] == "HOLD"
         # Verify analyst prompt reads only the current pair's history
         state = self._make_state()
         state["asset"] = "SOL/USDC"
         prompt = brain._build_analyst_prompt(state)
         assert "CONFIRM BUY" in prompt
-        assert "OVERRIDE HOLD" not in prompt  # XBT/USDC history should not leak
+        assert "OVERRIDE HOLD" not in prompt  # BTC/USDC history should not leak
 
 # ═══════════════════════════════════════════════════════════════
 # TEST: HF-002 — execute_signal must respect halted engine

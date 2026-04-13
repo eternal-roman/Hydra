@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hydra_agent import TickerStream
 
 
-PAIRS = ["SOL/USDC", "SOL/XBT", "XBT/USDC"]
+PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 def _make_stream(paper=False):
@@ -58,7 +58,7 @@ class TestTickerStreamDispatch:
         assert ts.latest_ticker("SOL/USDC")["bid"] == 85.0
 
     def test_multi_pair_stored_independently(self):
-        """WS v2 returns SOL/BTC — mapped to our friendly SOL/XBT."""
+        """WS v2 returns SOL/BTC — matches our canonical SOL/BTC."""
         ts = _make_stream()
         ts._on_message({
             "channel": "ticker", "type": "snapshot",
@@ -68,9 +68,9 @@ class TestTickerStreamDispatch:
             ],
         })
         sol = ts.latest_ticker("SOL/USDC")
-        xbt = ts.latest_ticker("SOL/XBT")
+        btc = ts.latest_ticker("SOL/BTC")
         assert sol is not None and sol["bid"] == 82.0
-        assert xbt is not None and xbt["bid"] == 0.00116
+        assert btc is not None and btc["bid"] == 0.00116
 
     def test_unknown_symbol_ignored(self):
         ts = _make_stream()
@@ -107,13 +107,13 @@ class TestTickerStreamDispatch:
         })
         assert ts._last_heartbeat > time.monotonic() - 1.0
 
-    def test_btc_usdc_maps_to_xbt_usdc(self):
+    def test_btc_usdc_maps_correctly(self):
         ts = _make_stream()
         ts._on_message({
             "channel": "ticker", "type": "snapshot",
             "data": [{"symbol": "BTC/USDC", "bid": 95000.0, "ask": 95100.0, "last": 95050.0}],
         })
-        ticker = ts.latest_ticker("XBT/USDC")
+        ticker = ts.latest_ticker("BTC/USDC")
         assert ticker is not None
         assert ticker["bid"] == 95000.0
 

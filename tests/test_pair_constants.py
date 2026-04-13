@@ -40,7 +40,7 @@ class _StubRun:
             self._original = None
 
 
-# Real Kraken response shape for SOL/USDC, XBT/USDC (as XBTUSDC), SOL/XBT (as SOL/BTC)
+# Real Kraken response shape for SOL/USDC, BTC/USDC (Kraken key: XBTUSDC), SOL/BTC (Kraken key: SOL/BTC)
 REAL_KRAKEN_RESPONSE = {
     "SOL/USDC": {
         "pair_decimals": 2,
@@ -80,7 +80,7 @@ REAL_KRAKEN_RESPONSE = {
     },
 }
 
-FRIENDLY_PAIRS = ["SOL/USDC", "SOL/XBT", "XBT/USDC"]
+FRIENDLY_PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -133,7 +133,7 @@ class TestLoadPairConstants:
         assert sol["tick_size"] == "0.01"
 
     def test_maps_xbtusdc_to_friendly(self):
-        """Kraken returns 'XBTUSDC' key but wsname='XBT/USDC' → maps to friendly 'XBT/USDC'."""
+        """Kraken returns 'XBTUSDC' key with wsname='XBT/USDC' → maps to friendly 'BTC/USDC'."""
         stub = _StubRun(REAL_KRAKEN_RESPONSE)
         stub.install()
         try:
@@ -141,14 +141,14 @@ class TestLoadPairConstants:
         finally:
             stub.restore()
 
-        assert "XBT/USDC" in result
-        xbt = result["XBT/USDC"]
-        assert xbt["price_decimals"] == 2
-        assert xbt["ordermin"] == 0.00005
-        assert xbt["base"] == "XBT"  # normalized from XXBT
+        assert "BTC/USDC" in result
+        btc = result["BTC/USDC"]
+        assert btc["price_decimals"] == 2
+        assert btc["ordermin"] == 0.00005
+        assert btc["base"] == "BTC"  # normalized from XXBT
 
-    def test_maps_sol_btc_to_sol_xbt(self):
-        """Kraken returns 'SOL/BTC' key but wsname='SOL/XBT' → maps to friendly 'SOL/XBT'."""
+    def test_maps_sol_btc_to_friendly(self):
+        """Kraken returns 'SOL/BTC' key with wsname='SOL/XBT' → maps to friendly 'SOL/BTC'."""
         stub = _StubRun(REAL_KRAKEN_RESPONSE)
         stub.install()
         try:
@@ -156,11 +156,11 @@ class TestLoadPairConstants:
         finally:
             stub.restore()
 
-        assert "SOL/XBT" in result
-        sol_xbt = result["SOL/XBT"]
-        assert sol_xbt["price_decimals"] == 7
-        assert sol_xbt["costmin"] == 0.00002
-        assert sol_xbt["quote"] == "XBT"  # normalized from XXBT
+        assert "SOL/BTC" in result
+        sol_btc = result["SOL/BTC"]
+        assert sol_btc["price_decimals"] == 7
+        assert sol_btc["costmin"] == 0.00002
+        assert sol_btc["quote"] == "BTC"  # normalized from XXBT
 
     def test_error_response_returns_empty(self):
         stub = _StubRun({"error": "EQuery:Unknown asset pair"})
@@ -233,14 +233,14 @@ class TestApplyPairConstants:
         finally:
             _restore_price_decimals(snap)
 
-    def test_patches_resolved_form_for_xbt(self):
-        """XBT/USDC resolves to XBTUSDC via PAIR_MAP."""
+    def test_patches_resolved_form_for_btc(self):
+        """BTC/USDC resolves to BTC/USDC via PAIR_MAP (identity)."""
         snap = _snapshot_price_decimals()
         try:
-            loaded = {"XBT/USDC": {"price_decimals": 2}}
+            loaded = {"BTC/USDC": {"price_decimals": 2}}
             KrakenCLI.apply_pair_constants(loaded)
-            assert KrakenCLI.PRICE_DECIMALS["XBT/USDC"] == 2
-            assert KrakenCLI.PRICE_DECIMALS["XBTUSDC"] == 2
+            assert KrakenCLI.PRICE_DECIMALS["BTC/USDC"] == 2
+            assert KrakenCLI.PRICE_DECIMALS["BTCUSDC"] == 2
         finally:
             _restore_price_decimals(snap)
 
@@ -248,10 +248,10 @@ class TestApplyPairConstants:
         """Existing entries for other pairs should survive."""
         snap = _snapshot_price_decimals()
         try:
-            original_sol_xbt = KrakenCLI.PRICE_DECIMALS.get("SOL/XBT")
+            original_sol_btc = KrakenCLI.PRICE_DECIMALS.get("SOL/BTC")
             loaded = {"SOL/USDC": {"price_decimals": 3}}
             KrakenCLI.apply_pair_constants(loaded)
-            assert KrakenCLI.PRICE_DECIMALS.get("SOL/XBT") == original_sol_xbt
+            assert KrakenCLI.PRICE_DECIMALS.get("SOL/BTC") == original_sol_btc
         finally:
             _restore_price_decimals(snap)
 
@@ -287,13 +287,13 @@ class TestApplyPairLimits:
         finally:
             _restore_sizer(snap)
 
-    def test_updates_xbt_limits(self):
+    def test_updates_btc_limits(self):
         snap = _snapshot_sizer()
         try:
             sizer = PositionSizer()
-            loaded = {"XBT/USDC": {"base": "XBT", "quote": "USDC", "ordermin": 0.0001, "costmin": 0.75}}
+            loaded = {"BTC/USDC": {"base": "BTC", "quote": "USDC", "ordermin": 0.0001, "costmin": 0.75}}
             sizer.apply_pair_limits(loaded)
-            assert PositionSizer.MIN_ORDER_SIZE["XBT"] == 0.0001
+            assert PositionSizer.MIN_ORDER_SIZE["BTC"] == 0.0001
             assert PositionSizer.MIN_COST["USDC"] == 0.75
         finally:
             _restore_sizer(snap)
