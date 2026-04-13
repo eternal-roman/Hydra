@@ -351,12 +351,17 @@ class SignalGenerator:
         ref_bb_width = 4.0 * atr_pct / 100.0 if atr_pct > 0 else bb["width"]
         bb_width_factor = min(1.25, max(0.75, bb["width"] / ref_bb_width)) if ref_bb_width > 0 else 1.0
 
+        # Previous MACD histogram for momentum direction detection (crossover/acceleration).
+        # Avoids signaling on steady-state histogram — only signals fresh moves.
+        prev_histogram = Indicators.macd(prices[:-1])["histogram"] if len(prices) >= 27 else 0.0
+
         ctx = {
             "atr": atr,
             "atr_pct": atr_pct,
             "vol_ratio": vol_ratio,
             "bb_width": bb["width"],
             "bb_width_factor": bb_width_factor,
+            "prev_histogram": prev_histogram,
         }
 
         # 8 decimals everywhere — no price-dependent formatting threshold
@@ -405,30 +410,41 @@ class SignalGenerator:
     def _momentum(rsi, macd, bb, price, indicators, ctx,
                   rsi_lower: float = 30.0, rsi_upper: float = 70.0) -> Signal:
         BASE = SignalGenerator.BASE
-        if rsi_lower < rsi < rsi_upper and macd["histogram"] > 0 and price > bb["middle"]:
-            # MACD histogram / ATR: dimensionless momentum strength (0 = none, 1+ = strong)
-            macd_strength = min(1.0, abs(macd["histogram"]) / ctx["atr"]) if ctx["atr"] > 0 else 0.0
+        hist = macd["histogram"]
+        prev = ctx["prev_histogram"]
+
+        # Dead zone: MACD must exceed 10% of ATR to count as meaningful.
+        # Filters noise oscillations around zero that cause whipsaw churn.
+        noise_floor = ctx["atr"] * 0.10 if ctx["atr"] > 0 else 0.0
+
+        # BUY: meaningful positive momentum that is building or a fresh crossover.
+        # "Building" = histogram increasing; "fresh" = previous was at/below zero.
+        if (rsi_lower < rsi < rsi_upper
+                and hist > noise_floor
+                and price > bb["middle"]
+                and (hist > prev or prev <= 0)):
+            macd_strength = min(1.0, abs(hist) / ctx["atr"]) if ctx["atr"] > 0 else 0.0
             vol = SignalGenerator._vol_bonus(ctx)
-            # Cap 0.95: 3 entry conditions already met = high base conviction
-            # Range: BASE(0.50) + macd(0.40) + vol(0.05) = 0.95
+            # Cap 0.95: 3 entry conditions + direction confirmed
             conf = min(0.95, BASE + macd_strength * 0.40 + vol)
             return Signal(
                 action=SignalAction.BUY,
                 confidence=conf,
-                reason=f"Momentum confirmed: MACD hist {macd['histogram']:.2f} > 0, "
+                reason=f"Momentum confirmed: MACD hist {hist:.2f} > 0, "
                        f"price {_fmt_price(price)} > BB mid {_fmt_price(bb['middle'])}, RSI {rsi:.1f}",
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
-        if rsi > rsi_upper + 5 or macd["histogram"] < 0:
-            # RSI excess normalized by distance to RSI ceiling (100)
+
+        # SELL: RSI overbought always triggers; MACD requires meaningful fade
+        # that is worsening or a fresh crossover below zero.
+        macd_fading = (hist < -noise_floor and (hist < prev or prev >= 0))
+        rsi_overbought = rsi > rsi_upper + 5
+        if rsi_overbought or macd_fading:
             rsi_strength = max(0.0, rsi - rsi_upper) / (100.0 - rsi_upper) if rsi_upper < 100 else 0.0
-            # MACD negativity: same ATR normalization, full 0-1 range
-            macd_strength = min(1.0, abs(macd["histogram"]) / ctx["atr"]) if macd["histogram"] < 0 and ctx["atr"] > 0 else 0.0
-            # Either trigger can fire SELL — use the stronger signal
+            macd_strength = min(1.0, abs(hist) / ctx["atr"]) if hist < 0 and ctx["atr"] > 0 else 0.0
             primary = max(rsi_strength, macd_strength)
             vol = SignalGenerator._vol_bonus(ctx)
-            # Range: BASE(0.50) + primary(0.35) + vol(0.05) = 0.90
             conf = min(0.90, BASE + primary * 0.35 + vol)
             return Signal(
                 action=SignalAction.SELL,
@@ -441,7 +457,7 @@ class SignalGenerator:
         return Signal(
             action=SignalAction.HOLD,
             confidence=BASE,
-            reason=f"Awaiting momentum confirmation (RSI {rsi:.1f}, MACD hist {macd['histogram']:.6f})",
+            reason=f"Awaiting momentum confirmation (RSI {rsi:.1f}, MACD hist {hist:.6f})",
             strategy=Strategy.MOMENTUM,
             indicators=indicators,
         )
