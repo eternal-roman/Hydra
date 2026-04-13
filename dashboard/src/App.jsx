@@ -268,16 +268,18 @@ export default function App() {
         </div>
       </div>
 
-      {!connected && !state && (
+      {(!connected && !state) || (state && pairNames.length === 0) ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
           <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
           <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
-          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>Waiting for agent connection on {WS_URL}...</div>
+          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
+            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${WS_URL}...`}
+          </div>
           <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
         </div>
-      )}
+      ) : null}
 
-      {state && (
+      {state && pairNames.length > 0 && (
         <div style={{ padding: "16px 24px" }}>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
