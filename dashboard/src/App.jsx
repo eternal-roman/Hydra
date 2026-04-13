@@ -210,15 +210,37 @@ export default function App() {
 
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  // P&L: average of per-pair pnl_pct (each pair gets equal weight since balances
-  // are allocated equally). Direct equity summation would mix USD and BTC.
-  const pairPnls = Object.values(pairs).map(p => p.portfolio?.pnl_pct || 0);
-  const totalPnl = pairPnls.length > 0 ? pairPnls.reduce((s, v) => s + v, 0) / pairPnls.length : 0;
-  const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
+  // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
+  // across --resume (engine pnl_pct resets because initial_balance gets re-split).
+  const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
+  // Max drawdown: engine tracks historical max per pair (persists across --resume).
+  // Supplement with max drawdown from the dashboard's own balance history so
+  // exchange-level drops (across all pairs) are also captured.
+  const engineDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
+  let histDD = 0;
+  if (history.length > 1) {
+    let peak = history[0];
+    for (let i = 1; i < history.length; i++) {
+      if (history[i] > peak) peak = history[i];
+      const dd = peak > 0 ? ((peak - history[i]) / peak * 100) : 0;
+      if (dd > histDD) histDD = dd;
+    }
+  }
+  const maxDD = Math.max(engineDD, histDD);
+  // Engine round-trip trades (position fully closed)
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
   const totalLosses = Object.values(pairs).reduce((s, p) => s + (p.performance?.loss_count || 0), 0);
-  const overallWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
+  const engineWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
+  // Journal fill stats — computed from FULL journal on the backend (not the
+  // 20-entry window shown in the order list). Reflects actual exchange activity.
+  const jStats = state?.journal_stats || {};
+  const totalFills = jStats.total_fills || 0;
+  const fillsByPair = jStats.fills_by_pair || {};
+  const fillWinRate = jStats.fill_win_rate || 0;
+  // Win rate: prefer engine round-trip rate when available, fall back to
+  // journal fill-derived rate so the stat updates as soon as sells execute.
+  const overallWinRate = totalTrades > 0 ? engineWinRate : fillWinRate;
 
   return (
     <div style={{ background: COLORS.bg, minHeight: "100vh", color: COLORS.text, padding: 0 }}>
@@ -246,25 +268,27 @@ export default function App() {
         </div>
       </div>
 
-      {!connected && !state && (
+      {(!connected && !state) || (state && pairNames.length === 0) ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
           <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
           <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
-          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>Waiting for agent connection on {WS_URL}...</div>
+          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
+            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${WS_URL}...`}
+          </div>
           <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
         </div>
-      )}
+      ) : null}
 
-      {state && (
+      {state && pairNames.length > 0 && (
         <div style={{ padding: "16px 24px" }}>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
             {/* Stats Row — spans both columns for edge-to-edge alignment */}
             <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
-              <StatCard label="P&L" value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`} unit="%" color={totalPnl >= 0 ? COLORS.buy : COLORS.sell} />
+              <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
               <StatCard label="Max Drawdown" value={maxDD.toFixed(2)} unit="%" color={maxDD > 5 ? COLORS.danger : COLORS.warn} />
-              <StatCard label="Trades" value={totalTrades} color={COLORS.blue} />
+              <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
             </div>
             {/* LEFT: Pair panels + equity + trade log */}
@@ -409,7 +433,7 @@ export default function App() {
               {history.length > 5 && (
                 <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 10, padding: 14 }}>
                   <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.textDim, marginBottom: 6, fontFamily: mono, textTransform: "uppercase", letterSpacing: "0.08em" }}>Balance History</div>
-                  <MiniChart data={history} width={700} height={70} color={totalPnl >= 0 ? COLORS.accent : COLORS.danger} filled />
+                  <MiniChart data={history} width={700} height={70} color={journalPnlUsd >= 0 ? COLORS.accent : COLORS.danger} filled />
                 </div>
               )}
 
@@ -518,9 +542,16 @@ export default function App() {
               {pairNames.map((pair) => {
                 const ps = pairs[pair];
                 const perf = ps.performance || {};
-                const winRate = ((perf.win_count || 0) + (perf.loss_count || 0)) > 0
+                const engineWR = ((perf.win_count || 0) + (perf.loss_count || 0)) > 0
                   ? ((perf.win_count || 0) / ((perf.win_count || 0) + (perf.loss_count || 0)) * 100)
                   : 0;
+                const pf = fillsByPair[pair] || { buys: 0, sells: 0, sell_wins: 0, sell_losses: 0 };
+                const pairSellTotal = (pf.sell_wins || 0) + (pf.sell_losses || 0);
+                const pairFillWR = pairSellTotal > 0 ? ((pf.sell_wins || 0) / pairSellTotal * 100) : 0;
+                const winRate = (perf.total_trades || 0) > 0 ? engineWR : pairFillWR;
+                const pairFills = pf.buys + pf.sells;
+                const pairPnl = (jStats.pnl_by_pair || {})[pair] || {};
+                const pairNetUsd = pairPnl.net_usd || 0;
                 return (
                   <div key={pair} style={{ background: `${regimeColor(ps.regime)}08`, border: `1px solid ${regimeColor(ps.regime)}25`, borderRadius: 8, padding: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -528,8 +559,12 @@ export default function App() {
                       <span style={{ fontSize: 12, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono }}>{pair}</span>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, fontFamily: mono }}>
-                      <span style={{ color: COLORS.textDim }}>Trades</span>
-                      <span style={{ color: COLORS.text, textAlign: "right" }}>{perf.total_trades || 0}</span>
+                      <span style={{ color: COLORS.textDim }}>Fills</span>
+                      <span style={{ color: COLORS.text, textAlign: "right" }}>{pairFills}{pairFills > 0 ? ` (${pf.buys}B/${pf.sells}S)` : ""}</span>
+                      <span style={{ color: COLORS.textDim }}>P&L</span>
+                      <span style={{ color: pairNetUsd >= 0 ? COLORS.buy : COLORS.sell, textAlign: "right", fontWeight: 600 }}>
+                        {pairNetUsd >= 0 ? "+$" : "-$"}{Math.abs(pairNetUsd).toFixed(2)}
+                      </span>
                       <span style={{ color: COLORS.textDim }}>Win Rate</span>
                       <span style={{ color: winRate > 55 ? COLORS.buy : winRate > 0 ? COLORS.warn : COLORS.textMuted, textAlign: "right" }}>{winRate.toFixed(0)}%</span>
                       <span style={{ color: COLORS.textDim }}>Sharpe</span>
@@ -595,7 +630,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.8.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.8.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

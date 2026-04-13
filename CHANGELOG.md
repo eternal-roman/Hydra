@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.8.2] — 2026-04-13
+
+### Dashboard Reporting Fixes
+
+- **fix(agent):** Refresh stale state dict before dashboard broadcast — when AI brain
+  is active, `tick(generate_only=True)` built state before `execute_signal()` updated
+  engine counters; dashboard now sees authoritative values every tick
+- **fix(agent):** Add `journal_stats` to WS payload — fill counts, per-pair buy/sell
+  breakdown, fill-derived win rate (cost-basis reset per round trip), realized P&L
+  from journal fills, unrealized P&L from open positions, all USD-converted
+- **fix(dashboard):** Top stat "Trades" → "Fills" showing confirmed exchange executions;
+  win rate falls back to journal fill-derived rate when engine round trips incomplete
+- **fix(dashboard):** P&L now journal-derived (realized + unrealized, USD) — cumulative
+  across all trades, survives `--resume` (engine `pnl_pct` resets on restart)
+- **fix(dashboard):** Max drawdown corrected from current drawdown (recovers to 0 on
+  bounce) to true historical max via running-peak scan of balance history
+- **fix(dashboard):** Prevent blank screen when state has no pairs (agent restart,
+  candle warmup) — shows "Waiting for first tick data..." splash
+- **fix(dashboard):** Fix dangling `totalPnl` reference in balance history chart that
+  caused React render crash
+
+---
+
 ## [2.8.1] — 2026-04-13
 
 ### Signal Confidence Refinement + Churn Reduction
