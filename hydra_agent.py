@@ -1672,41 +1672,24 @@ class HydraAgent:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
 
     def _merge_order_journal(self):
-        """Merge the on-disk hydra_order_journal.json into self.order_journal.
+        """Merge on-disk journal files into self.order_journal.
 
-        Rationale: _save_snapshot caps order_journal at [-200:] for
-        compactness, so _load_snapshot can only ever restore the last 200
-        entries. The rolling file (hydra_order_journal.json) is the
-        authoritative long-horizon record — a prior bug would overwrite it
-        on the first tick after a restart, destroying any history older
-        than the in-memory journal. This method loads the rolling file at
-        startup and unions it with whatever was restored from the snapshot
-        so restart never truncates historical depth. Bounded by
-        ORDER_JOURNAL_CAP.
+        Sources (in order):
+          1. hydra_order_journal.json — rolling file, authoritative long-
+             horizon record.  _save_snapshot caps at [-200:] so the
+             rolling file preserves depth across restarts.
+          2. hydra_order_journal_backfill.json — optional one-shot file
+             for manual trades placed outside Hydra.  Consumed and
+             deleted after merge so entries are ingested exactly once.
 
         Dedup key is (placed_at, order_id) when a Kraken order_id is
         available, else (placed_at, pair, side, intent.amount) — precise
         enough because placed_at has microsecond resolution.
 
-        Conflict policy: on duplicate key, the ROLLING FILE wins. Both
-        files are saved from the same in-memory journal during normal
-        operation, so divergence only happens via manual data repair or
-        external tooling — and in those cases the rolling file is what
-        gets edited (see PR #40 data repair). After the merge, the next
-        _save_snapshot rewrites the snapshot to match.
+        Conflict policy: on duplicate key, the on-disk file wins.
+        After the merge, the next _save_snapshot rewrites the snapshot
+        to match.
         """
-        rolling_file = os.path.join(self._snapshot_dir, "hydra_order_journal.json")
-        if not os.path.exists(rolling_file):
-            return
-        try:
-            with open(rolling_file, "r") as f:
-                on_disk = json.load(f)
-        except Exception as e:
-            print(f"  [JOURNAL] Could not read rolling file for merge: {e}")
-            return
-        if not isinstance(on_disk, list):
-            return
-
         def _key(entry):
             t = entry.get("placed_at", "")
             ref = entry.get("order_ref") or {}
@@ -1720,30 +1703,58 @@ class HydraAgent:
         seen = {_key(e): e for e in self.order_journal}
         merged_count = 0
         overwritten_count = 0
-        for e in on_disk:
-            k = _key(e)
-            if k not in seen:
-                seen[k] = e
-                merged_count += 1
-            else:
-                # Rolling file wins on conflict — see docstring.
-                if seen[k] is not e:
+
+        # Merge from rolling journal + optional backfill file (manual trades).
+        # Backfill file is consumed once and deleted after successful merge.
+        rolling_file = os.path.join(self._snapshot_dir, "hydra_order_journal.json")
+        backfill_file = os.path.join(self._snapshot_dir, "hydra_order_journal_backfill.json")
+        backfill_consumed = False
+
+        for filepath in (rolling_file, backfill_file):
+            if not os.path.exists(filepath):
+                continue
+            try:
+                with open(filepath, "r") as f:
+                    on_disk = json.load(f)
+            except Exception as e:
+                print(f"  [JOURNAL] Could not read {os.path.basename(filepath)} for merge: {e}")
+                continue
+            if not isinstance(on_disk, list):
+                continue
+            for e in on_disk:
+                k = _key(e)
+                if k not in seen:
                     seen[k] = e
-                    overwritten_count += 1
+                    merged_count += 1
+                else:
+                    # On-disk file wins on conflict — see docstring.
+                    if seen[k] is not e:
+                        seen[k] = e
+                        overwritten_count += 1
+            if filepath == backfill_file:
+                backfill_consumed = True
 
         merged = sorted(seen.values(), key=lambda e: e.get("placed_at", ""))
         if len(merged) > self.ORDER_JOURNAL_CAP:
             merged = merged[-self.ORDER_JOURNAL_CAP:]
         self.order_journal = merged
         self._normalize_journal_pairs(self.order_journal)
+
+        if backfill_consumed:
+            try:
+                os.remove(backfill_file)
+                print(f"  [JOURNAL] Consumed and removed backfill file")
+            except OSError:
+                pass
+
         if merged_count or overwritten_count:
             parts = []
             if merged_count:
                 parts.append(f"merged {merged_count} new")
             if overwritten_count:
                 parts.append(f"overwrote {overwritten_count} stale")
-            print(f"  [JOURNAL] {' + '.join(parts)} from "
-                  f"{os.path.basename(rolling_file)}; total = {len(self.order_journal)}")
+            print(f"  [JOURNAL] {' + '.join(parts)}; "
+                  f"total = {len(self.order_journal)}")
 
     def run(self):
         """Main agent loop."""
