@@ -25,8 +25,8 @@ from typing import Dict, List, Optional, Any
 # ═══════════════════════════════════════════════════════════════
 
 DEFAULT_PARAMS = {
-    "volatile_atr_pct": 4.0,
-    "volatile_bb_width": 0.08,
+    "volatile_atr_mult": 1.8,
+    "volatile_bb_mult": 1.8,
     "trend_ema_ratio": 1.005,
     "momentum_rsi_lower": 30.0,
     "momentum_rsi_upper": 70.0,
@@ -38,8 +38,8 @@ DEFAULT_PARAMS = {
 # Hard bounds — parameters are clamped to these ranges to prevent
 # degenerate configurations. No RSI threshold below 10 or above 90, etc.
 PARAM_BOUNDS = {
-    "volatile_atr_pct": (1.0, 8.0),
-    "volatile_bb_width": (0.02, 0.20),
+    "volatile_atr_mult": (1.2, 3.0),
+    "volatile_bb_mult": (1.2, 3.0),
     "trend_ema_ratio": (1.001, 1.02),
     "momentum_rsi_lower": (10.0, 45.0),
     "momentum_rsi_upper": (55.0, 90.0),

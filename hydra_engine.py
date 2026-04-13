@@ -187,6 +187,63 @@ class Indicators:
         return atr_val
 
     @staticmethod
+    def atr_pct_series(candles: List[Candle], period: int = 14) -> List[float]:
+        """Rolling ATR-as-%-of-price series using Wilder's smoothing.
+
+        Returns one ATR% value per candle from index ``period`` onward.
+        Single O(n) pass — same math as :meth:`atr` but records intermediates.
+        """
+        n = len(candles)
+        if n < period + 1:
+            return []
+        # Seed: SMA of first `period` true ranges
+        atr_val = 0.0
+        for i in range(1, period + 1):
+            atr_val += max(
+                candles[i].high - candles[i].low,
+                abs(candles[i].high - candles[i - 1].close),
+                abs(candles[i].low - candles[i - 1].close),
+            )
+        atr_val /= period
+        close = candles[period].close
+        series = [(atr_val / close * 100) if close > 0 else 0.0]
+        # Wilder's smoothing for remaining candles
+        for i in range(period + 1, n):
+            tr = max(
+                candles[i].high - candles[i].low,
+                abs(candles[i].high - candles[i - 1].close),
+                abs(candles[i].low - candles[i - 1].close),
+            )
+            atr_val = (atr_val * (period - 1) + tr) / period
+            close = candles[i].close
+            series.append((atr_val / close * 100) if close > 0 else 0.0)
+        return series
+
+    @staticmethod
+    def bb_width_series(
+        prices: List[float], period: int = 20, std_mult: float = 2.0
+    ) -> List[float]:
+        """Rolling Bollinger Band width series.
+
+        Returns one width value per price from index ``period-1`` onward.
+        Width = (2 * std_mult * std) / mean, same formula as :meth:`bollinger_bands`.
+        """
+        n = len(prices)
+        if n < period:
+            return []
+        series: List[float] = []
+        for end in range(period, n + 1):
+            sl = prices[end - period:end]
+            mean = sum(sl) / period
+            if mean <= 0:
+                series.append(0.0)
+                continue
+            variance = sum((x - mean) ** 2 for x in sl) / period
+            std = math.sqrt(variance)
+            series.append((std_mult * 2 * std) / mean)
+        return series
+
+    @staticmethod
     def bollinger_bands(
         prices: List[float], period: int = 20, std_mult: float = 2.0
     ) -> Dict[str, float]:
@@ -246,8 +303,10 @@ class RegimeDetector:
 
     @staticmethod
     def detect(candles: List[Candle], prices: List[float],
-               volatile_atr_pct: float = 4.0, volatile_bb_width: float = 0.08,
-               trend_ema_ratio: float = 1.005) -> Regime:
+               volatile_atr_mult: float = 1.8, volatile_bb_mult: float = 1.8,
+               trend_ema_ratio: float = 1.005,
+               volatile_atr_floor: float = 1.5,
+               volatile_bb_floor: float = 0.03) -> Regime:
         if len(prices) < 50:
             return Regime.RANGING
 
@@ -258,8 +317,24 @@ class RegimeDetector:
         current = prices[-1]
         atr_pct = (atr / current) * 100 if current > 0 else 0
 
-        # High volatility overrides trend detection
-        if atr_pct > volatile_atr_pct or bb["width"] > volatile_bb_width:
+        # Adaptive volatility threshold — derived from asset's own history.
+        # VOLATILE fires only when current volatility is significantly above
+        # the asset's own median, not a fixed absolute number.
+        atr_series = Indicators.atr_pct_series(candles)
+        if len(atr_series) >= 20:
+            median_atr = sorted(atr_series)[len(atr_series) // 2]
+            atr_threshold = max(volatile_atr_mult * median_atr, volatile_atr_floor)
+        else:
+            atr_threshold = volatile_atr_floor  # warmup fallback
+
+        bb_series = Indicators.bb_width_series(prices)
+        if len(bb_series) >= 20:
+            median_bb = sorted(bb_series)[len(bb_series) // 2]
+            bb_threshold = max(volatile_bb_mult * median_bb, volatile_bb_floor)
+        else:
+            bb_threshold = volatile_bb_floor
+
+        if atr_pct > atr_threshold or bb["width"] > bb_threshold:
             return Regime.VOLATILE
 
         # Trend detection with tunable threshold
@@ -928,8 +1003,8 @@ class HydraEngine:
     def __init__(self, initial_balance: float = 10000.0, asset: str = "BTC/USD",
                  sizing: Optional[Dict[str, float]] = None,
                  candle_interval: int = 15,
-                 volatile_atr_pct: float = 4.5,
-                 volatile_bb_width: float = 0.09,
+                 volatile_atr_mult: float = 1.8,
+                 volatile_bb_mult: float = 1.8,
                  trend_ema_ratio: float = 1.005,
                  momentum_rsi_lower: float = 30.0,
                  momentum_rsi_upper: float = 70.0,
@@ -942,8 +1017,8 @@ class HydraEngine:
         cfg = sizing or SIZING_CONSERVATIVE
         self.sizer = PositionSizer(**cfg)
         self.candle_interval = candle_interval
-        self.volatile_atr_pct = volatile_atr_pct
-        self.volatile_bb_width = volatile_bb_width
+        self.volatile_atr_mult = volatile_atr_mult
+        self.volatile_bb_mult = volatile_bb_mult
         self.trend_ema_ratio = trend_ema_ratio
         self.momentum_rsi_lower = momentum_rsi_lower
         self.momentum_rsi_upper = momentum_rsi_upper
@@ -1011,7 +1086,7 @@ class HydraEngine:
         # Detect regime
         regime = RegimeDetector.detect(
             self.candles, self.prices,
-            self.volatile_atr_pct, self.volatile_bb_width, self.trend_ema_ratio,
+            self.volatile_atr_mult, self.volatile_bb_mult, self.trend_ema_ratio,
         )
         strategy = REGIME_STRATEGY_MAP[regime]
 
@@ -1197,8 +1272,8 @@ class HydraEngine:
     def snapshot_params(self) -> Dict[str, float]:
         """Return a snapshot of the current tunable parameters."""
         return {
-            "volatile_atr_pct": self.volatile_atr_pct,
-            "volatile_bb_width": self.volatile_bb_width,
+            "volatile_atr_mult": self.volatile_atr_mult,
+            "volatile_bb_mult": self.volatile_bb_mult,
             "trend_ema_ratio": self.trend_ema_ratio,
             "momentum_rsi_lower": self.momentum_rsi_lower,
             "momentum_rsi_upper": self.momentum_rsi_upper,
@@ -1209,10 +1284,10 @@ class HydraEngine:
 
     def apply_tuned_params(self, params: Dict[str, float]):
         """Apply tuned parameters from ParameterTracker."""
-        if "volatile_atr_pct" in params:
-            self.volatile_atr_pct = params["volatile_atr_pct"]
-        if "volatile_bb_width" in params:
-            self.volatile_bb_width = params["volatile_bb_width"]
+        if "volatile_atr_mult" in params:
+            self.volatile_atr_mult = params["volatile_atr_mult"]
+        if "volatile_bb_mult" in params:
+            self.volatile_bb_mult = params["volatile_bb_mult"]
         if "trend_ema_ratio" in params:
             self.trend_ema_ratio = params["trend_ema_ratio"]
         if "momentum_rsi_lower" in params:
