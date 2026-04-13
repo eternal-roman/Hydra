@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.8.1] — 2026-04-13
+
+### Signal Confidence Refinement + Churn Reduction
+
+- **fix(engine):** Replace price-scale-dependent magic numbers with ATR-normalized
+  dimensionless ratios (MACD/ATR, BB penetration, volume ratio) — confidence is now
+  identical across SOL/USDC, SOL/BTC, and BTC/USDC
+- **fix(engine):** Momentum MACD dead zone (0.10 * ATR) + direction filter eliminates
+  noise oscillations; momentum BUY signals reduced 81%, SELL reduced 52%
+- **fix(engine):** Defensive SELL threshold lowered from RSI 50 to 40 (midpoint of
+  TA-standard oversold/neutral) — was dead code in TREND_DOWN, now fires correctly
+- **fix(engine):** Mean reversion BB width factor derived from ATR (was hardcoded 0.04);
+  grid ATR-band ratio corrected to 4.0 (was 2.0)
+- **fix(engine):** Remove hardcoded `price_decimals` threshold (`< 1`); use 8 decimals
+  universally
+- **fix(engine):** Consistent `BASE=0.50` confidence architecture with self-documenting
+  weight decomposition (BASE + primary_weight + vol_weight = cap)
+- **fix(brain):** Per-pair Grok strategist cooldown (10 ticks / ~5 min) to reduce
+  excessive escalation overnight
+
+---
+
 ## [2.8.0] — 2026-04-12
 
 ### XBT → BTC Canonical Migration
