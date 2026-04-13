@@ -3178,6 +3178,84 @@ class HydraAgent:
         for pair, state in all_states.items():
             pairs_data[pair] = state
 
+        # Journal-derived stats — wrapped in try/except so a malformed journal
+        # entry can never crash the broadcast and blank the dashboard.
+        journal_stats: Dict[str, Any] = {
+            "total_fills": 0, "fills_by_pair": {}, "fill_win_rate": 0,
+            "pnl_by_pair": {}, "total_realized_pnl_usd": 0,
+            "total_unrealized_pnl_usd": 0, "total_pnl_usd": 0,
+        }
+        try:
+            _FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
+            total_fills = 0
+            fills_by_pair: Dict[str, Dict[str, Any]] = {}
+            _buy_cost: Dict[str, float] = {}
+            _buy_qty: Dict[str, float] = {}
+            for entry in self.order_journal:
+                lc = entry.get("lifecycle") or {}
+                if lc.get("state") not in _FILL_STATES:
+                    continue
+                total_fills += 1
+                p = entry.get("pair", "")
+                if p not in fills_by_pair:
+                    fills_by_pair[p] = {"buys": 0, "sells": 0, "sell_wins": 0, "sell_losses": 0}
+                side = entry.get("side")
+                vol = float(lc.get("vol_exec") or 0)
+                price = float(lc.get("avg_fill_price") or (entry.get("intent") or {}).get("limit_price") or 0)
+                if side == "BUY":
+                    fills_by_pair[p]["buys"] += 1
+                    _buy_cost[p] = _buy_cost.get(p, 0) + vol * price
+                    _buy_qty[p] = _buy_qty.get(p, 0) + vol
+                elif side == "SELL":
+                    fills_by_pair[p]["sells"] += 1
+                    avg_buy = (_buy_cost.get(p, 0) / _buy_qty[p]) if _buy_qty.get(p, 0) > 0 else 0
+                    if avg_buy > 0 and price > 0:
+                        if price >= avg_buy:
+                            fills_by_pair[p]["sell_wins"] += 1
+                        else:
+                            fills_by_pair[p]["sell_losses"] += 1
+                    sold_cost = vol * avg_buy if avg_buy > 0 else 0
+                    _buy_cost[p] = max(0.0, _buy_cost.get(p, 0) - sold_cost)
+                    _buy_qty[p] = max(0.0, _buy_qty.get(p, 0) - vol)
+            total_sell_wins = sum(v.get("sell_wins", 0) for v in fills_by_pair.values())
+            total_sell_losses = sum(v.get("sell_losses", 0) for v in fills_by_pair.values())
+            total_sells = total_sell_wins + total_sell_losses
+            fill_win_rate = round(total_sell_wins / total_sells * 100, 2) if total_sells > 0 else 0
+
+            asset_prices = self._get_asset_prices()
+            total_realized_pnl_usd = 0.0
+            total_unrealized_pnl_usd = 0.0
+            pnl_by_pair: Dict[str, Dict[str, float]] = {}
+            for pair in self.pairs:
+                realized = self._compute_pair_realized_pnl(pair)
+                engine = self.engines.get(pair)
+                ep = engine.prices[-1] if engine and engine.prices else 0
+                unrealized = (engine.position.size * (ep - engine.position.avg_entry)
+                              if engine and engine.position.size > 0 else 0)
+                quote = pair.split("/")[1] if "/" in pair else "USD"
+                quote_usd = asset_prices.get(quote, 1.0)
+                pnl_by_pair[pair] = {
+                    "realized": round(realized, 8),
+                    "unrealized": round(unrealized, 8),
+                    "net": round(realized + unrealized, 8),
+                    "net_usd": round((realized + unrealized) * quote_usd, 2),
+                }
+                total_realized_pnl_usd += realized * quote_usd
+                total_unrealized_pnl_usd += unrealized * quote_usd
+            total_pnl_usd = total_realized_pnl_usd + total_unrealized_pnl_usd
+
+            journal_stats = {
+                "total_fills": total_fills,
+                "fills_by_pair": fills_by_pair,
+                "fill_win_rate": fill_win_rate,
+                "pnl_by_pair": pnl_by_pair,
+                "total_realized_pnl_usd": round(total_realized_pnl_usd, 2),
+                "total_unrealized_pnl_usd": round(total_unrealized_pnl_usd, 2),
+                "total_pnl_usd": round(total_pnl_usd, 2),
+            }
+        except Exception as e:
+            print(f"  [WARN] journal_stats computation failed: {type(e).__name__}: {e}")
+
         return {
             "type": "state_update",
             "tick": tick,
@@ -3189,6 +3267,7 @@ class HydraAgent:
             "fee_tier": self._fee_tier_cache,
             "pairs": pairs_data,
             "order_journal": self.order_journal[-20:],
+            "journal_stats": journal_stats,
             "running": self.running,
             "interval": self.interval,
             "mode": self.mode,
