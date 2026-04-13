@@ -301,7 +301,7 @@ class TestPositionSizer:
 
     def test_at_threshold(self):
         self.setup()
-        size = self.conservative.calculate(0.55, 10000, 100.0, "SOL/USDC")
+        size = self.conservative.calculate(0.65, 10000, 100.0, "SOL/USDC")
         assert size > 0
 
     def test_max_position_cap(self):
@@ -340,11 +340,16 @@ class TestPositionSizer:
 
     def test_competition_lower_threshold(self):
         self.setup()
-        # 0.52 confidence: below conservative (0.55) but above competition (0.50)
-        cons = self.conservative.calculate(0.52, 10000, 100.0, "SOL/USDC")
-        comp = self.competition.calculate(0.52, 10000, 100.0, "SOL/USDC")
-        assert cons == 0.0  # conservative rejects
-        assert comp > 0     # competition accepts
+        # Both modes share 0.65 min_confidence — verify both reject below
+        cons = self.conservative.calculate(0.60, 10000, 100.0, "SOL/USDC")
+        comp = self.competition.calculate(0.60, 10000, 100.0, "SOL/USDC")
+        assert cons == 0.0  # conservative rejects below 0.65
+        assert comp == 0.0  # competition also rejects below 0.65
+        # Above threshold: competition produces larger size (half-Kelly > quarter-Kelly)
+        cons_above = self.conservative.calculate(0.70, 10000, 100.0, "SOL/USDC")
+        comp_above = self.competition.calculate(0.70, 10000, 100.0, "SOL/USDC")
+        assert cons_above > 0
+        assert comp_above > cons_above
 
     def test_competition_larger_positions(self):
         self.setup()
@@ -603,7 +608,7 @@ class TestSnapshotAndRollback:
             })
 
         # Partial sell (conf < 0.7 → sell 50%)
-        trade = engine.execute_signal("SELL", 0.60, "test partial", "MOMENTUM")
+        trade = engine.execute_signal("SELL", 0.66, "test partial", "MOMENTUM")
         assert trade is not None, "Expected trade to be generated"
         assert engine.win_count == 0, "Partial sell should not count as win"
         assert engine.loss_count == 0, "Partial sell should not count as loss"
@@ -762,8 +767,8 @@ class TestSnapshotAndRollback:
         engine.position.params_at_entry = engine.snapshot_params()
         engine.balance = 9100.0
 
-        # Partial sell 1 (conf 0.60 → 50%)
-        t1 = engine.execute_signal("SELL", 0.60, "partial 1", "MOMENTUM")
+        # Partial sell 1 (conf 0.66 → 50%)
+        t1 = engine.execute_signal("SELL", 0.66, "partial 1", "MOMENTUM")
         assert t1 is not None
         assert engine.position.size > 0, "Should still have position after partial"
         pnl_after_partial = engine.position.realized_pnl
@@ -781,13 +786,13 @@ class TestCompetitionMode:
     def test_engine_accepts_competition_sizing(self):
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC", sizing=SIZING_COMPETITION)
         assert engine.sizer.kelly_multiplier == 0.50
-        assert engine.sizer.min_confidence == 0.50
+        assert engine.sizer.min_confidence == 0.65
         assert engine.sizer.max_position_pct == 0.40
 
     def test_engine_defaults_to_conservative(self):
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
         assert engine.sizer.kelly_multiplier == 0.25
-        assert engine.sizer.min_confidence == 0.55
+        assert engine.sizer.min_confidence == 0.65
 
     def test_competition_uses_half_kelly(self):
         """Competition mode positions are larger than conservative for same confidence."""

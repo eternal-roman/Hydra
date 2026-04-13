@@ -141,7 +141,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 
 ### 3.4 DEFENSIVE Strategy
 - **Location:** `SignalGenerator._defensive()` lines 408-432
-- **BUY:** RSI < 20 only (extreme oversold), confidence 0.4 (below 0.55 threshold, so never executes unless manually overridden) — PASS by design
+- **BUY:** RSI < 25 extreme oversold, confidence 0.50–0.75. Only fires above 0.65 execution threshold at RSI < ~10 — PASS by design
 - **SELL:** RSI > 50, confidence 0.8 — PASS
 - **Notes:** Intentionally ultra-conservative. In TREND_DOWN, the agent reduces exposure but doesn't buy into falling markets.
 
@@ -162,7 +162,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 | Limit | Spec | Code | Status |
 |-------|------|------|--------|
 | Max position | 30% of balance | `MAX_POSITION_PCT = 0.30` | PASS |
-| Min confidence | 0.55 | `MIN_CONFIDENCE = 0.55` | PASS |
+| Min confidence | 0.65 | `min_confidence = 0.65` | PASS |
 | Min trade value | $0.50 (Kraken costmin) | `MIN_TRADE_VALUE = 0.50` | PASS |
 | Min order size | Per-asset (SOL:0.02, BTC:0.00005) | `MIN_ORDER_SIZE` dict | PASS |
 
@@ -356,7 +356,7 @@ These are documented behaviors, not bugs:
 
 3. ~~**Cross-pair swaps are advisory only**~~ — **Resolved in v2.1.0.** `_execute_coordinated_swap()` now executes both sell and buy legs via `execute_signal()` + `_place_order()`.
 
-4. **DEFENSIVE strategy never buys** — BUY confidence is 0.4 (below the 0.55 execution threshold). This is by design — in a downtrend, the agent preserves capital rather than catching falling knives.
+4. **DEFENSIVE strategy rarely buys** — BUY confidence reaches the 0.65 execution threshold only at RSI < ~10 (extreme oversold). This is by design — in a downtrend, the agent preserves capital rather than catching falling knives.
 
 5. ~~**Sharpe ratio requires 30+ ticks**~~ — **Resolved in v2.4.0.** Annualization now uses observed candle timestamp deltas (median), not a hardcoded assumption. Still requires 30+ ticks of data.
 

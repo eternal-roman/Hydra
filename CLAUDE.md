@@ -45,14 +45,14 @@ If `HYDRA_MEMORY.md` does not exist on this machine (e.g., fresh clone), it has 
 # Dashboard
 cd dashboard && npm install && npm run dev
 
-# Agent — conservative (default, 5-min candles, runs forever)
+# Agent — conservative (default, 15-min candles, runs forever)
 python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100
 
 # Agent — competition mode (half-Kelly, lower threshold)
 python hydra_agent.py --mode competition
 
-# Agent — 1-min candles (faster ticks, noisier signals)
-python hydra_agent.py --candle-interval 1
+# Agent — 5-min candles (faster ticks, noisier signals)
+python hydra_agent.py --candle-interval 5
 
 # Agent — paper trading (no API keys needed)
 python hydra_agent.py --mode competition --paper
@@ -79,7 +79,7 @@ python hydra_engine.py
 - Warmup requires 50 candles before regime detection activates
 
 ### Trading
-- Confidence threshold: 0.55 conservative mode, 0.50 competition mode. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY.
+- Confidence threshold: 0.65 both modes. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY. Signals below 0.65 (< 15% Kelly edge) are filtered as negative-EV after costs.
 - Position sizing: quarter-Kelly conservative, half-Kelly competition (`(confidence*2 - 1) * multiplier * balance`)
 - Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 BTC), `costmin` per quote (0.5 USDC, 0.00002 BTC). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
 - Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, BTC/USDC=2, SOL/BTC=7). Hardcoded `PRICE_DECIMALS` remain as fallbacks; at startup `KrakenCLI.load_pair_constants()` dynamically loads the true values from `kraken pairs` and patches them via `apply_pair_constants()`.
@@ -97,6 +97,7 @@ python hydra_engine.py
 - Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Phase 1.75 (order book intelligence) uses WS data when healthy. If the stream is unhealthy, the agent skips order book data until auto-restart recovers it. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
 - Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
+- FOREX session weighting: Phase 1.8 applies a confidence modifier based on UTC hour — London/NY overlap (12-16 UTC) +0.04, London (07-12) +0.02, NY (16-21) +0.02, Asian (00-07) -0.03, dead zone (21-00) -0.05. Subject to the same +0.15 total modifier cap as order book and cross-pair modifiers.
 
 ### Dashboard
 - Connects to agent via WebSocket on port 8765

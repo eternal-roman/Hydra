@@ -32,6 +32,15 @@ const COLORS = {
 const regimeColor = (r) =>
   ({ TREND_UP: COLORS.trendUp, TREND_DOWN: COLORS.trendDown, RANGING: COLORS.ranging, VOLATILE: COLORS.volatile }[r] || COLORS.textDim);
 
+const getForexSession = () => {
+  const h = new Date().getUTCHours();
+  if (h >= 12 && h < 16) return { label: "London/NY", color: COLORS.accent };
+  if (h >= 7 && h < 12) return { label: "London", color: COLORS.blue };
+  if (h >= 16 && h < 21) return { label: "New York", color: COLORS.blue };
+  if (h >= 0 && h < 7) return { label: "Asian", color: COLORS.warn };
+  return { label: "Dead Zone", color: COLORS.danger };
+};
+
 const strategyIcon = (s) =>
   ({ MOMENTUM: "\u{1F680}", MEAN_REVERSION: "\u{1F504}", GRID: "\u{1F4CA}", DEFENSIVE: "\u{1F6E1}\uFE0F" }[s] || "\u26A1");
 
@@ -620,6 +629,8 @@ export default function App() {
                   <span style={{ color: COLORS.accent, textAlign: "right" }}>Active</span>
                   <span style={{ color: COLORS.textDim }}>Sizing</span>
                   <span style={{ color: COLORS.text, textAlign: "right" }}>{state?.mode === "competition" ? "Half-Kelly" : "Quarter-Kelly"}</span>
+                  <span style={{ color: COLORS.textDim }}>FX Session</span>
+                  <span style={{ color: getForexSession().color, textAlign: "right" }}>{getForexSession().label}</span>
                 </div>
               </div>
             </div>

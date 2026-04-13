@@ -74,8 +74,8 @@ position_value = kelly × balance
 
 | Mode | Multiplier | Min confidence | Max position |
 |---|---|---|---|
-| **Conservative** *(default)* | 0.25 quarter-Kelly | 55% | 30% of balance |
-| **Competition** | 0.50 half-Kelly | 50% | 40% of balance |
+| **Conservative** *(default)* | 0.25 quarter-Kelly | 65% | 30% of balance |
+| **Competition** | 0.50 half-Kelly | 65% | 40% of balance |
 
 **Exchange minimums enforced on both buy and sell paths:**
 - Pair-aware Kraken `ordermin` (SOL: 0.02, BTC: 0.00005)
@@ -175,7 +175,7 @@ cd ..
 # Terminal 1: Start the dashboard
 cd dashboard && npm run dev
 
-# Terminal 2: Start the trading agent (5-min candles, runs forever)
+# Terminal 2: Start the trading agent (15-min candles, runs forever)
 python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100
 
 # Open http://localhost:3000 in your browser
@@ -193,7 +193,7 @@ start_all.bat
 ```
 --pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)
 --balance          Reference balance for position sizing in USD (default: 100)
---candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 5)
+--candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 15)
 --interval         Seconds between ticks (default: 30)
 --duration         Total duration in seconds, 0 = forever (default: 0)
 --ws-port          WebSocket port for dashboard (default: 8765)
@@ -220,7 +220,7 @@ Competition mode uses half-Kelly (2x position sizes), 50% confidence threshold (
 | Setting | Conservative | Competition |
 |---------|-------------|-------------|
 | Kelly multiplier | 0.25 (quarter) | 0.50 (half) |
-| Min confidence | 55% | 50% |
+| Min confidence | 65% | 65% |
 | Max position | 30% | 40% |
 
 ### Engine Demo (No Kraken Required)

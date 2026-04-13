@@ -302,7 +302,7 @@ class SignalGenerator:
     """Generates BUY/SELL/HOLD signals based on active strategy.
 
     Confidence = BASE + signal_strength * weight + vol_bonus, where:
-    - BASE (0.50) = minimum actionable confidence (competition min_confidence)
+    - BASE (0.50) = signal generation floor (execution requires min_confidence ≥ 0.65)
     - signal_strength = 0-1 from dimensionless market ratios (MACD/ATR, BB penetration, RSI position)
     - weight = fills range from BASE to cap (self-consistent: BASE + weight + vol = cap)
     - vol_bonus = volume confirmation (small, confirmatory)
@@ -311,8 +311,8 @@ class SignalGenerator:
     across SOL/USDC (~$150), SOL/BTC (~0.0012), and BTC/USDC (~$95k).
     """
 
-    # Minimum actionable confidence — matches competition min_confidence so
-    # any signal meeting entry conditions can trade (at minimum size via Kelly)
+    # Signal generation floor — signals start at BASE and build upward.
+    # Execution requires min_confidence (0.65), so only strong signals trade.
     BASE = 0.50
     # Volume is confirmatory, not primary — caps at VOLUME_WEIGHT above average
     VOLUME_WEIGHT = 0.05
@@ -595,13 +595,13 @@ class SignalGenerator:
 
 SIZING_CONSERVATIVE = {
     "kelly_multiplier": 0.25,   # Quarter-Kelly
-    "min_confidence": 0.55,
+    "min_confidence": 0.65,
     "max_position_pct": 0.30,
 }
 
 SIZING_COMPETITION = {
     "kelly_multiplier": 0.50,   # Half-Kelly — more aggressive
-    "min_confidence": 0.50,     # Lower threshold — trades more often
+    "min_confidence": 0.65,     # Quality filter — only ≥15% Kelly edge
     "max_position_pct": 0.40,   # Larger positions allowed
 }
 
@@ -622,7 +622,7 @@ class PositionSizer:
     }
 
     def __init__(self, kelly_multiplier: float = 0.25,
-                 min_confidence: float = 0.55,
+                 min_confidence: float = 0.65,
                  max_position_pct: float = 0.30):
         self.kelly_multiplier = kelly_multiplier
         self.min_confidence = min_confidence
@@ -927,9 +927,9 @@ class HydraEngine:
 
     def __init__(self, initial_balance: float = 10000.0, asset: str = "BTC/USD",
                  sizing: Optional[Dict[str, float]] = None,
-                 candle_interval: int = 5,
-                 volatile_atr_pct: float = 4.0,
-                 volatile_bb_width: float = 0.08,
+                 candle_interval: int = 15,
+                 volatile_atr_pct: float = 4.5,
+                 volatile_bb_width: float = 0.09,
                  trend_ema_ratio: float = 1.005,
                  momentum_rsi_lower: float = 30.0,
                  momentum_rsi_upper: float = 70.0,

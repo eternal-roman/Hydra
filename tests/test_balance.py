@@ -282,18 +282,18 @@ class TestEngineBalanceInit:
     def test_engine_position_sizing_uses_real_balance(self):
         """With real balance ($500), position sizer should produce tradeable sizes."""
         engine = HydraEngine(initial_balance=500.0, asset="SOL/USDC")
-        # At confidence 0.6, Kelly edge = 0.2, quarter-Kelly = 0.05
-        # Position value = 0.05 * 500 = $25, size = 25/130 ≈ 0.19 SOL
-        size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
+        # At confidence 0.7, Kelly edge = 0.4, quarter-Kelly = 0.10
+        # Position value = 0.10 * 500 = $50, size = 50/130 ≈ 0.38 SOL
+        size = engine.sizer.calculate(0.7, engine.balance, 130.0, "SOL/USDC")
         assert size > 0, "Real balance should produce tradeable position size"
         assert size >= 0.1, "Position should meet SOL minimum order size (0.1)"
 
     def test_tiny_balance_produces_zero_size(self):
-        """With the old default ($33.33), position sizer often can't meet minimums."""
-        engine = HydraEngine(initial_balance=33.33, asset="SOL/USDC")
-        # At confidence 0.6: value = 0.05 * 33.33 = $1.67, size = 1.67/130 ≈ 0.013
-        # SOL minimum is 0.1, so this should return 0
-        size = engine.sizer.calculate(0.6, engine.balance, 130.0, "SOL/USDC")
+        """With a very small balance, position sizer can't meet exchange minimums."""
+        engine = HydraEngine(initial_balance=10.0, asset="SOL/USDC")
+        # At confidence 0.7: edge=0.4, quarter-Kelly=0.10, value=$1.00,
+        # size = 1.0/130 ≈ 0.008 — below SOL ordermin of 0.02
+        size = engine.sizer.calculate(0.7, engine.balance, 130.0, "SOL/USDC")
         assert size == 0, "Tiny balance should fail to meet minimum order size"
 
     def test_btc_quoted_pair_balance_converted_from_usd(self):

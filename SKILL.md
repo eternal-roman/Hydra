@@ -105,14 +105,14 @@ position_size = position_value / current_price
 ```
 
 **Sizing modes:**
-- **Conservative** (default): quarter-Kelly (0.25), min confidence 55%, max position 30%
-- **Competition** (`--mode competition`): half-Kelly (0.50), min confidence 50%, max position 40%
+- **Conservative** (default): quarter-Kelly (0.25), min confidence 65%, max position 30%
+- **Competition** (`--mode competition`): half-Kelly (0.50), min confidence 65%, max position 40%
 
 **Hard limits:**
 - Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 BTC)
 - Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 BTC)
 - Sell-side dust prevention: partial sells below ordermin force full close; positions below ordermin are unsellable
-- Confidence threshold to execute: 0.55 (conservative) / 0.50 (competition)
+- Confidence threshold to execute: 0.65 (both modes)
 
 ### Phase 5: Execute Trade
 
@@ -156,7 +156,7 @@ INITIALIZE paper session
 SET assets = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 SET interval = 30 seconds
 SET max_position_pct = 0.30   # 0.40 in competition mode
-SET min_confidence = 0.55     # 0.50 in competition mode
+SET min_confidence = 0.65     # quality filter — only ≥15% Kelly edge
 
 LOOP every {interval}:
   FOR each asset in assets:
@@ -193,7 +193,7 @@ END LOOP
 1. **Circuit Breaker**: Stop all trading if max drawdown exceeds 15%
 2. **Dead Man's Switch**: Always run `kraken order cancel-after 60` before live orders
 3. **Position Limits**: No single position > 30% of portfolio
-4. **Trade Threshold**: Only execute when confidence ≥ 0.55
+4. **Trade Threshold**: Only execute when confidence ≥ 0.65
 5. **Minimum Size**: Enforce Kraken ordermin per asset + costmin per quote currency
 6. **Regime Warmup**: Require 50+ candles before generating signals
 7. **Rate Limiting**: Respect Kraken API limits — minimum 2s between requests
