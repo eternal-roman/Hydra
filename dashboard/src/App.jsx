@@ -215,10 +215,20 @@ export default function App() {
   const pairPnls = Object.values(pairs).map(p => p.portfolio?.pnl_pct || 0);
   const totalPnl = pairPnls.length > 0 ? pairPnls.reduce((s, v) => s + v, 0) / pairPnls.length : 0;
   const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
+  // Engine round-trip trades (position fully closed)
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
   const totalLosses = Object.values(pairs).reduce((s, p) => s + (p.performance?.loss_count || 0), 0);
-  const overallWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
+  const engineWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
+  // Journal fill stats — computed from FULL journal on the backend (not the
+  // 20-entry window shown in the order list). Reflects actual exchange activity.
+  const jStats = state?.journal_stats || {};
+  const totalFills = jStats.total_fills || 0;
+  const fillsByPair = jStats.fills_by_pair || {};
+  const fillWinRate = jStats.fill_win_rate || 0;
+  // Win rate: prefer engine round-trip rate when available, fall back to
+  // journal fill-derived rate so the stat updates as soon as sells execute.
+  const overallWinRate = totalTrades > 0 ? engineWinRate : fillWinRate;
 
   return (
     <div style={{ background: COLORS.bg, minHeight: "100vh", color: COLORS.text, padding: 0 }}>
@@ -264,7 +274,7 @@ export default function App() {
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
               <StatCard label="P&L" value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`} unit="%" color={totalPnl >= 0 ? COLORS.buy : COLORS.sell} />
               <StatCard label="Max Drawdown" value={maxDD.toFixed(2)} unit="%" color={maxDD > 5 ? COLORS.danger : COLORS.warn} />
-              <StatCard label="Trades" value={totalTrades} color={COLORS.blue} />
+              <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
             </div>
             {/* LEFT: Pair panels + equity + trade log */}
@@ -518,9 +528,14 @@ export default function App() {
               {pairNames.map((pair) => {
                 const ps = pairs[pair];
                 const perf = ps.performance || {};
-                const winRate = ((perf.win_count || 0) + (perf.loss_count || 0)) > 0
+                const engineWR = ((perf.win_count || 0) + (perf.loss_count || 0)) > 0
                   ? ((perf.win_count || 0) / ((perf.win_count || 0) + (perf.loss_count || 0)) * 100)
                   : 0;
+                const pf = fillsByPair[pair] || { buys: 0, sells: 0, sell_wins: 0, sell_losses: 0 };
+                const pairSellTotal = (pf.sell_wins || 0) + (pf.sell_losses || 0);
+                const pairFillWR = pairSellTotal > 0 ? ((pf.sell_wins || 0) / pairSellTotal * 100) : 0;
+                const winRate = (perf.total_trades || 0) > 0 ? engineWR : pairFillWR;
+                const pairFills = pf.buys + pf.sells;
                 return (
                   <div key={pair} style={{ background: `${regimeColor(ps.regime)}08`, border: `1px solid ${regimeColor(ps.regime)}25`, borderRadius: 8, padding: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -528,8 +543,8 @@ export default function App() {
                       <span style={{ fontSize: 12, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono }}>{pair}</span>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, fontFamily: mono }}>
-                      <span style={{ color: COLORS.textDim }}>Trades</span>
-                      <span style={{ color: COLORS.text, textAlign: "right" }}>{perf.total_trades || 0}</span>
+                      <span style={{ color: COLORS.textDim }}>Fills</span>
+                      <span style={{ color: COLORS.text, textAlign: "right" }}>{pairFills}{pairFills > 0 ? ` (${pf.buys}B/${pf.sells}S)` : ""}</span>
                       <span style={{ color: COLORS.textDim }}>Win Rate</span>
                       <span style={{ color: winRate > 55 ? COLORS.buy : winRate > 0 ? COLORS.warn : COLORS.textMuted, textAlign: "right" }}>{winRate.toFixed(0)}%</span>
                       <span style={{ color: COLORS.textDim }}>Sharpe</span>
