@@ -318,7 +318,24 @@ class SignalGenerator:
         rsi = Indicators.rsi(prices)
         macd = Indicators.macd(prices)
         bb = Indicators.bollinger_bands(prices)
+        atr = Indicators.atr(candles) if len(candles) >= 15 else 0.0
         current = prices[-1]
+
+        # Volume context: ratio of latest candle volume to 20-period average
+        vol_window = candles[-20:] if len(candles) >= 20 else candles
+        volumes = [c.volume for c in vol_window]
+        avg_volume = sum(volumes) / len(volumes) if volumes else 1.0
+        vol_ratio = candles[-1].volume / avg_volume if avg_volume > 0 else 1.0
+
+        atr_pct = (atr / current * 100) if current > 0 else 0.0
+
+        ctx = {
+            "atr": atr,
+            "atr_pct": atr_pct,
+            "vol_ratio": vol_ratio,
+            "bb_width": bb["width"],
+        }
+
         # Use full precision for small-price pairs (e.g. SOL/BTC at 0.0012)
         price_decimals = 8 if current < 1 else 2
         indicators = {
@@ -331,20 +348,22 @@ class SignalGenerator:
             "bb_lower": round(bb["lower"], price_decimals),
             "bb_width": round(bb["width"], 6),
             "price": round(current, price_decimals),
+            "atr_pct": round(atr_pct, 4),
+            "vol_ratio": round(vol_ratio, 4),
         }
 
         if strategy == Strategy.MOMENTUM:
-            return SignalGenerator._momentum(rsi, macd, bb, current, indicators,
+            return SignalGenerator._momentum(rsi, macd, bb, current, indicators, ctx,
                                              rsi_lower=momentum_rsi_lower,
                                              rsi_upper=momentum_rsi_upper)
         elif strategy == Strategy.MEAN_REVERSION:
-            return SignalGenerator._mean_reversion(rsi, bb, current, indicators,
+            return SignalGenerator._mean_reversion(rsi, bb, current, indicators, ctx,
                                                    rsi_buy=mean_reversion_rsi_buy,
                                                    rsi_sell=mean_reversion_rsi_sell)
         elif strategy == Strategy.GRID:
-            return SignalGenerator._grid(bb, current, indicators)
+            return SignalGenerator._grid(bb, current, indicators, ctx)
         elif strategy == Strategy.DEFENSIVE:
-            return SignalGenerator._defensive(rsi, current, indicators)
+            return SignalGenerator._defensive(rsi, current, indicators, ctx)
         else:
             return Signal(
                 action=SignalAction.HOLD,
@@ -355,10 +374,15 @@ class SignalGenerator:
             )
 
     @staticmethod
-    def _momentum(rsi, macd, bb, price, indicators,
+    def _momentum(rsi, macd, bb, price, indicators, ctx,
                   rsi_lower: float = 30.0, rsi_upper: float = 70.0) -> Signal:
         if rsi_lower < rsi < rsi_upper and macd["histogram"] > 0 and price > bb["middle"]:
-            conf = min(0.95, 0.5 + abs(macd["histogram"]) / price * 1000)
+            # MACD histogram normalized by ATR — dimensionless momentum strength
+            macd_strength = abs(macd["histogram"]) / ctx["atr"] if ctx["atr"] > 0 else 0.0
+            macd_contrib = min(0.35, macd_strength * 0.175)
+            # Volume confirmation: above-average volume adds conviction
+            vol_contrib = min(0.05, (ctx["vol_ratio"] - 1.0) * 0.05) if ctx["vol_ratio"] > 1.0 else 0.0
+            conf = min(0.95, 0.55 + macd_contrib + vol_contrib)
             return Signal(
                 action=SignalAction.BUY,
                 confidence=conf,
@@ -368,9 +392,15 @@ class SignalGenerator:
                 indicators=indicators,
             )
         if rsi > rsi_upper + 5 or macd["histogram"] < 0:
+            # Sell confidence scales with RSI overbought severity + MACD negativity
+            rsi_excess = max(0.0, rsi - rsi_upper) / 30.0
+            macd_neg = 0.0
+            if macd["histogram"] < 0 and ctx["atr"] > 0:
+                macd_neg = min(0.15, abs(macd["histogram"]) / ctx["atr"] * 0.075)
+            conf = min(0.90, 0.55 + rsi_excess * 0.25 + macd_neg)
             return Signal(
                 action=SignalAction.SELL,
-                confidence=0.6,
+                confidence=conf,
                 reason=f"Momentum fading: RSI {rsi:.1f}" +
                        (f" > 75 overbought" if rsi > 75 else f", MACD crossed negative"),
                 strategy=Strategy.MOMENTUM,
@@ -385,10 +415,16 @@ class SignalGenerator:
         )
 
     @staticmethod
-    def _mean_reversion(rsi, bb, price, indicators,
+    def _mean_reversion(rsi, bb, price, indicators, ctx,
                         rsi_buy: float = 35.0, rsi_sell: float = 65.0) -> Signal:
+        # Width factor: wider BB = stronger reversion signal (normalized to typical 4% width)
+        typical_bb_width = 0.04
+        width_factor = min(1.3, max(0.7, ctx["bb_width"] / typical_bb_width)) if typical_bb_width > 0 else 1.0
+        vol_contrib = min(0.05, (ctx["vol_ratio"] - 1.0) * 0.05) if ctx["vol_ratio"] > 1.0 else 0.0
+
         if price <= bb["lower"] and rsi < rsi_buy:
-            conf = min(0.9, 0.5 + (bb["middle"] - price) / bb["middle"] * 10)
+            distance_ratio = (bb["middle"] - price) / bb["middle"] if bb["middle"] > 0 else 0.0
+            conf = min(0.90, 0.50 + distance_ratio * 10.0 * width_factor + vol_contrib)
             return Signal(
                 action=SignalAction.BUY,
                 confidence=conf,
@@ -397,7 +433,8 @@ class SignalGenerator:
                 indicators=indicators,
             )
         if price >= bb["upper"] and rsi > rsi_sell:
-            conf = min(0.9, 0.5 + (price - bb["middle"]) / bb["middle"] * 10)
+            distance_ratio = (price - bb["middle"]) / bb["middle"] if bb["middle"] > 0 else 0.0
+            conf = min(0.90, 0.50 + distance_ratio * 10.0 * width_factor + vol_contrib)
             return Signal(
                 action=SignalAction.SELL,
                 confidence=conf,
@@ -414,47 +451,66 @@ class SignalGenerator:
         )
 
     @staticmethod
-    def _grid(bb, price, indicators) -> Signal:
+    def _grid(bb, price, indicators, ctx) -> Signal:
         grid_spacing = (bb["upper"] - bb["lower"]) / 5 if bb["upper"] != bb["lower"] else 1
         dist_from_lower = (price - bb["lower"]) / grid_spacing if grid_spacing > 0 else 2.5
+
+        # Width factor: band width relative to ATR (typical ~2 ATR for 2-std BB)
+        typical_atr_band_ratio = 2.0
+        atr_band_ratio = (bb["upper"] - bb["lower"]) / ctx["atr"] if ctx["atr"] > 0 else typical_atr_band_ratio
+        width_factor = min(1.2, max(0.8, atr_band_ratio / typical_atr_band_ratio))
+
         if dist_from_lower < 1:
+            zone_depth = 1.0 - dist_from_lower
+            conf = min(0.90, (0.55 + zone_depth * 0.25) * width_factor)
             return Signal(
                 action=SignalAction.BUY,
-                confidence=0.7,
+                confidence=conf,
                 reason=f"Grid BUY: price {_fmt_price(price)} in bottom zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
         if dist_from_lower > 4:
+            zone_depth = dist_from_lower - 4.0
+            conf = min(0.90, (0.55 + zone_depth * 0.25) * width_factor)
             return Signal(
                 action=SignalAction.SELL,
-                confidence=0.7,
+                confidence=conf,
                 reason=f"Grid SELL: price {_fmt_price(price)} in top zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
+        # HOLD zone: confidence scales with distance from center
+        conf = 0.30 + abs(dist_from_lower - 2.5) / 2.5 * 0.15
         return Signal(
             action=SignalAction.HOLD,
-            confidence=0.3,
+            confidence=conf,
             reason=f"Grid HOLD: price in neutral zone {dist_from_lower:.1f}/5",
             strategy=Strategy.GRID,
             indicators=indicators,
         )
 
     @staticmethod
-    def _defensive(rsi, price, indicators) -> Signal:
-        if rsi < 20:
+    def _defensive(rsi, price, indicators, ctx) -> Signal:
+        if rsi < 25:
+            # Severity: 0 at RSI 25, 1 at RSI 5 — deeper oversold = higher confidence
+            rsi_severity = (25.0 - rsi) / 20.0
+            vol_contrib = min(0.05, (ctx["vol_ratio"] - 1.0) * 0.05) if ctx["vol_ratio"] > 1.0 else 0.0
+            conf = min(0.75, 0.50 + rsi_severity * 0.20 + vol_contrib)
             return Signal(
                 action=SignalAction.BUY,
-                confidence=0.4,
+                confidence=conf,
                 reason=f"Defensive: extreme oversold RSI {rsi:.1f} — cautious nibble",
                 strategy=Strategy.DEFENSIVE,
                 indicators=indicators,
             )
         if rsi > 50:
+            # Severity: 0 at RSI 50, 1 at RSI 90
+            rsi_severity = (rsi - 50.0) / 40.0
+            conf = min(0.90, 0.55 + rsi_severity * 0.35)
             return Signal(
                 action=SignalAction.SELL,
-                confidence=0.8,
+                confidence=conf,
                 reason=f"Defensive: RSI {rsi:.1f} > 50 in downtrend — reducing exposure",
                 strategy=Strategy.DEFENSIVE,
                 indicators=indicators,
