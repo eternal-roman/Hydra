@@ -31,7 +31,7 @@
 **Known limitations at audit time:** 5 (documented in section 9)
 
 Subsequent test suites and fix history are tracked in `CHANGELOG.md`.
-Current: 460+ tests across 16 suites (see `CLAUDE.md` Testing section for the full list).
+Current: 460+ tests across 15 suites (see `CLAUDE.md` Testing section for the full list).
 Post-audit bugs surfaced by the live-execution harness are tracked as
 `HF-###` entries in `tests/live_harness/README.md`.
 

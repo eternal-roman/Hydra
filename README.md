@@ -78,7 +78,7 @@ position_value = kelly × balance
 | **Competition** | 0.50 half-Kelly | 50% | 40% of balance |
 
 **Exchange minimums enforced on both buy and sell paths:**
-- Pair-aware Kraken `ordermin` (SOL: 0.02, BTC: 0.00005, ETH: 0.001)
+- Pair-aware Kraken `ordermin` (SOL: 0.02, BTC: 0.00005)
 - Pair-aware Kraken `costmin` (USDC/USD: 0.5, BTC: 0.00002)
 - Partial sells below ordermin are auto-upgraded to full close to prevent dust
 
@@ -148,7 +148,7 @@ React + Vite dashboard at `http://localhost:3000` connected to the agent via Web
 
 ### Prerequisites
 
-- **Python 3.10+** with `websockets` package
+- **Python 3.10+** with `websockets` package (+ optional `anthropic`, `openai` for AI brain)
 - **Node.js 18+** with npm
 - **WSL (Ubuntu)** with [kraken-cli](https://github.com/krakenfx/kraken-cli) installed
 - **Kraken API keys** configured via `kraken setup` in WSL
@@ -285,6 +285,7 @@ hydra/
 │   ├── test_balance_stream.py    # BalanceStream (ws balances) normalization
 │   ├── test_book_stream.py       # BookStream (ws book) dispatch + conversion
 │   └── live_harness/        # Live-execution test harness (41+ scenarios)
+│       ├── __init__.py      # Package marker
 │       ├── harness.py       # Harness class, CLI entry, harness_execute wrapper
 │       ├── scenarios.py     # All scenarios + ALL_SCENARIOS registry
 │       ├── schemas.py       # Per-status trade log entry schemas
