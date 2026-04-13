@@ -210,10 +210,9 @@ export default function App() {
 
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  // P&L: average of per-pair pnl_pct (each pair gets equal weight since balances
-  // are allocated equally). Direct equity summation would mix USD and BTC.
-  const pairPnls = Object.values(pairs).map(p => p.portfolio?.pnl_pct || 0);
-  const totalPnl = pairPnls.length > 0 ? pairPnls.reduce((s, v) => s + v, 0) / pairPnls.length : 0;
+  // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
+  // across --resume (engine pnl_pct resets because initial_balance gets re-split).
+  const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
   const maxDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
   // Engine round-trip trades (position fully closed)
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
@@ -272,7 +271,7 @@ export default function App() {
             {/* Stats Row — spans both columns for edge-to-edge alignment */}
             <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
-              <StatCard label="P&L" value={`${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}`} unit="%" color={totalPnl >= 0 ? COLORS.buy : COLORS.sell} />
+              <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
               <StatCard label="Max Drawdown" value={maxDD.toFixed(2)} unit="%" color={maxDD > 5 ? COLORS.danger : COLORS.warn} />
               <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
@@ -536,6 +535,8 @@ export default function App() {
                 const pairFillWR = pairSellTotal > 0 ? ((pf.sell_wins || 0) / pairSellTotal * 100) : 0;
                 const winRate = (perf.total_trades || 0) > 0 ? engineWR : pairFillWR;
                 const pairFills = pf.buys + pf.sells;
+                const pairPnl = (jStats.pnl_by_pair || {})[pair] || {};
+                const pairNetUsd = pairPnl.net_usd || 0;
                 return (
                   <div key={pair} style={{ background: `${regimeColor(ps.regime)}08`, border: `1px solid ${regimeColor(ps.regime)}25`, borderRadius: 8, padding: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -545,6 +546,10 @@ export default function App() {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, fontFamily: mono }}>
                       <span style={{ color: COLORS.textDim }}>Fills</span>
                       <span style={{ color: COLORS.text, textAlign: "right" }}>{pairFills}{pairFills > 0 ? ` (${pf.buys}B/${pf.sells}S)` : ""}</span>
+                      <span style={{ color: COLORS.textDim }}>P&L</span>
+                      <span style={{ color: pairNetUsd >= 0 ? COLORS.buy : COLORS.sell, textAlign: "right", fontWeight: 600 }}>
+                        {pairNetUsd >= 0 ? "+$" : "-$"}{Math.abs(pairNetUsd).toFixed(2)}
+                      </span>
                       <span style={{ color: COLORS.textDim }}>Win Rate</span>
                       <span style={{ color: winRate > 55 ? COLORS.buy : winRate > 0 ? COLORS.warn : COLORS.textMuted, textAlign: "right" }}>{winRate.toFixed(0)}%</span>
                       <span style={{ color: COLORS.textDim }}>Sharpe</span>
