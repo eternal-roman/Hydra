@@ -166,6 +166,19 @@ be consulted before modifying `HydraEngine` snapshot fields.
 
 See AUDIT.md for the full verification checklist.
 
+## Version Management
+
+When bumping the version, **all six locations must be updated in lockstep**:
+
+1. `CHANGELOG.md` — new `## [X.Y.Z]` section header
+2. `dashboard/package.json` — `"version"` field
+3. `dashboard/package-lock.json` — both `"version"` fields (root + `""` package)
+4. `dashboard/src/App.jsx` — footer string `HYDRA vX.Y.Z`
+5. `hydra_agent.py` — `_export_competition_results()` → `"version"` field
+6. Git tag — `git tag vX.Y.Z` after merge to main
+
+Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new features, architectural changes). Bug fixes and doc tweaks use **patch** increments (e.g. 2.8.0 → 2.8.1).
+
 ## Common Pitfalls
 
 - Don't add `import numpy` or `import pandas` to the engine — it's intentionally pure Python

@@ -1124,6 +1124,10 @@ class HydraEngine:
             "equity_history_len": len(self.equity_history),
             "peak_equity": self.peak_equity,
             "max_drawdown": self.max_drawdown,
+            # _maybe_execute updates these on position-closing SELLs before
+            # the exchange confirms — must rollback on rejection.
+            "gross_profit": self.gross_profit,
+            "gross_loss": self.gross_loss,
         }
 
     def restore_position(self, snap: Dict[str, Any]) -> None:
@@ -1141,6 +1145,8 @@ class HydraEngine:
         self.equity_history = self.equity_history[:snap["equity_history_len"]]
         self.peak_equity = snap["peak_equity"]
         self.max_drawdown = snap["max_drawdown"]
+        self.gross_profit = snap["gross_profit"]
+        self.gross_loss = snap["gross_loss"]
 
     def snapshot_runtime(self) -> Dict[str, Any]:
         """Serialize full engine runtime state for session persistence.

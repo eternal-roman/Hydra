@@ -95,17 +95,20 @@ Each strategy produces a signal: **BUY**, **SELL**, or **HOLD** with a confidenc
 - BUY only when RSI < 20 (extreme oversold), small position.
 - SELL when RSI > 50 (reduce exposure).
 
-### Phase 4: Size Position (Quarter-Kelly)
+### Phase 4: Size Position (Kelly Criterion)
 
 ```
 edge = max(0, (confidence * 2 - 1))      # 0 at 50% conf, 1 at 100%
-kelly = edge * 0.25                       # Quarter-Kelly fraction
-position_value = kelly * balance          # USD value to trade
+kelly = edge * multiplier                 # 0.25 conservative, 0.50 competition
+position_value = kelly * balance          # Quote currency value to trade
 position_size = position_value / current_price
 ```
 
+**Sizing modes:**
+- **Conservative** (default): quarter-Kelly (0.25), min confidence 55%, max position 30%
+- **Competition** (`--mode competition`): half-Kelly (0.50), min confidence 50%, max position 40%
+
 **Hard limits:**
-- Never allocate more than 30% of capital to a single trade (conservative) / 40% (competition)
 - Minimum trade cost: pair-aware (Kraken costmin — 0.5 USDC, 0.00002 BTC)
 - Minimum order size: pair-aware (Kraken ordermin — 0.02 SOL, 0.00005 BTC)
 - Sell-side dust prevention: partial sells below ordermin force full close; positions below ordermin are unsellable
@@ -150,10 +153,10 @@ kraken closed-orders -o json
 
 ```
 INITIALIZE paper session
-SET assets = ["BTC/USD", "ETH/USD", "SOL/USD"]
-SET interval = 60 seconds
-SET max_position_pct = 0.30
-SET min_confidence = 0.55
+SET assets = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
+SET interval = 30 seconds
+SET max_position_pct = 0.30   # 0.40 in competition mode
+SET min_confidence = 0.55     # 0.50 in competition mode
 
 LOOP every {interval}:
   FOR each asset in assets:
@@ -180,8 +183,6 @@ LOOP every {interval}:
 
   PRINT status summary
 
-  IF max_drawdown > 10%:
-    WARN "Drawdown limit approaching — consider reducing exposure"
   IF max_drawdown > 15%:
     HALT "Circuit breaker triggered — stopping agent"
 END LOOP
@@ -239,6 +240,10 @@ hydra/
 ├── AUDIT.md              # Technical audit and test results
 ├── hydra_engine.py       # Strategy engine (indicators, regime detection, signals)
 ├── hydra_agent.py        # Agent loop (Kraken CLI, WebSocket, trade execution)
+├── hydra_brain.py        # AI reasoning (Claude Analyst + Risk Manager + Grok Strategist)
+├── hydra_tuner.py        # Self-tuning parameters via exponential smoothing
+├── hydra_journal_migrator.py  # Legacy trade log → order journal migration
+├── tests/                # 15 test suites + live-execution harness
 └── dashboard/            # React + Vite live dashboard
     └── src/App.jsx       # Dashboard UI (single-file)
 ```
