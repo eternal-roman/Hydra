@@ -274,15 +274,15 @@ class TestSignalGeneration:
             assert "macd_histogram" in signal.indicators
             assert "bb_upper" in signal.indicators
 
-    def test_defensive_buy_below_threshold(self):
-        """DEFENSIVE BUY has confidence 0.4, below 0.55 execution threshold."""
+    def test_defensive_buy_scales_with_rsi(self):
+        """DEFENSIVE BUY confidence scales with RSI severity, starts at 0.50."""
         prices = make_trending_down(60)
-        prices[-1] = prices[-1] - 50
+        prices[-1] = prices[-1] - 50  # extreme oversold
         candles = make_candles(prices)
         signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
-        sizer = PositionSizer(**SIZING_CONSERVATIVE)
         assert signal.action == SignalAction.BUY
-        assert signal.confidence < sizer.min_confidence
+        # Confidence should be >= 0.50 (meets competition threshold) and <= 0.75
+        assert 0.50 <= signal.confidence <= 0.75, f"Got {signal.confidence}"
 
 
 # ═══════════════════════════════════════════════════════════════

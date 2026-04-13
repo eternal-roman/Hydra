@@ -207,6 +207,10 @@ class HydraBrain:
         self.last_decision: Optional[BrainDecision] = None
         self._lock = threading.Lock()  # Thread safety for parallel brain calls
 
+        # Per-pair strategist cooldown: suppress re-escalation for N ticks after Grok fires
+        self.strategist_cooldowns: Dict[str, int] = {}
+        self.strategist_cooldown_ticks = 10  # ~5 min at 30s tick interval
+
     # ─── Main Entry Point ───
 
     def deliberate(self, state: Dict[str, Any]) -> BrainDecision:
@@ -255,12 +259,23 @@ class HydraBrain:
             # a malformed analyst response missing the key escalates to the
             # strategist rather than silently bypassing it. The old default of
             # 1.0 treated "unknown" as "fully confident" which is unsafe.
+            pair = state.get("asset", "")
+            cooldown_active = self.strategist_cooldowns.get(pair, 0) > self.tick_counter
             needs_strategist = (
-                self.has_strategist and (
+                self.has_strategist and not cooldown_active and (
                     risk_output.get("decision") != "CONFIRM" or
                     analyst_output.get("conviction", 0.0) < self.strategist_threshold
                 )
             )
+            if cooldown_active and self.has_strategist:
+                conviction = analyst_output.get("conviction", 0.0)
+                would_escalate = (
+                    risk_output.get("decision") != "CONFIRM" or
+                    conviction < self.strategist_threshold
+                )
+                if would_escalate:
+                    remaining = self.strategist_cooldowns[pair] - self.tick_counter
+                    print(f"  [BRAIN] Strategist cooldown active for {pair} ({remaining} ticks remaining)")
 
             strategist_tokens_in = 0
             strategist_tokens_out = 0
@@ -270,6 +285,8 @@ class HydraBrain:
                     strategist_tokens_in = s_in
                     strategist_tokens_out = s_out
                     escalated = True
+                    # Set per-pair cooldown after Grok fires
+                    self.strategist_cooldowns[pair] = self.tick_counter + self.strategist_cooldown_ticks
                 except Exception as e:
                     print(f"  [BRAIN] Strategist failed (continuing with Risk Manager decision): {e}")
 
