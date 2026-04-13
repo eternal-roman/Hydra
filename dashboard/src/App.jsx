@@ -433,7 +433,7 @@ export default function App() {
               {history.length > 5 && (
                 <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 10, padding: 14 }}>
                   <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.textDim, marginBottom: 6, fontFamily: mono, textTransform: "uppercase", letterSpacing: "0.08em" }}>Balance History</div>
-                  <MiniChart data={history} width={700} height={70} color={totalPnl >= 0 ? COLORS.accent : COLORS.danger} filled />
+                  <MiniChart data={history} width={700} height={70} color={journalPnlUsd >= 0 ? COLORS.accent : COLORS.danger} filled />
                 </div>
               )}
 
