@@ -1434,7 +1434,7 @@ class HydraAgent:
         ws_port: int = 8765,
         mode: str = "conservative",
         paper: bool = False,
-        candle_interval: int = 5,
+        candle_interval: int = 15,
         reset_params: bool = False,
         resume: bool = False,
     ):
@@ -1472,9 +1472,15 @@ class HydraAgent:
         # One engine per pair — apply tuned params if available
         self.engines: Dict[str, HydraEngine] = {}
         for pair in pairs:
-            # Scale regime thresholds for candle interval (tuned for 5-min)
-            vol_atr = 3.0 if candle_interval >= 5 else 4.0
-            vol_bb = 0.06 if candle_interval >= 5 else 0.08
+            # Scale regime thresholds for candle interval
+            # 15-min+ bars have ~1.7× the ATR of 5-min — raise thresholds to
+            # prevent over-classifying VOLATILE regime on wider candles.
+            if candle_interval >= 15:
+                vol_atr, vol_bb = 4.5, 0.09
+            elif candle_interval >= 5:
+                vol_atr, vol_bb = 3.0, 0.06
+            else:
+                vol_atr, vol_bb = 4.0, 0.08
             self.engines[pair] = HydraEngine(
                 initial_balance=initial_balance / len(pairs),
                 asset=pair,
@@ -1985,11 +1991,44 @@ class HydraAgent:
                                   f"{' [BID WALL]' if book_analysis['bid_wall'] else ''}"
                                   f"{' [ASK WALL]' if book_analysis['ask_wall'] else ''}")
 
+                # Phase 1.8: FOREX session-aware confidence weighting
+                # Crypto volume clusters around traditional FX sessions.
+                # London/NY overlap (12-16 UTC) is peak liquidity → signals more reliable.
+                # Dead zone (21-00 UTC) is thinnest → signals less reliable.
+                utc_hour = datetime.now(timezone.utc).hour
+                if 12 <= utc_hour < 16:      # London/NY overlap — peak
+                    session_mod = 0.04
+                    session_label = "London/NY"
+                elif 7 <= utc_hour < 12:      # London session
+                    session_mod = 0.02
+                    session_label = "London"
+                elif 16 <= utc_hour < 21:     # NY session
+                    session_mod = 0.02
+                    session_label = "New York"
+                elif 0 <= utc_hour < 7:       # Asian session
+                    session_mod = -0.03
+                    session_label = "Asian"
+                else:                          # 21-00 UTC dead zone
+                    session_mod = -0.05
+                    session_label = "dead zone"
+
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if not state or session_mod == 0:
+                        continue
+                    old_conf = state["signal"]["confidence"]
+                    new_conf = max(0.0, min(1.0, old_conf + session_mod))
+                    if old_conf != new_conf and state["signal"]["action"] != "HOLD":
+                        state["signal"]["confidence"] = new_conf
+                        if abs(session_mod) >= 0.03:  # Only log notable adjustments
+                            print(f"  [SESSION] {pair}: {session_label} ({utc_hour:02d}:xx UTC), "
+                                  f"conf {old_conf:.2f} → {new_conf:.2f} ({session_mod:+.2f})")
+
                 # ── Total modifier cap ──────────────────────────────────
-                # External modifiers (cross-pair + order book) can reduce confidence without limit
-                # but cannot boost it more than +0.15 above the engine's original signal.
-                # This prevents stacking modifiers from inflating weak signals into high-conviction
-                # trades that get oversized via Kelly criterion.
+                # External modifiers (cross-pair + order book + session) can reduce confidence
+                # without limit but cannot boost it more than +0.15 above the engine's original
+                # signal.  This prevents stacking modifiers from inflating weak signals into
+                # high-conviction trades that get oversized via Kelly criterion.
                 MAX_TOTAL_MODIFIER_BOOST = 0.15
                 for pair in self.pairs:
                     state = engine_states.get(pair)
@@ -3510,8 +3549,8 @@ def main():
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,
                         help="Seconds between ticks (default: 30)")
-    parser.add_argument("--candle-interval", type=int, default=5, choices=[1, 5, 15, 30, 60],
-                        help="OHLC candle period in minutes (default: 5)")
+    parser.add_argument("--candle-interval", type=int, default=15, choices=[1, 5, 15, 30, 60],
+                        help="OHLC candle period in minutes (default: 15)")
     parser.add_argument("--duration", type=int, default=0,
                         help="Total duration in seconds (default: 0 = run forever, Ctrl+C to stop)")
     parser.add_argument("--ws-port", type=int, default=8765,

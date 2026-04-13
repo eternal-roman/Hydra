@@ -215,7 +215,7 @@ class Harness:
             ws_port=0,  # won't be bound since broadcaster.start() is never called
             mode="competition",
             paper=paper,
-            candle_interval=5,
+            candle_interval=15,
             reset_params=True,  # don't load real tuned params
             resume=False,
         )

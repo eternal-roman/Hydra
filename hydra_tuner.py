@@ -32,7 +32,7 @@ DEFAULT_PARAMS = {
     "momentum_rsi_upper": 70.0,
     "mean_reversion_rsi_buy": 35.0,
     "mean_reversion_rsi_sell": 65.0,
-    "min_confidence_threshold": 0.55,
+    "min_confidence_threshold": 0.65,
 }
 
 # Hard bounds — parameters are clamped to these ranges to prevent
@@ -45,7 +45,7 @@ PARAM_BOUNDS = {
     "momentum_rsi_upper": (55.0, 90.0),
     "mean_reversion_rsi_buy": (10.0, 45.0),
     "mean_reversion_rsi_sell": (55.0, 90.0),
-    "min_confidence_threshold": (0.40, 0.75),
+    "min_confidence_threshold": (0.55, 0.80),
 }
 
 # How much to shift toward the winning mean per update cycle
