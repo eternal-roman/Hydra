@@ -1541,10 +1541,6 @@ class HydraAgent:
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
-        # Signal quality gates
-        self._last_candle_ingest_ts: Dict[str, float] = {}   # pair → epoch of last candle ingest
-        self._pending_direction: Dict[str, tuple] = {}        # pair → (direction, confidence, candle_ts)
-
         # Run the one-shot legacy trade_log -> order_journal migration
         # before touching any on-disk state. Idempotent; no-op after the
         # first run. Lives in hydra_journal_migrator so it can be invoked
@@ -1929,30 +1925,6 @@ class HydraAgent:
                 for pair in self.pairs:
                     engine_states[pair] = self._fetch_and_tick(pair)
 
-                # Phase 1.25: Signal debounce — require same direction on 2 consecutive
-                # closed candles before allowing execution. Prevents whipsaw.
-                for pair, state in engine_states.items():
-                    if not state:
-                        continue
-                    direction = state["signal"]["action"]
-                    if direction == "HOLD":
-                        self._pending_direction.pop(pair, None)
-                        continue
-                    candle_ts = (self.engines[pair].candles[-1].timestamp
-                                 if self.engines[pair].candles else 0)
-                    prev = self._pending_direction.get(pair)
-                    if prev is None or prev[0] != direction or prev[2] == candle_ts:
-                        # New direction or same candle — store and wait
-                        self._pending_direction[pair] = (direction, state["signal"]["confidence"], candle_ts)
-                        state["signal"]["action"] = "HOLD"
-                        state["signal"]["confidence"] = 0.0
-                        state["signal"]["reason"] = f"Debounce: {direction} pending confirmation"
-                        continue
-                    # Confirmed — same direction across 2 different candles
-                    avg_conf = (prev[1] + state["signal"]["confidence"]) / 2
-                    state["signal"]["confidence"] = round(avg_conf, 4)
-                    self._pending_direction.pop(pair, None)
-
                 # Capture engine's original signal before any external modifiers
                 original_signals = {}
                 for pair, state in engine_states.items():
@@ -2245,7 +2217,6 @@ class HydraAgent:
         """
         engine = self.engines[pair]
         candle_ingested = False
-        ts = 0.0  # candle timestamp — set inside ws_candle block below
 
         # Try WS candle stream first (no API call, no rate-limit sleep)
         ws_candle = (
@@ -2280,17 +2251,6 @@ class HydraAgent:
             # CandleStream unavailable — skip tick for this pair.
             # Engine retains previous candle data from warmup / prior ticks.
             return None
-
-        # Gate: candle completeness — only tick on closed candles
-        candle_interval_s = self.candle_interval * 60
-        if candle_ingested and time.time() < ts + candle_interval_s:
-            return None  # Candle still forming — wait for close
-
-        # Gate: data freshness — HOLD if last ingest too old (2× candle interval)
-        last_ts = self._last_candle_ingest_ts.get(pair, 0)
-        if last_ts > 0 and time.time() - last_ts > candle_interval_s * 2:
-            return None  # Stale data
-        self._last_candle_ingest_ts[pair] = time.time()
 
         # Snapshot position before tick so we can rollback if exchange order fails.
         # When generate_only=True (brain active), execute_signal happens later and
@@ -3393,7 +3353,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.8.1",
+            "version": "2.8.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

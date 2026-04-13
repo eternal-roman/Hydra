@@ -18,7 +18,6 @@ from hydra_engine import (
     Indicators, RegimeDetector, SignalGenerator, PositionSizer, HydraEngine,
     Regime, Strategy, SignalAction, Candle,
     SIZING_CONSERVATIVE, SIZING_COMPETITION,
-    _percentile_rank, REGIME_CONFIDENCE_DISCOUNT,
 )
 
 
@@ -276,15 +275,13 @@ class TestSignalGeneration:
             assert "bb_upper" in signal.indicators
 
     def test_defensive_buy_below_threshold(self):
-        """DEFENSIVE BUY has low confidence — filtered to HOLD by post-processing."""
+        """DEFENSIVE BUY has confidence 0.4, below 0.55 execution threshold."""
         prices = make_trending_down(60)
         prices[-1] = prices[-1] - 50
         candles = make_candles(prices)
         signal = SignalGenerator.generate(Strategy.DEFENSIVE, prices, candles)
         sizer = PositionSizer(**SIZING_CONSERVATIVE)
-        # Defensive BUY confidence (0.30-0.45) is below 0.52 clamp floor,
-        # so post-processing converts it to HOLD — never reaches sizer.
-        assert signal.action == SignalAction.HOLD
+        assert signal.action == SignalAction.BUY
         assert signal.confidence < sizer.min_confidence
 
 
@@ -1185,152 +1182,6 @@ class TestSnapshotTradesRoundTrip:
 
 
 # ═══════════════════════════════════════════════════════════════
-# CONFIDENCE REFINEMENT TESTS
-# ═══════════════════════════════════════════════════════════════
-
-class TestPercentileRank:
-    def test_basic_ranking(self):
-        buf = [float(i) for i in range(100)]
-        assert _percentile_rank(50.0, buf) == 0.50
-        assert _percentile_rank(90.0, buf) == 0.90
-
-    def test_small_buffer_returns_default(self):
-        buf = [1.0, 2.0, 3.0]
-        assert _percentile_rank(2.0, buf) == 0.5
-
-    def test_empty_buffer(self):
-        assert _percentile_rank(1.0, []) == 0.5
-
-    def test_uses_absolute_value(self):
-        buf = [float(i) for i in range(1, 51)]
-        # -25.0 should rank the same as 25.0 (abs comparison)
-        assert _percentile_rank(-25.0, buf) == _percentile_rank(25.0, buf)
-
-
-class TestMACDNormalization:
-    """MACD confidence should be asset-agnostic (percentile-ranked, not price-divided)."""
-
-    def test_btc_vs_sol_similar_confidence(self):
-        # Generate two price series at different scales with similar momentum pattern
-        btc_prices = [60000 + i * 50 for i in range(60)]   # BTC trending up
-        sol_prices = [140 + i * 0.12 for i in range(60)]    # SOL trending up, same shape
-
-        btc_candles = make_candles(btc_prices)
-        sol_candles = make_candles(sol_prices)
-
-        # Build histogram buffers from the series
-        btc_buf = []
-        sol_buf = []
-        sig_btc = SignalGenerator.generate(Strategy.MOMENTUM, btc_prices, btc_candles, hist_buffer=btc_buf)
-        sig_sol = SignalGenerator.generate(Strategy.MOMENTUM, sol_prices, sol_candles, hist_buffer=sol_buf)
-
-        # Both should produce signals (not necessarily same direction due to different RSI)
-        # Key assertion: confidence should NOT be wildly different due to price scale
-        if sig_btc.action != SignalAction.HOLD and sig_sol.action != SignalAction.HOLD:
-            assert abs(sig_btc.confidence - sig_sol.confidence) < 0.30, \
-                f"BTC conf={sig_btc.confidence}, SOL conf={sig_sol.confidence} — too far apart"
-
-
-class TestConfidenceClamp:
-    def test_max_confidence_capped(self):
-        """Even with extreme indicators, confidence should not exceed 0.80."""
-        prices = make_trending_up(60)
-        candles = make_candles(prices)
-        buf = []
-        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                          regime=Regime.TREND_UP, hist_buffer=buf)
-        if signal.action != SignalAction.HOLD:
-            assert signal.confidence <= 0.80
-
-    def test_weak_signal_filtered_to_hold(self):
-        """Signals with confidence below 0.52 become HOLD."""
-        # Flat prices produce weak/no signal
-        prices = [100.0] * 60
-        candles = make_candles(prices)
-        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                          regime=Regime.TREND_UP, hist_buffer=[])
-        # Flat data should produce HOLD (no directional signal)
-        assert signal.action == SignalAction.HOLD
-
-
-class TestRegimeDiscount:
-    def test_volatile_discounted_vs_trend_up(self):
-        """Same indicators in VOLATILE should produce lower confidence than TREND_UP."""
-        prices = make_trending_up(60)
-        candles = make_candles(prices)
-        buf1, buf2 = [], []
-        sig_trend = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                             regime=Regime.TREND_UP, hist_buffer=buf1)
-        # Reset buffer for fair comparison
-        sig_volatile = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                                regime=Regime.VOLATILE, hist_buffer=buf2)
-        if sig_trend.action != SignalAction.HOLD and sig_volatile.action != SignalAction.HOLD:
-            assert sig_volatile.confidence < sig_trend.confidence, \
-                f"VOLATILE ({sig_volatile.confidence}) should be less than TREND_UP ({sig_trend.confidence})"
-
-    def test_discount_values_valid(self):
-        for regime in Regime:
-            d = REGIME_CONFIDENCE_DISCOUNT[regime]
-            assert 0 < d <= 1.0, f"discount for {regime} out of range: {d}"
-
-
-class TestVolumeMultiplier:
-    def test_high_volume_boosts(self):
-        """High volume should increase confidence vs normal volume."""
-        prices = make_trending_up(60)
-        candles_normal = make_candles(prices)  # default volume=100
-        candles_high = [Candle(c.open, c.high, c.low, c.close, 250.0, c.timestamp)
-                        for c in candles_normal]
-        buf1, buf2 = [], []
-        sig_normal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles_normal,
-                                              regime=Regime.TREND_UP, vol_ratio=1.0, hist_buffer=buf1)
-        sig_high = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles_high,
-                                            regime=Regime.TREND_UP, vol_ratio=2.0, hist_buffer=buf2)
-        if sig_normal.action != SignalAction.HOLD and sig_high.action != SignalAction.HOLD:
-            assert sig_high.confidence >= sig_normal.confidence
-
-    def test_low_volume_dampens(self):
-        """Low volume should decrease confidence."""
-        prices = make_trending_up(60)
-        candles = make_candles(prices)
-        buf1, buf2 = [], []
-        sig_normal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                              regime=Regime.TREND_UP, vol_ratio=1.0, hist_buffer=buf1)
-        sig_low = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles,
-                                           regime=Regime.TREND_UP, vol_ratio=0.3, hist_buffer=buf2)
-        if sig_normal.action != SignalAction.HOLD and sig_low.action != SignalAction.HOLD:
-            assert sig_low.confidence <= sig_normal.confidence
-
-
-class TestWarmupUnified:
-    def test_40_candles_hold(self):
-        """40 candles (below unified 50) should produce HOLD."""
-        prices = make_trending_up(40)
-        candles = make_candles(prices)
-        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles)
-        assert signal.action == SignalAction.HOLD
-        assert signal.confidence == 0.0
-
-    def test_50_candles_proceeds(self):
-        """50 candles should proceed past warmup check."""
-        prices = make_trending_up(50)
-        candles = make_candles(prices)
-        signal = SignalGenerator.generate(Strategy.MOMENTUM, prices, candles)
-        # May still be HOLD for other reasons, but not for warmup
-        assert "warming up" not in signal.reason.lower()
-
-
-class TestMACDHistSeries:
-    def test_macd_returns_hist_series(self):
-        """MACD should return full histogram series alongside scalar values."""
-        prices = make_trending_up(60)
-        result = Indicators.macd(prices)
-        assert "hist_series" in result
-        assert isinstance(result["hist_series"], list)
-        assert len(result["hist_series"]) > 0
-
-
-# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -1346,9 +1197,6 @@ def run_tests():
         TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
         TestHydraEngine, TestSnapshotAndRollback, TestCompetitionMode, TestBrain,
         TestHaltedEngineExecuteSignal, TestSnapshotTradesRoundTrip,
-        TestPercentileRank, TestMACDNormalization, TestConfidenceClamp,
-        TestRegimeDiscount, TestVolumeMultiplier, TestWarmupUnified,
-        TestMACDHistSeries,
     ]
 
     for cls in test_classes:

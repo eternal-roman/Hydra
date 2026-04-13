@@ -69,33 +69,17 @@ python hydra_engine.py
 ### Indicators (hydra_engine.py)
 - RSI uses Wilder's exponential smoothing — do not simplify to SMA
 - ATR uses Wilder's exponential smoothing (same as RSI) — do not simplify to simple average
-- MACD builds a full historical series then applies 9-EMA — do not simplify to single-point calculation. `Indicators.macd()` returns `hist_series` (full MACD line history) alongside scalar values for percentile-based confidence ranking.
+- MACD builds a full historical series then applies 9-EMA — do not simplify to single-point calculation
 - Bollinger Bands use population variance (divide by N, not N-1)
 - All indicators are stateless static methods — they recompute from the full price array each tick
-
-### Signal Confidence
-- Momentum strategy uses a weighted 3-indicator composite: MACD histogram percentile (40%), RSI momentum zones (30%), Bollinger %B (30%). MACD confidence is percentile-ranked against a rolling buffer of the last 100 histogram values per engine — this makes confidence asset-agnostic (same signal strength → same confidence regardless of BTC at $60k or SOL at $140).
-- Mean reversion confidence uses Bollinger %B = `(price - lower) / (upper - lower)` — deeper beyond band = higher confidence.
-- Grid confidence is zone-proportional (0.50–0.75) based on distance from band extremes.
-- Defensive confidence is RSI-proportional: BUY at RSI < 20 yields 0.30–0.45 (stays below execution threshold), SELL at RSI > 50 yields 0.55–0.80.
-- Post-processing pipeline (applied to all non-HOLD signals in `SignalGenerator.generate()`):
-  1. Volume multiplier [0.75, 1.20]: high volume (≥1.5× avg) boosts confidence, low volume (≤0.5× avg) dampens it.
-  2. Regime confidence discount: TREND_UP=1.0, TREND_DOWN=0.85, RANGING=0.90, VOLATILE=0.65 — scales confidence without changing regime detection.
-  3. Confidence clamp [0.52, 0.80]: floor filters weak signals to HOLD, ceiling prevents over-sizing via Kelly.
-- Do not modify regime detection thresholds when adjusting confidence — they are independent systems.
-
-### Signal Quality Gates (hydra_agent.py)
-- Candle completeness gate: `_fetch_and_tick()` only runs the engine tick when the current candle is closed (timestamp + interval ≤ now). In-progress candles are skipped.
-- Data freshness guard: if the last candle ingest for a pair exceeds 2× the candle interval, the tick is skipped. Prevents acting on stale WS data.
-- Signal debounce: requires the same direction (BUY or SELL) on 2 consecutive closed candles before execution. Confidence is averaged across the two confirmations. Prevents whipsaw on direction flip-flops. Runs in Phase 1.25 (between engine ticks and cross-pair coordination).
 
 ### Regime Detection
 - Priority: VOLATILE > TREND_UP > TREND_DOWN > RANGING
 - Volatile check must come first — it overrides trend signals
-- Warmup requires 50 candles before both regime detection and signal generation activate
+- Warmup requires 50 candles before regime detection activates
 
 ### Trading
-- Confidence threshold: 0.52 post-processing floor (engine-level), plus 0.55 conservative / 0.50 competition sizer minimum. SELL is gated by the same min_confidence check as BUY.
+- Confidence threshold: 0.55 conservative mode, 0.50 competition mode. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY.
 - Position sizing: quarter-Kelly conservative, half-Kelly competition (`(confidence*2 - 1) * multiplier * balance`)
 - Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 BTC), `costmin` per quote (0.5 USDC, 0.00002 BTC). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
 - Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, BTC/USDC=2, SOL/BTC=7). Hardcoded `PRICE_DECIMALS` remain as fallbacks; at startup `KrakenCLI.load_pair_constants()` dynamically loads the true values from `kraken pairs` and patches them via `apply_pair_constants()`.
