@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.8.1] — 2026-04-12
+
+### Confidence Refinement & Signal Quality Gates
+
+- **fix(engine):** Replaced broken momentum confidence formula (`abs(macd_hist) / price * 1000`) with percentile-ranked MACD histogram + weighted 3-indicator composite (MACD 40%, RSI 30%, BB 30%). Asset-agnostic — BTC and SOL now produce comparable confidence for equivalent signal strength.
+- **fix(engine):** Replaced arbitrary mean reversion confidence (`bb_middle - price / bb_middle * 10`) with Bollinger %B calculation.
+- **fix(engine):** Grid confidence now zone-proportional (0.50–0.75) instead of hardcoded 0.7/0.3.
+- **fix(engine):** Defensive confidence now RSI-proportional instead of hardcoded constants.
+- **feat(engine):** Post-processing pipeline: volume multiplier [0.75, 1.20], regime confidence discount (TREND_UP=1.0, VOLATILE=0.65), confidence clamp [0.52, 0.80]. Weak signals below 0.52 filtered to HOLD.
+- **fix(engine):** Unified warmup threshold from 26 to 50 candles across signal generation and regime detection.
+- **feat(engine):** Exposed MACD histogram series from `Indicators.macd()` for percentile buffer tracking.
+- **feat(agent):** Candle completeness gate — only ticks on closed candles (timestamp + interval ≤ now).
+- **feat(agent):** Data freshness guard — forces HOLD if last candle ingest exceeds 2× candle interval.
+- **feat(agent):** Signal debounce — requires same direction on 2 consecutive closed candles before execution; averages confidence across confirmations to prevent whipsaw.
+
+---
+
 ## [2.8.0] — 2026-04-12
 
 ### XBT → BTC Canonical Migration

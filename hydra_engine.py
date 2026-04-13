@@ -234,7 +234,7 @@ class Indicators:
         else:
             signal_line = macd_line
         histogram = macd_line - signal_line
-        return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
+        return {"macd": macd_line, "signal": signal_line, "histogram": histogram, "hist_series": macd_hist}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -283,10 +283,28 @@ REGIME_STRATEGY_MAP = {
     Regime.VOLATILE: Strategy.GRID,
 }
 
+# Confidence discount per regime — scales signal confidence without
+# changing regime detection itself.  Trends get full confidence;
+# volatile/defensive regimes are discounted because signals are noisier.
+REGIME_CONFIDENCE_DISCOUNT = {
+    Regime.TREND_UP: 1.0,
+    Regime.TREND_DOWN: 0.85,
+    Regime.RANGING: 0.90,
+    Regime.VOLATILE: 0.65,
+}
+
 
 # ═══════════════════════════════════════════════════════════════
 # SIGNAL GENERATOR
 # ═══════════════════════════════════════════════════════════════
+
+def _percentile_rank(value: float, buffer: list) -> float:
+    """Fraction of buffer values with abs() below abs(value). Returns 0.0-1.0."""
+    if len(buffer) < 20:
+        return 0.5
+    abs_val = abs(value)
+    return sum(1 for v in buffer if abs(v) < abs_val) / len(buffer)
+
 
 def _fmt_price(p: float) -> str:
     """Format a price for human-readable signal reasons.
@@ -306,8 +324,10 @@ class SignalGenerator:
         strategy: Strategy, prices: List[float], candles: List[Candle],
         momentum_rsi_lower: float = 30.0, momentum_rsi_upper: float = 70.0,
         mean_reversion_rsi_buy: float = 35.0, mean_reversion_rsi_sell: float = 65.0,
+        regime: 'Regime' = None, vol_ratio: float = None,
+        hist_buffer: list = None,
     ) -> Signal:
-        if len(prices) < 26:
+        if len(prices) < 50:
             return Signal(
                 action=SignalAction.HOLD,
                 confidence=0.0,
@@ -333,81 +353,190 @@ class SignalGenerator:
             "price": round(current, price_decimals),
         }
 
+        # Update histogram buffer for MACD percentile ranking
+        if hist_buffer is not None:
+            hist_buffer.append(macd["histogram"])
+            if len(hist_buffer) > 100:
+                del hist_buffer[:-100]
+
         if strategy == Strategy.MOMENTUM:
-            return SignalGenerator._momentum(rsi, macd, bb, current, indicators,
-                                             rsi_lower=momentum_rsi_lower,
-                                             rsi_upper=momentum_rsi_upper)
+            signal = SignalGenerator._momentum(rsi, macd, bb, current, indicators,
+                                               rsi_lower=momentum_rsi_lower,
+                                               rsi_upper=momentum_rsi_upper,
+                                               hist_buffer=hist_buffer)
         elif strategy == Strategy.MEAN_REVERSION:
-            return SignalGenerator._mean_reversion(rsi, bb, current, indicators,
-                                                   rsi_buy=mean_reversion_rsi_buy,
-                                                   rsi_sell=mean_reversion_rsi_sell)
+            signal = SignalGenerator._mean_reversion(rsi, bb, current, indicators,
+                                                     rsi_buy=mean_reversion_rsi_buy,
+                                                     rsi_sell=mean_reversion_rsi_sell)
         elif strategy == Strategy.GRID:
-            return SignalGenerator._grid(bb, current, indicators)
+            signal = SignalGenerator._grid(bb, current, indicators)
         elif strategy == Strategy.DEFENSIVE:
-            return SignalGenerator._defensive(rsi, current, indicators)
+            signal = SignalGenerator._defensive(rsi, current, indicators)
         else:
             return Signal(
                 action=SignalAction.HOLD,
-                confidence=0.5,
+                confidence=0.0,
                 reason="Unknown strategy",
                 strategy=strategy,
                 indicators=indicators,
             )
 
+        # ── Post-processing: volume, regime discount, clamp ──
+        if signal.action != SignalAction.HOLD:
+            # Volume multiplier
+            if vol_ratio is not None:
+                if vol_ratio >= 1.5:
+                    vm = 1.20
+                elif vol_ratio >= 1.0:
+                    vm = 1.0 + (vol_ratio - 1.0) / 0.5 * 0.20
+                elif vol_ratio >= 0.5:
+                    vm = 0.75 + (vol_ratio - 0.5) / 0.5 * 0.25
+                else:
+                    vm = 0.75
+                signal.confidence *= vm
+
+            # Regime discount
+            if regime is not None:
+                signal.confidence *= REGIME_CONFIDENCE_DISCOUNT.get(regime, 0.85)
+
+            # Confidence clamp [0, 0.80] then filter below 0.52
+            signal.confidence = round(max(0.0, min(0.80, signal.confidence)), 4)
+            if signal.confidence < 0.52:
+                signal = Signal(
+                    action=SignalAction.HOLD,
+                    confidence=0.0,
+                    reason=f"Weak signal filtered (conf {signal.confidence:.3f} < 0.52)",
+                    strategy=signal.strategy,
+                    indicators=signal.indicators,
+                )
+
+        return signal
+
     @staticmethod
     def _momentum(rsi, macd, bb, price, indicators,
-                  rsi_lower: float = 30.0, rsi_upper: float = 70.0) -> Signal:
-        if rsi_lower < rsi < rsi_upper and macd["histogram"] > 0 and price > bb["middle"]:
-            conf = min(0.95, 0.5 + abs(macd["histogram"]) / price * 1000)
+                  rsi_lower: float = 30.0, rsi_upper: float = 70.0,
+                  hist_buffer: list = None) -> Signal:
+        # ── RSI sub-confidence (momentum zones) ──
+        if 55 <= rsi <= 75:
+            rsi_dir, rsi_conf = "BUY", min(0.90, 0.50 + (rsi - 55) / 20 * 0.40)
+        elif 75 < rsi <= 80:
+            rsi_dir, rsi_conf = "BUY", 0.70 - (rsi - 75) / 5 * 0.20
+        elif 25 <= rsi <= 45:
+            rsi_dir, rsi_conf = "SELL", min(0.90, 0.50 + (45 - rsi) / 20 * 0.40)
+        elif 20 <= rsi < 25:
+            rsi_dir, rsi_conf = "SELL", 0.70 - (25 - rsi) / 5 * 0.20
+        else:
+            rsi_dir, rsi_conf = "HOLD", 0.0
+
+        # ── MACD sub-confidence (percentile-ranked, asset-agnostic) ──
+        macd_hist = macd["histogram"]
+        buf = hist_buffer if hist_buffer else []
+        if macd_hist > 0:
+            macd_dir = "BUY"
+        elif macd_hist < 0:
+            macd_dir = "SELL"
+        else:
+            macd_dir = "HOLD"
+
+        pctile = _percentile_rank(macd_hist, buf)
+        if pctile < 0.30:
+            macd_conf = 0.30 + pctile * 0.33
+        elif pctile < 0.70:
+            macd_conf = 0.40 + (pctile - 0.30) / 0.40 * 0.30
+        elif pctile < 0.95:
+            macd_conf = 0.70 + (pctile - 0.70) / 0.25 * 0.20
+        else:
+            macd_conf = 0.85
+        # Slope bonus: expanding histogram = accelerating momentum
+        # buf[-1] is the current value (just appended in generate()), buf[-2] is previous
+        if len(buf) >= 2 and abs(macd_hist) > abs(buf[-2]):
+            macd_conf = min(macd_conf * 1.10, 0.95)
+        elif len(buf) >= 2:
+            macd_conf *= 0.85
+        if macd_dir == "HOLD":
+            macd_conf = 0.0
+
+        # ── Bollinger %B sub-confidence ──
+        band_width = bb["upper"] - bb["lower"]
+        if band_width > 0:
+            pct_b = (price - bb["lower"]) / band_width
+        else:
+            pct_b = 0.5
+        if pct_b >= 0.70:
+            bb_dir, bb_conf = "BUY", 0.50 + min((pct_b - 0.70) * 1.3, 0.35)
+        elif pct_b <= 0.30:
+            bb_dir, bb_conf = "SELL", 0.50 + min((0.30 - pct_b) * 1.3, 0.35)
+        else:
+            bb_dir, bb_conf = "HOLD", 0.0
+
+        # ── Weighted composite (MACD=0.40, RSI=0.30, BB=0.30) ──
+        buy_score = 0.0
+        sell_score = 0.0
+        for d, c, w in [(rsi_dir, rsi_conf, 0.30), (macd_dir, macd_conf, 0.40), (bb_dir, bb_conf, 0.30)]:
+            if d == "BUY":
+                buy_score += w * c
+            elif d == "SELL":
+                sell_score += w * c
+
+        if buy_score > sell_score and buy_score > 0.15:
+            direction = SignalAction.BUY
+            agree, disagree = buy_score, sell_score
+        elif sell_score > buy_score and sell_score > 0.15:
+            direction = SignalAction.SELL
+            agree, disagree = sell_score, buy_score
+        else:
             return Signal(
-                action=SignalAction.BUY,
-                confidence=conf,
-                reason=f"Momentum confirmed: MACD hist {macd['histogram']:.2f} > 0, "
-                       f"price {_fmt_price(price)} > BB mid {_fmt_price(bb['middle'])}, RSI {rsi:.1f}",
-                strategy=Strategy.MOMENTUM,
-                indicators=indicators,
+                action=SignalAction.HOLD, confidence=0.0,
+                reason=f"Momentum: no consensus (buy={buy_score:.2f}, sell={sell_score:.2f}, RSI {rsi:.1f})",
+                strategy=Strategy.MOMENTUM, indicators=indicators,
             )
-        if rsi > rsi_upper + 5 or macd["histogram"] < 0:
-            return Signal(
-                action=SignalAction.SELL,
-                confidence=0.6,
-                reason=f"Momentum fading: RSI {rsi:.1f}" +
-                       (f" > 75 overbought" if rsi > 75 else f", MACD crossed negative"),
-                strategy=Strategy.MOMENTUM,
-                indicators=indicators,
-            )
-        return Signal(
-            action=SignalAction.HOLD,
-            confidence=0.5,
-            reason=f"Awaiting momentum confirmation (RSI {rsi:.1f}, MACD hist {macd['histogram']:.6f})",
-            strategy=Strategy.MOMENTUM,
-            indicators=indicators,
-        )
+
+        # Confluence bonus/penalty
+        total = agree + disagree
+        agreement_ratio = agree / total if total > 0 else 0.5
+        if agreement_ratio >= 0.85:
+            confluence = 1.15
+        elif agreement_ratio >= 0.70:
+            confluence = 1.05
+        elif agreement_ratio >= 0.55:
+            confluence = 0.95
+        else:
+            confluence = 0.80
+
+        conf = agree * confluence
+        reason = (f"Momentum {direction.value}: conf={conf:.3f} "
+                  f"(RSI {rsi:.1f}={rsi_dir}/{rsi_conf:.2f}, "
+                  f"MACD={macd_dir}/{macd_conf:.2f}@p{pctile:.0%}, "
+                  f"BB %B={pct_b:.2f}={bb_dir}/{bb_conf:.2f})")
+        return Signal(action=direction, confidence=conf, reason=reason,
+                      strategy=Strategy.MOMENTUM, indicators=indicators)
 
     @staticmethod
     def _mean_reversion(rsi, bb, price, indicators,
                         rsi_buy: float = 35.0, rsi_sell: float = 65.0) -> Signal:
+        band_width = bb["upper"] - bb["lower"]
+        pct_b = (price - bb["lower"]) / band_width if band_width > 0 else 0.5
         if price <= bb["lower"] and rsi < rsi_buy:
-            conf = min(0.9, 0.5 + (bb["middle"] - price) / bb["middle"] * 10)
+            conf = min(0.85, 0.50 + (1.0 - pct_b) * 0.40)
             return Signal(
                 action=SignalAction.BUY,
                 confidence=conf,
-                reason=f"Mean reversion BUY: price {_fmt_price(price)} at/below BB lower {_fmt_price(bb['lower'])}, RSI {rsi:.1f} oversold",
+                reason=f"Mean reversion BUY: %B={pct_b:.2f}, price {_fmt_price(price)} at/below BB lower {_fmt_price(bb['lower'])}, RSI {rsi:.1f}",
                 strategy=Strategy.MEAN_REVERSION,
                 indicators=indicators,
             )
         if price >= bb["upper"] and rsi > rsi_sell:
-            conf = min(0.9, 0.5 + (price - bb["middle"]) / bb["middle"] * 10)
+            conf = min(0.85, 0.50 + pct_b * 0.40)
             return Signal(
                 action=SignalAction.SELL,
                 confidence=conf,
-                reason=f"Mean reversion SELL: price {_fmt_price(price)} at/above BB upper {_fmt_price(bb['upper'])}, RSI {rsi:.1f} overbought",
+                reason=f"Mean reversion SELL: %B={pct_b:.2f}, price {_fmt_price(price)} at/above BB upper {_fmt_price(bb['upper'])}, RSI {rsi:.1f}",
                 strategy=Strategy.MEAN_REVERSION,
                 indicators=indicators,
             )
         return Signal(
             action=SignalAction.HOLD,
-            confidence=0.4,
+            confidence=0.0,
             reason=f"Price {_fmt_price(price)} within bands ({_fmt_price(bb['lower'])}–{_fmt_price(bb['upper'])}), no reversion signal",
             strategy=Strategy.MEAN_REVERSION,
             indicators=indicators,
@@ -418,24 +547,26 @@ class SignalGenerator:
         grid_spacing = (bb["upper"] - bb["lower"]) / 5 if bb["upper"] != bb["lower"] else 1
         dist_from_lower = (price - bb["lower"]) / grid_spacing if grid_spacing > 0 else 2.5
         if dist_from_lower < 1:
+            conf = min(0.75, 0.50 + (1.0 - dist_from_lower) * 0.25)
             return Signal(
                 action=SignalAction.BUY,
-                confidence=0.7,
+                confidence=conf,
                 reason=f"Grid BUY: price {_fmt_price(price)} in bottom zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
         if dist_from_lower > 4:
+            conf = min(0.75, 0.50 + (dist_from_lower - 4.0) * 0.25)
             return Signal(
                 action=SignalAction.SELL,
-                confidence=0.7,
+                confidence=conf,
                 reason=f"Grid SELL: price {_fmt_price(price)} in top zone (zone {dist_from_lower:.1f}/5)",
                 strategy=Strategy.GRID,
                 indicators=indicators,
             )
         return Signal(
             action=SignalAction.HOLD,
-            confidence=0.3,
+            confidence=0.0,
             reason=f"Grid HOLD: price in neutral zone {dist_from_lower:.1f}/5",
             strategy=Strategy.GRID,
             indicators=indicators,
@@ -444,24 +575,26 @@ class SignalGenerator:
     @staticmethod
     def _defensive(rsi, price, indicators) -> Signal:
         if rsi < 20:
+            conf = min(0.45, 0.30 + (20.0 - rsi) / 20.0 * 0.15)
             return Signal(
                 action=SignalAction.BUY,
-                confidence=0.4,
+                confidence=conf,
                 reason=f"Defensive: extreme oversold RSI {rsi:.1f} — cautious nibble",
                 strategy=Strategy.DEFENSIVE,
                 indicators=indicators,
             )
         if rsi > 50:
+            conf = min(0.80, 0.55 + (rsi - 50.0) / 50.0 * 0.25)
             return Signal(
                 action=SignalAction.SELL,
-                confidence=0.8,
+                confidence=conf,
                 reason=f"Defensive: RSI {rsi:.1f} > 50 in downtrend — reducing exposure",
                 strategy=Strategy.DEFENSIVE,
                 indicators=indicators,
             )
         return Signal(
             action=SignalAction.HOLD,
-            confidence=0.6,
+            confidence=0.0,
             reason=f"Defensive HOLD: preserving capital (RSI {rsi:.1f})",
             strategy=Strategy.DEFENSIVE,
             indicators=indicators,
@@ -844,6 +977,7 @@ class HydraEngine:
         self.halt_reason = ""
         self.gross_profit = 0.0
         self.gross_loss = 0.0
+        self._macd_hist_buffer: List[float] = []  # rolling last 100 histogram values
 
     def ingest_candle(self, raw: Dict[str, Any]) -> None:
         """Add a candle from kraken ohlc JSON output. Deduplicates by timestamp."""
@@ -896,6 +1030,14 @@ class HydraEngine:
         )
         strategy = REGIME_STRATEGY_MAP[regime]
 
+        # Compute volume ratio for signal quality scaling
+        vol_ratio = None
+        if len(self.candles) >= 2:
+            vol_current = self.candles[-1].volume
+            vol_window = self.candles[-20:]
+            vol_avg = sum(c.volume for c in vol_window) / len(vol_window)
+            vol_ratio = vol_current / vol_avg if vol_avg > 0 else 1.0
+
         # Generate signal
         signal = SignalGenerator.generate(
             strategy, self.prices, self.candles,
@@ -903,6 +1045,9 @@ class HydraEngine:
             momentum_rsi_upper=self.momentum_rsi_upper,
             mean_reversion_rsi_buy=self.mean_reversion_rsi_buy,
             mean_reversion_rsi_sell=self.mean_reversion_rsi_sell,
+            regime=regime,
+            vol_ratio=vol_ratio,
+            hist_buffer=self._macd_hist_buffer,
         )
 
         # Execute if actionable (skip when generate_only for external review)
