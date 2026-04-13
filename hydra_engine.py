@@ -322,7 +322,6 @@ class SignalGenerator:
     @staticmethod
     def generate(
         strategy: Strategy, prices: List[float], candles: List[Candle],
-        momentum_rsi_lower: float = 30.0, momentum_rsi_upper: float = 70.0,
         mean_reversion_rsi_buy: float = 35.0, mean_reversion_rsi_sell: float = 65.0,
         regime: 'Regime' = None, vol_ratio: float = None,
         hist_buffer: list = None,
@@ -361,8 +360,6 @@ class SignalGenerator:
 
         if strategy == Strategy.MOMENTUM:
             signal = SignalGenerator._momentum(rsi, macd, bb, current, indicators,
-                                               rsi_lower=momentum_rsi_lower,
-                                               rsi_upper=momentum_rsi_upper,
                                                hist_buffer=hist_buffer)
         elif strategy == Strategy.MEAN_REVERSION:
             signal = SignalGenerator._mean_reversion(rsi, bb, current, indicators,
@@ -399,7 +396,7 @@ class SignalGenerator:
             if regime is not None:
                 signal.confidence *= REGIME_CONFIDENCE_DISCOUNT.get(regime, 0.85)
 
-            # Confidence clamp [0, 0.80] then filter below 0.52
+            # Confidence clamp [0.52, 0.80] — floor filters weak signals to HOLD
             signal.confidence = round(max(0.0, min(0.80, signal.confidence)), 4)
             if signal.confidence < 0.52:
                 signal = Signal(
@@ -414,7 +411,6 @@ class SignalGenerator:
 
     @staticmethod
     def _momentum(rsi, macd, bb, price, indicators,
-                  rsi_lower: float = 30.0, rsi_upper: float = 70.0,
                   hist_buffer: list = None) -> Signal:
         # ── RSI sub-confidence (momentum zones) ──
         if 55 <= rsi <= 75:
@@ -845,7 +841,11 @@ class CrossPairCoordinator:
         self.regime_history: Dict[str, List[str]] = {p: [] for p in pairs}
 
     def update(self, pair: str, regime: str):
-        """Record regime state for a pair. Keeps last HISTORY_SIZE entries."""
+        """Record regime state for a pair. Keeps last HISTORY_SIZE entries.
+
+        regime_history is available for future use (e.g., trend persistence
+        detection) but get_overrides() currently uses only live state.
+        """
         history = self.regime_history.setdefault(pair, [])
         history.append(regime)
         if len(history) > self.HISTORY_SIZE:
@@ -945,8 +945,6 @@ class HydraEngine:
                  volatile_atr_pct: float = 4.0,
                  volatile_bb_width: float = 0.08,
                  trend_ema_ratio: float = 1.005,
-                 momentum_rsi_lower: float = 30.0,
-                 momentum_rsi_upper: float = 70.0,
                  mean_reversion_rsi_buy: float = 35.0,
                  mean_reversion_rsi_sell: float = 65.0):
         self.asset = asset
@@ -959,8 +957,6 @@ class HydraEngine:
         self.volatile_atr_pct = volatile_atr_pct
         self.volatile_bb_width = volatile_bb_width
         self.trend_ema_ratio = trend_ema_ratio
-        self.momentum_rsi_lower = momentum_rsi_lower
-        self.momentum_rsi_upper = momentum_rsi_upper
         self.mean_reversion_rsi_buy = mean_reversion_rsi_buy
         self.mean_reversion_rsi_sell = mean_reversion_rsi_sell
         self.candles: List[Candle] = []
@@ -1041,8 +1037,6 @@ class HydraEngine:
         # Generate signal
         signal = SignalGenerator.generate(
             strategy, self.prices, self.candles,
-            momentum_rsi_lower=self.momentum_rsi_lower,
-            momentum_rsi_upper=self.momentum_rsi_upper,
             mean_reversion_rsi_buy=self.mean_reversion_rsi_buy,
             mean_reversion_rsi_sell=self.mean_reversion_rsi_sell,
             regime=regime,
@@ -1107,6 +1101,8 @@ class HydraEngine:
                     self.position.avg_entry = current_price
                     self.position.params_at_entry = self.snapshot_params()
 
+                if cost > self.balance:
+                    return None  # Insufficient balance
                 self.balance -= cost
 
                 trade = Trade(
@@ -1226,8 +1222,6 @@ class HydraEngine:
             "volatile_atr_pct": self.volatile_atr_pct,
             "volatile_bb_width": self.volatile_bb_width,
             "trend_ema_ratio": self.trend_ema_ratio,
-            "momentum_rsi_lower": self.momentum_rsi_lower,
-            "momentum_rsi_upper": self.momentum_rsi_upper,
             "mean_reversion_rsi_buy": self.mean_reversion_rsi_buy,
             "mean_reversion_rsi_sell": self.mean_reversion_rsi_sell,
             "min_confidence_threshold": self.sizer.min_confidence,
@@ -1241,10 +1235,6 @@ class HydraEngine:
             self.volatile_bb_width = params["volatile_bb_width"]
         if "trend_ema_ratio" in params:
             self.trend_ema_ratio = params["trend_ema_ratio"]
-        if "momentum_rsi_lower" in params:
-            self.momentum_rsi_lower = params["momentum_rsi_lower"]
-        if "momentum_rsi_upper" in params:
-            self.momentum_rsi_upper = params["momentum_rsi_upper"]
         if "mean_reversion_rsi_buy" in params:
             self.mean_reversion_rsi_buy = params["mean_reversion_rsi_buy"]
         if "mean_reversion_rsi_sell" in params:
@@ -1388,7 +1378,7 @@ class HydraEngine:
                     reason=str(raw.get("reason", "")),
                     confidence=float(raw.get("confidence", 0.0)),
                     strategy=str(raw.get("strategy", "MOMENTUM")),
-                    timestamp=float(raw.get("timestamp", time.time())),
+                    timestamp=float(raw.get("timestamp") or 0),
                     profit=raw.get("profit"),
                     params_at_entry=raw.get("params_at_entry"),
                 ))
@@ -1404,7 +1394,7 @@ class HydraEngine:
                     open=float(raw.get("open", 0)), high=float(raw.get("high", 0)),
                     low=float(raw.get("low", 0)), close=float(raw.get("close", 0)),
                     volume=float(raw.get("volume", 0.0)),
-                    timestamp=float(raw.get("timestamp", time.time())),
+                    timestamp=float(raw.get("timestamp") or 0),
                 )
                 self.candles.append(c)
                 self.prices.append(c.close)

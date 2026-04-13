@@ -236,6 +236,15 @@ def validate_journal_entry(entry: dict[str, Any],
         if not lifecycle.get("terminal_reason"):
             errors.append("PLACEMENT_FAILED requires non-empty terminal_reason")
 
+    if state == "PARTIALLY_FILLED":
+        vol = lifecycle.get("vol_exec", 0)
+        if vol <= 0:
+            errors.append(f"PARTIALLY_FILLED requires vol_exec > 0, got {vol}")
+        if placed_amount and vol >= placed_amount:
+            errors.append(f"PARTIALLY_FILLED requires vol_exec < intent.amount, got {vol} >= {placed_amount}")
+        if lifecycle.get("avg_fill_price") is None:
+            errors.append("PARTIALLY_FILLED requires non-null avg_fill_price")
+
     if state in ("CANCELLED_UNFILLED", "REJECTED"):
         if not lifecycle.get("terminal_reason"):
             errors.append(f"{state} requires non-empty terminal_reason")

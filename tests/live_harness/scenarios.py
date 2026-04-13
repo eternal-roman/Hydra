@@ -38,8 +38,8 @@ from tests.live_harness.state_comparator import (
 )
 from tests.live_harness.stubs import (
     StubRun, build_dispatcher,
-    kraken_ticker, kraken_ticker_error, kraken_ticker_missing_fields,
-    kraken_order_success_scalar, kraken_order_success_list,
+    kraken_ticker,
+    kraken_order_success_list,
     kraken_order_success_nested, kraken_order_success_missing_txid,
     kraken_order_success_empty_list,
     kraken_order_error, kraken_order_timeout, kraken_order_json_error,

@@ -385,7 +385,8 @@ class HydraBrain:
             # cut off, the JSON will be incomplete and unparseable.
             if response.stop_reason == "max_tokens":
                 print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}) — increasing tolerance")
-            return text, response.usage.input_tokens, response.usage.output_tokens
+            usage = getattr(response, "usage", None)
+            return text, getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0)
 
     def _run_analyst(self, state: Dict) -> tuple:
         """Market Analyst (Claude). Returns (parsed_output, in_tokens, out_tokens)."""

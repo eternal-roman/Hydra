@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Component } from "react";
 import "./App.css";
 
 // ═══════════════════════════════════════════════════════════════
@@ -59,6 +59,33 @@ const fmtInd = (v) => {
   if (Math.abs(v) < 1) return v.toFixed(4);
   return v.toFixed(2);
 };
+
+// ─── Error Boundary ───
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ background: COLORS.bg, color: COLORS.danger, padding: 40, fontFamily: mono, minHeight: "100vh" }}>
+          <h2 style={{ color: COLORS.text }}>Dashboard Error</h2>
+          <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", color: COLORS.textMuted }}>{String(this.state.error)}</pre>
+          <button onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ marginTop: 16, padding: "8px 16px", background: COLORS.accent, color: COLORS.bg, border: "none", borderRadius: 4, cursor: "pointer", fontFamily: mono }}>
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ─── Small Components ───
 
@@ -165,7 +192,7 @@ function ConnectionStatus({ connected, tick }) {
 
 // ─── Main App ───
 
-export default function App() {
+function AppInner() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
@@ -355,14 +382,10 @@ export default function App() {
                             </span></span>
                           );
                         })()}
+                        {ps.spread && ps.spread.spread_bps != null && (
+                          <span>Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(ps.spread.spread_bps || 0).toFixed(1)}</span> bps</span>
+                        )}
                       </div>
-                    )}
-
-                    {/* Spread from TickerStream */}
-                    {ps.spread && ps.spread.spread_bps != null && (
-                      <span style={{ marginLeft: 12, color: COLORS.textMuted, fontSize: 11 }}>
-                        Spread <span style={{ color: COLORS.text, fontWeight: 600 }}>{(ps.spread.spread_bps || 0).toFixed(1)}</span> bps
-                      </span>
                     )}
 
                     {/* AI Reasoning */}
@@ -426,16 +449,16 @@ export default function App() {
                     const lifecycle = entry.lifecycle || {};
                     const intent = entry.intent || {};
                     const decision = entry.decision || {};
-                    const state = lifecycle.state || "PLACED";
-                    const isFilled = state === "FILLED";
-                    const isTerminal = state === "FILLED" || state === "PARTIALLY_FILLED";
-                    const icon = isFilled ? "\u2713" : (state === "PLACED" ? "\u22ef" : "\u2717");
-                    const iconColor = isFilled ? COLORS.accent : (state === "PLACED" ? COLORS.textDim : COLORS.danger);
+                    const lcState = lifecycle.state || "PLACED";
+                    const isFilled = lcState === "FILLED";
+                    const isTerminal = lcState === "FILLED" || lcState === "PARTIALLY_FILLED";
+                    const icon = isFilled ? "\u2713" : (lcState === "PLACED" ? "\u22ef" : "\u2717");
+                    const iconColor = isFilled ? COLORS.accent : (lcState === "PLACED" ? COLORS.textDim : COLORS.danger);
                     const amount = intent.amount || 0;
                     const price = lifecycle.avg_fill_price || intent.limit_price || 0;
                     const reasonLine = lifecycle.terminal_reason
-                      ? `${state}: ${lifecycle.terminal_reason}`
-                      : (decision.reason || state);
+                      ? `${lcState}: ${lifecycle.terminal_reason}`
+                      : (decision.reason || lcState);
                     return (
                       <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderBottom: `1px solid ${COLORS.panelBorder}`, fontSize: 9, fontFamily: mono }}>
                         <span style={{ width: 14, fontWeight: 700, color: iconColor }}>{icon}</span>
@@ -467,7 +490,7 @@ export default function App() {
                       {a.asset}{a.staked && <span style={{ fontSize: 8, color: COLORS.warn, marginLeft: 4, textTransform: "uppercase" }}>staked</span>}
                     </span>
                     <span style={{ display: "flex", gap: 8 }}>
-                      <span style={{ color: COLORS.textMuted }}>{a.amount.toFixed(6)}</span>
+                      <span style={{ color: COLORS.textMuted }}>{(a.amount ?? 0).toFixed(6)}</span>
                       {a.usd_value > 0 && <span style={{ color: COLORS.text, fontWeight: 600 }}>${a.usd_value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
                     </span>
                   </div>
@@ -603,4 +626,8 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+export default function App() {
+  return <ErrorBoundary><AppInner /></ErrorBoundary>;
 }

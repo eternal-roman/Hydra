@@ -190,12 +190,12 @@ class TestClamping:
         t = make_tracker()
         extreme_params = dict(DEFAULT_PARAMS)
         extreme_params["volatile_atr_pct"] = 100.0  # Way above max bound of 8.0
-        extreme_params["momentum_rsi_lower"] = 1.0  # Way below min bound of 10.0
+        extreme_params["mean_reversion_rsi_buy"] = 1.0  # Way below min bound of 10.0
         record_trades(t, n_wins=20, n_losses=0, win_params=extreme_params)
         t.update()
 
         assert t.current_params["volatile_atr_pct"] <= PARAM_BOUNDS["volatile_atr_pct"][1]
-        assert t.current_params["momentum_rsi_lower"] >= PARAM_BOUNDS["momentum_rsi_lower"][0]
+        assert t.current_params["mean_reversion_rsi_buy"] >= PARAM_BOUNDS["mean_reversion_rsi_buy"][0]
 
     def test_all_params_within_bounds_after_update(self):
         t = make_tracker()
@@ -278,8 +278,6 @@ class TestEngineIntegration:
         new_params = {
             "volatile_atr_pct": 5.5,
             "trend_ema_ratio": 1.008,
-            "momentum_rsi_lower": 25.0,
-            "momentum_rsi_upper": 75.0,
             "mean_reversion_rsi_buy": 30.0,
             "mean_reversion_rsi_sell": 70.0,
             "min_confidence_threshold": 0.50,
@@ -287,8 +285,6 @@ class TestEngineIntegration:
         engine.apply_tuned_params(new_params)
         assert engine.volatile_atr_pct == 5.5
         assert engine.trend_ema_ratio == 1.008
-        assert engine.momentum_rsi_lower == 25.0
-        assert engine.momentum_rsi_upper == 75.0
         assert engine.mean_reversion_rsi_buy == 30.0
         assert engine.mean_reversion_rsi_sell == 70.0
         assert engine.sizer.min_confidence == 0.50

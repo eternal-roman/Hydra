@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
-        run: pip install "anthropic>=0.40,<1.0" "openai>=1.50,<2.0"
+        run: pip install "anthropic>=0.40,<1.0" "openai>=1.50,<2.0" websockets
 
       - name: Run engine test suite
         run: python tests/test_engine.py

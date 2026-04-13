@@ -24,7 +24,7 @@ class RollbackDiff(AssertionError):
 
 
 def capture_engine_state(engine) -> dict[str, Any]:
-    """Capture the 13 fields that must be identical before/after a failed order.
+    """Capture the 15 fields that must be identical before/after a failed order.
 
     This captures MORE than `snapshot_position()` so the comparator can also
     verify that restore_position correctly restored each field.
@@ -43,6 +43,8 @@ def capture_engine_state(engine) -> dict[str, Any]:
         "peak_equity": engine.peak_equity,
         "max_drawdown": engine.max_drawdown,
         "halted": engine.halted,
+        "gross_profit": engine.gross_profit,
+        "gross_loss": engine.gross_loss,
     }
 
 

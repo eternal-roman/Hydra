@@ -168,12 +168,14 @@ class KrakenCLI:
         (Kraken accepts trailing zeros as insignificant but rejects meaningful
         decimals beyond the pair's precision).
         """
-        decimals = (
-            KrakenCLI.PRICE_DECIMALS.get(pair)
-            or KrakenCLI.PRICE_DECIMALS.get(pair.replace("/", ""))
-            or KrakenCLI.PRICE_DECIMALS.get(KrakenCLI._resolve_pair(pair))
-            or KrakenCLI.PRICE_DECIMALS_DEFAULT
-        )
+        d = KrakenCLI.PRICE_DECIMALS.get(pair)
+        if d is None:
+            d = KrakenCLI.PRICE_DECIMALS.get(pair.replace("/", ""))
+        if d is None:
+            d = KrakenCLI.PRICE_DECIMALS.get(KrakenCLI._resolve_pair(pair))
+        if d is None:
+            d = KrakenCLI.PRICE_DECIMALS_DEFAULT
+        decimals = d
         rounded = round(float(price), decimals)
         return f"{rounded:.8f}"
 
@@ -1733,7 +1735,7 @@ class HydraAgent:
                 merged_count += 1
             else:
                 # Rolling file wins on conflict — see docstring.
-                if seen[k] is not e:
+                if seen[k] != e:
                     seen[k] = e
                     overwritten_count += 1
 
@@ -2071,13 +2073,13 @@ class HydraAgent:
                         state = all_states.get(pair)
                         if not state:
                             continue
-                        sig = state.get("signal", {})
+                        esig = state.get("signal", {})
                         engine = self.engines[pair]
                         pre_trade_snap = engine.snapshot_position()
                         trade = engine.execute_signal(
-                            action=sig.get("action", "HOLD"),
-                            confidence=sig.get("confidence", 0),
-                            reason=sig.get("reason", ""),
+                            action=esig.get("action", "HOLD"),
+                            confidence=esig.get("confidence", 0),
+                            reason=esig.get("reason", ""),
                             strategy=state.get("strategy", "MOMENTUM"),
                         )
                         if trade:
@@ -2606,7 +2608,7 @@ class HydraAgent:
             engine_ref=self.engines[pair],
             pre_trade_snapshot=state.get("_pre_trade_snapshot") if isinstance(state, dict) else None,
         )
-        limit_price = entry["intent"]["limit_price"] or float(trade.get("price") or 0)
+        limit_price = entry["intent"]["limit_price"] or float(trade.get("price") or 0) or 1.0
         synthetic_fill = {
             "exec_type": "trade",
             "exec_id": f"{paper_order_id}-fill",
@@ -2702,7 +2704,7 @@ class HydraAgent:
                     # Terminal — finalize journal entry
                     vol_exec = float(order_info.get("vol_exec", 0))
                     placed = entry.get("intent", {}).get("amount", 0)
-                    raw_price = float(order_info.get("price", 0))
+                    raw_price = float(order_info.get("avg_price") or order_info.get("price", 0))
                     avg_price = raw_price if raw_price > 0 else None
                     fee = float(order_info.get("fee", 0))
 
@@ -2949,6 +2951,21 @@ class HydraAgent:
         if not self._place_order(buy_pair, buy_trade, buy_state):
             buy_engine.restore_position(buy_snap)
             print(f"  [ROLLBACK] {buy_pair}: engine state rolled back after failed swap buy")
+            # Cancel the orphaned sell leg to avoid a one-legged swap.
+            # The sell journal entry is the most recently appended entry with
+            # the matching swap_id.
+            sell_oid = None
+            for je in reversed(self.order_journal):
+                if je.get("intent", {}).get("swap_id") == swap_id:
+                    sell_oid = je.get("order_ref", {}).get("order_id")
+                    break
+            if sell_oid and sell_oid != "unknown" and not self.paper:
+                try:
+                    KrakenCLI.cancel_order(sell_oid)
+                    time.sleep(2)
+                    print(f"  [SWAP] Cancelled orphaned sell order {sell_oid} on {sell_pair}")
+                except Exception as cancel_err:
+                    print(f"  [WARN] Failed to cancel orphaned sell {sell_oid}: {cancel_err}")
             return
 
         # Both legs placed — the swap_id tag on each leg's journal entry
@@ -3199,9 +3216,9 @@ class HydraAgent:
 
     def _print_tick_status(self, pair: str, state: dict):
         """Print concise tick status."""
-        s = state["signal"]
-        p = state["portfolio"]
-        pos = state["position"]
+        s = state.get("signal", {})
+        p = state.get("portfolio", {})
+        pos = state.get("position", {})
         is_usd = pair.endswith("USDC") or pair.endswith("USD")
         cur = "$" if is_usd else ""
 
