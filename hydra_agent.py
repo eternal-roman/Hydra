@@ -1452,6 +1452,7 @@ class HydraAgent:
         self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
         self._last_brain_candle_ts: Dict[str, float] = {}  # Per-pair: last candle timestamp brain evaluated
+        self._last_ai_decision: Dict[str, Dict] = {}         # Per-pair: last brain decision for dashboard persistence
         # Portfolio-level awareness
         self._current_portfolio_summary: Dict[str, Any] = {}  # Aggregate stats computed each tick
         self._portfolio_guidance: Optional[str] = None         # Latest Grok portfolio assessment text
@@ -2112,6 +2113,10 @@ class HydraAgent:
                         if state["signal"]["action"] != "HOLD" and self.brain:
                             brain_pairs.append((pair, state))
                         else:
+                            # Inject cached brain decision for dashboard persistence
+                            cached = self._last_ai_decision.get(pair)
+                            if cached and self.brain:
+                                state["ai_decision"] = cached
                             all_states[pair] = state
 
                 if brain_pairs:
@@ -2410,6 +2415,10 @@ class HydraAgent:
     def _apply_brain(self, pair: str, state: dict, all_engine_states: dict) -> dict:
         """Phase 2: Run brain with full cross-pair context. Mutates state in place."""
         if not self.brain or state["signal"]["action"] == "HOLD":
+            # Inject cached decision for dashboard persistence (brain didn't fire)
+            cached = self._last_ai_decision.get(pair)
+            if cached:
+                state["ai_decision"] = cached
             return state
 
         # Pre-brain filter: skip brain for BUY signals that can't produce tradeable order size
@@ -2419,6 +2428,9 @@ class HydraAgent:
                 state["signal"]["confidence"], engine.balance, state["price"], pair,
             )
             if test_size == 0:
+                cached = self._last_ai_decision.get(pair)
+                if cached:
+                    state["ai_decision"] = cached
                 return state  # Signal too weak to trade; don't waste brain tokens
 
         # Candle-freshness gate: only invoke brain when the pair has a NEW candle.
@@ -2429,6 +2441,9 @@ class HydraAgent:
         current_candle_ts = candles[-1]["t"] if candles else 0.0
         last_ts = self._last_brain_candle_ts.get(pair, 0.0)
         if current_candle_ts > 0 and current_candle_ts == last_ts:
+            cached = self._last_ai_decision.get(pair)
+            if cached:
+                state["ai_decision"] = cached
             return state  # Same candle as last brain evaluation — skip
 
         # Inject cross-pair triangle context and portfolio-level awareness
@@ -2466,6 +2481,9 @@ class HydraAgent:
                 "tokens_used": decision.tokens_used,
                 "latency_ms": round(decision.latency_ms, 0),
             }
+            # Cache for dashboard persistence on ticks where brain doesn't fire
+            self._last_ai_decision[pair] = state["ai_decision"]
+
             # Mark candle as evaluated only when brain ran LLM calls (not fallback).
             # On fallback (budget exceeded, API down), leave timestamp unchanged so
             # the next tick retries this candle.
