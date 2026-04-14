@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.8.3] — 2026-04-14
+
+### Bug Fix
+
+- **fix(agent):** Add real-balance preflight check in `_place_order` for BUY orders —
+  checks actual exchange quote-currency balance (via BalanceStream / cached REST) before
+  burning API calls on orders that will be rejected for insufficient funds. Primarily
+  affects SOL/BTC where the engine's internal BTC balance is derived from a USD split
+  and may not reflect actual BTC holdings on the account. Rejects immediately with
+  `insufficient_{QUOTE}_balance` journal reason, saving rate-limit budget and brain tokens.
+
+---
+
 ## [2.8.2] — 2026-04-13
 
 ### Dashboard Reporting Fixes

@@ -2537,6 +2537,29 @@ class HydraAgent:
         entry = self._build_journal_entry(pair, trade, state)
         pre_trade_snap = state.get("_pre_trade_snapshot") if isinstance(state, dict) else None
 
+        # ─── Real-balance preflight (BUY only) ───────────────────────────
+        # The engine sizes orders against its internal bookkeeping balance,
+        # which may not reflect actual exchange holdings — especially for
+        # non-USD-quoted pairs like SOL/BTC where the engine's BTC balance
+        # is derived from a USD split, not real BTC on the account.
+        # Check the actual quote currency balance before burning API calls.
+        if action == "buy":
+            quote = pair.split("/")[1]
+            real_bal = self._get_real_quote_balance(quote)
+            if real_bal is not None:
+                cost_estimate = amount * (trade.get("price", 0) or 0)
+                costmin = PositionSizer.MIN_COST.get(quote, 0.5)
+                if real_bal < costmin or (cost_estimate > 0 and real_bal < cost_estimate):
+                    is_usd = quote in ("USDC", "USD")
+                    fmt = f"${real_bal:,.2f}" if is_usd else f"{real_bal:.8f}"
+                    cost_fmt = f"${cost_estimate:,.2f}" if is_usd else f"{cost_estimate:.8f}"
+                    print(f"  [TRADE] Insufficient {quote} balance ({fmt}) for {pair} "
+                          f"BUY cost ~{cost_fmt} — skipping")
+                    self._finalize_failed_entry(
+                        entry, terminal_reason=f"insufficient_{quote}_balance",
+                    )
+                    return False
+
         # ─── Ticker fetch (WS stream only — refuse to trade without live price) ───
         ticker = self.ticker_stream.latest_ticker(pair) if self.ticker_stream.healthy else None
         if not ticker or "bid" not in ticker:
@@ -3075,6 +3098,29 @@ class HydraAgent:
                     prices["BTC"] = prices["SOL"] / sol_per_btc
         return prices
 
+    def _get_real_quote_balance(self, quote: str) -> Optional[float]:
+        """Return the actual exchange balance for a quote currency.
+
+        Prefers the real-time BalanceStream; falls back to the cached REST
+        balance from startup.  Returns None only if no balance data is
+        available at all (should not happen after warmup).
+        """
+        bal = None
+        if not self.paper and self.balance_stream.healthy:
+            bal = self.balance_stream.latest_balances()
+        if not bal:
+            bal = getattr(self, "_cached_balance", None)
+        if not bal:
+            return None
+        # Sum all non-staked holdings that normalize to the quote currency.
+        total = 0.0
+        for asset, amount in bal.items():
+            if KrakenCLI._is_staked(asset):
+                continue
+            if KrakenCLI._normalize_asset(asset) == quote:
+                total += amount
+        return total
+
     def _extract_fee_tier(self, vol_response: dict) -> dict:
         """Normalize a `kraken volume` response into a compact fee-tier dict.
 
@@ -3515,7 +3561,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.8.2",
+            "version": "2.8.3",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
