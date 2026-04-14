@@ -3470,19 +3470,21 @@ class HydraAgent:
     def _compute_pair_realized_pnl(self, pair: str) -> float:
         """Compute realized P&L for a pair from the order journal.
 
-        Sums sell revenue minus buy cost from every FILLED and
-        PARTIALLY_FILLED entry for the pair, using lifecycle.vol_exec and
-        lifecycle.avg_fill_price (the execution-stream truth, not the
-        bot's placement intent). Counts only actual fills — PLACED,
-        PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED entries are
-        skipped because they never produced exchange-side quantity.
+        Uses average-cost-basis accounting: each sell's cost is valued at
+        the running weighted-average buy price, so only *closed* round-trip
+        profit/loss is reflected.  Unsold inventory cost stays out of
+        realized P&L — it belongs in unrealized (pos_size * (price - avg_entry)).
+
+        Only counts FILLED / PARTIALLY_FILLED entries — PLACED,
+        PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED are skipped.
 
         Accurate across resumes because it reads directly from on-disk
         journal state, not engine balances which get pooled and re-split.
         """
         FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
-        buy_cost = 0.0
-        sell_revenue = 0.0
+        total_buy_cost = 0.0
+        total_buy_vol = 0.0
+        realized = 0.0
         for entry in self.order_journal:
             if entry.get("pair") != pair:
                 continue
@@ -3501,10 +3503,16 @@ class HydraAgent:
                 continue
             side = entry.get("side")
             if side == "BUY":
-                buy_cost += vol * price
+                total_buy_cost += vol * price
+                total_buy_vol += vol
             elif side == "SELL":
-                sell_revenue += vol * price
-        return sell_revenue - buy_cost
+                avg_buy = (total_buy_cost / total_buy_vol) if total_buy_vol > 0 else 0
+                cost_of_sold = vol * avg_buy
+                realized += vol * price - cost_of_sold
+                # Reduce the running buy pool by the sold quantity
+                total_buy_cost = max(0.0, total_buy_cost - cost_of_sold)
+                total_buy_vol = max(0.0, total_buy_vol - vol)
+        return realized
 
     def _export_competition_results(self, base_dir: str, ts: int):
         """Export a competition_results.json for submission proof."""
