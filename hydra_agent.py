@@ -1452,6 +1452,12 @@ class HydraAgent:
         self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
         self._last_brain_candle_ts: Dict[str, float] = {}  # Per-pair: last candle timestamp brain evaluated
+        # Portfolio-level awareness
+        self._current_portfolio_summary: Dict[str, Any] = {}  # Aggregate stats computed each tick
+        self._portfolio_guidance: Optional[str] = None         # Latest Grok portfolio assessment text
+        self._portfolio_candle_epoch: Dict[str, float] = {}    # Per-pair candle ts for epoch tracking
+        self._portfolio_epoch_count: int = 0                   # Epochs since last portfolio review
+        self._last_portfolio_review_regimes: Dict[str, str] = {}  # Regimes at last review
         # Monotonic client tag seeded from wall-clock to avoid collisions
         # across restarts; flows into Kraken as --userref and comes back on
         # the WS executions stream as order_userref for correlation.
@@ -2044,6 +2050,59 @@ class HydraAgent:
                     if state["signal"]["confidence"] < 0.0:
                         state["signal"]["confidence"] = 0.0
 
+                # Phase 1.9: Compute aggregate portfolio context for brain
+                try:
+                    self._current_portfolio_summary = self._build_portfolio_summary()
+                except Exception:
+                    self._current_portfolio_summary = {}
+
+                # Phase 1.95: Periodic portfolio strategist review (Grok)
+                # Track candle epoch — advances when ALL pairs have new timestamps
+                epoch_advanced = True
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if not state:
+                        epoch_advanced = False
+                        break
+                    candles = state.get("candles", [])
+                    ts = candles[-1]["t"] if candles else 0
+                    prev = self._portfolio_candle_epoch.get(pair, 0.0)
+                    if ts <= prev:
+                        epoch_advanced = False
+                        break
+                if epoch_advanced:
+                    for pair in self.pairs:
+                        state = engine_states.get(pair)
+                        candles = state.get("candles", []) if state else []
+                        self._portfolio_candle_epoch[pair] = candles[-1]["t"] if candles else 0
+                    self._portfolio_epoch_count += 1
+
+                # Check for multi-pair regime transitions (2+ pairs changed)
+                regime_changes = 0
+                for pair in self.pairs:
+                    state = engine_states.get(pair)
+                    if state:
+                        current = state.get("regime", "RANGING")
+                        if self._last_portfolio_review_regimes.get(pair) != current:
+                            regime_changes += 1
+                force_portfolio_review = regime_changes >= 2
+
+                should_review = (
+                    (self._portfolio_epoch_count >= 3 or force_portfolio_review)
+                    and self.brain and self.brain.has_strategist
+                )
+                if should_review:
+                    review_state = self._build_portfolio_review_state(engine_states)
+                    guidance = self.brain.run_portfolio_review(review_state)
+                    if guidance:
+                        self._portfolio_guidance = guidance
+                        print(f"  [PORTFOLIO] New guidance: {guidance[:100]}...")
+                    self._portfolio_epoch_count = 0
+                    self._last_portfolio_review_regimes = {
+                        p: (engine_states.get(p) or {}).get("regime", "RANGING")
+                        for p in self.pairs
+                    }
+
                 # Phase 2: Run brain with full cross-pair context (parallel across pairs)
                 all_states = {}
                 brain_pairs = []
@@ -2372,8 +2431,11 @@ class HydraAgent:
         if current_candle_ts > 0 and current_candle_ts == last_ts:
             return state  # Same candle as last brain evaluation — skip
 
-        # Inject cross-pair triangle context before deliberation
+        # Inject cross-pair triangle context and portfolio-level awareness
         state["triangle_context"] = self._build_triangle_context(pair, all_engine_states)
+        state["portfolio_summary"] = self._current_portfolio_summary
+        if self._portfolio_guidance:
+            state["portfolio_guidance"] = self._portfolio_guidance
 
         # Fetch spread data for risk assessment. Prefer WS ticker (no API call).
         try:
@@ -2465,6 +2527,115 @@ class HydraAgent:
                 "BTC": round(btc_exposure, 6),
             },
         }
+
+    # ─── Portfolio-level awareness ───
+
+    def _build_portfolio_summary(self) -> dict:
+        """Compute aggregate portfolio stats across all pairs for brain context."""
+        asset_prices = self._get_asset_prices()
+        total_equity_usd = 0.0
+        total_realized_usd = 0.0
+        total_unrealized_usd = 0.0
+        total_initial_usd = 0.0
+        agg_wins = 0
+        agg_losses = 0
+        agg_trades = 0
+        worst_dd = 0.0
+        per_pair_pnl: Dict[str, float] = {}
+
+        for pair in self.pairs:
+            engine = self.engines.get(pair)
+            if not engine:
+                continue
+            price = engine.prices[-1] if engine.prices else 0
+            equity = engine.balance + (engine.position.size * price)
+            quote = pair.split("/")[1] if "/" in pair else "USD"
+            quote_usd = asset_prices.get(quote, 1.0)
+
+            # P&L
+            realized = self._compute_pair_realized_pnl(pair)
+            unrealized = (engine.position.size * (price - engine.position.avg_entry)
+                          if engine.position.size > 0 else 0)
+            total_realized_usd += realized * quote_usd
+            total_unrealized_usd += unrealized * quote_usd
+            total_equity_usd += equity * quote_usd
+            total_initial_usd += engine.initial_balance * quote_usd
+            per_pair_pnl[pair] = round((realized + unrealized) * quote_usd, 2)
+
+            # Aggregate performance
+            agg_wins += engine.win_count
+            agg_losses += engine.loss_count
+            agg_trades += engine.total_trades
+            if engine.max_drawdown > worst_dd:
+                worst_dd = engine.max_drawdown
+
+        total_pnl_usd = total_realized_usd + total_unrealized_usd
+        total_pnl_pct = (total_pnl_usd / total_initial_usd * 100) if total_initial_usd > 0 else 0
+        agg_wl = agg_wins + agg_losses
+        agg_win_rate = (agg_wins / agg_wl * 100) if agg_wl > 0 else 0
+
+        # Net USD exposure
+        net_exposure_usd = 0.0
+        for pair in self.pairs:
+            engine = self.engines.get(pair)
+            if engine and engine.position.size > 0:
+                price = engine.prices[-1] if engine.prices else 0
+                quote = pair.split("/")[1] if "/" in pair else "USD"
+                quote_usd = asset_prices.get(quote, 1.0)
+                net_exposure_usd += engine.position.size * price * quote_usd
+
+        # Recent trades from journal (last 10 filled, all pairs)
+        FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
+        recent_trades = []
+        for entry in reversed(self.order_journal):
+            lc = entry.get("lifecycle") or {}
+            if lc.get("state") not in FILL_STATES:
+                continue
+            recent_trades.append({
+                "pair": entry.get("pair", "?"),
+                "side": entry.get("side", "?"),
+                "price": lc.get("avg_fill_price") or (entry.get("intent") or {}).get("limit_price") or 0,
+                "vol": lc.get("vol_exec") or 0,
+                "time": (entry.get("placed_at") or "")[:16],
+            })
+            if len(recent_trades) >= 10:
+                break
+        recent_trades.reverse()  # chronological order
+
+        return {
+            "total_equity_usd": round(total_equity_usd, 2),
+            "total_pnl_usd": round(total_pnl_usd, 2),
+            "total_pnl_pct": round(total_pnl_pct, 2),
+            "agg_win_rate_pct": round(agg_win_rate, 1),
+            "agg_trades": agg_trades,
+            "worst_drawdown_pct": round(worst_dd, 2),
+            "per_pair_pnl_usd": per_pair_pnl,
+            "net_exposure_usd": round(net_exposure_usd, 2),
+            "recent_trades": recent_trades,
+        }
+
+    def _build_portfolio_review_state(self, engine_states: dict) -> dict:
+        """Build enriched portfolio state for Grok portfolio review."""
+        ps = dict(self._current_portfolio_summary)
+        pair_details = []
+        for pair in self.pairs:
+            engine = self.engines.get(pair)
+            state = engine_states.get(pair, {})
+            if not engine:
+                continue
+            pair_details.append({
+                "pair": pair,
+                "regime": state.get("regime", "UNKNOWN"),
+                "signal": state.get("signal", {}).get("action", "HOLD"),
+                "confidence": state.get("signal", {}).get("confidence", 0),
+                "position": engine.position.size,
+                "pnl_usd": ps.get("per_pair_pnl_usd", {}).get(pair, 0),
+                "drawdown": engine.max_drawdown,
+                "wins": engine.win_count,
+                "losses": engine.loss_count,
+            })
+        ps["pair_details"] = pair_details
+        return ps
 
     # ─── Order placement (writes the journal, registers with the stream) ───
 

@@ -67,6 +67,7 @@ Your analysis must be:
 1. CONCISE — max 3 sentences for the thesis
 2. ACTIONABLE — agree or disagree with the engine signal, with specific reasons
 3. QUANTITATIVE — reference actual indicator values
+4. PORTFOLIO-AWARE — consider the aggregate portfolio P&L and cross-pair dynamics when assessing conviction
 
 Respond ONLY with this JSON (no other text):
 {
@@ -88,6 +89,7 @@ Your mandate:
 - CONFIRM good setups with size_multiplier 1.0 — a missed good trade is also a cost
 - ADJUST by lowering size_multiplier (0.3–0.8) when cautious
 - When the engine signal is strong (confidence >= 0.80) and no concrete risk flags exist, prefer CONFIRM at 1.0 over precautionary reduction
+- Consider PORTFOLIO OVERVIEW when assessing aggregate risk — if portfolio is net profitable, slightly more latitude; if bleeding across multiple pairs, tighten
 - Use OVERRIDE sparingly — only when you identify a specific, articulable risk, not general caution
 
 Respond ONLY with this JSON (no other text):
@@ -120,6 +122,19 @@ Think step by step. Then respond ONLY with this JSON:
   "reasoning": "2-4 sentence analysis of why you agree or disagree with the risk override",
   "decision": "CONFIRM" or "OVERRIDE"
 }"""
+
+PORTFOLIO_STRATEGIST_PROMPT = """You are HYDRA's Portfolio Strategist, reviewing the aggregate state of a 3-pair crypto trading portfolio (SOL/USDC, SOL/BTC, BTC/USDC).
+
+Your job: Produce a brief portfolio-level assessment that per-pair trading agents will use as advisory context. You are NOT making trade decisions — you are providing strategic guidance.
+
+Assess:
+1. Overall risk posture: should the portfolio lean AGGRESSIVE (capitalize on winners), NEUTRAL, or DEFENSIVE (protect capital)?
+2. Which pairs are contributing vs bleeding, and whether exposure should shift
+3. Whether the portfolio has dangerous concentration or correlation risk
+4. Any specific warnings or opportunities visible only at the portfolio level
+
+Be concise (4-6 sentences max). Focus on actionable insight, not recitation of numbers.
+Do NOT output JSON. Output plain text only."""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -194,6 +209,9 @@ class HydraBrain:
         self.daily_decisions = 0
         self.daily_overrides = 0
         self.daily_escalations = 0
+        self.daily_portfolio_reviews = 0
+        self._daily_portfolio_tokens_in = 0
+        self._daily_portfolio_tokens_out = 0
         self.daily_reset_date = datetime.now(timezone.utc).date()
         self.tick_counter = 0
         self.consecutive_failures = 0
@@ -421,6 +439,58 @@ class HydraBrain:
         )
         return self._parse_json(text), tok_in, tok_out
 
+    def run_portfolio_review(self, portfolio_state: Dict) -> Optional[str]:
+        """Portfolio Strategist (Grok). Periodic portfolio-level assessment.
+        Returns plain text guidance or None on failure."""
+        if not self.has_strategist:
+            return None
+        with self._lock:
+            if self._estimated_cost() >= self.max_daily_cost:
+                return None
+        try:
+            user_msg = self._build_portfolio_review_prompt(portfolio_state)
+            text, tok_in, tok_out = self._call_llm(
+                PORTFOLIO_STRATEGIST_PROMPT, user_msg, 400,
+                client=self.strategist_client, provider="xai", model=self.strategist_model,
+            )
+            with self._lock:
+                self._daily_portfolio_tokens_in += tok_in
+                self._daily_portfolio_tokens_out += tok_out
+                self.daily_portfolio_reviews += 1
+            return text.strip() if text else None
+        except Exception as e:
+            print(f"  [BRAIN] Portfolio review failed (degrading gracefully): {e}")
+            return None
+
+    @staticmethod
+    def _build_portfolio_review_prompt(ps: Dict) -> str:
+        """Build user message for portfolio strategist review."""
+        pair_lines = []
+        for p in ps.get("pair_details", []):
+            pair_lines.append(
+                f"  {p['pair']}: regime={p['regime']} | signal={p['signal']}({p['confidence']:.2f}) | "
+                f"pos={p['position']:.6f} | P&L=${p['pnl_usd']:+.2f} | DD={p['drawdown']:.1f}% | "
+                f"W/L={p['wins']}/{p['losses']}"
+            )
+        recent = ps.get("recent_trades", [])
+        trade_lines = []
+        for t in recent[-12:]:
+            line = f"  {t.get('time', '?')} {t['pair']} {t['side']} @{t['price']:.4f}"
+            trade_lines.append(line)
+
+        return (
+            f"PORTFOLIO STATE:\n"
+            f"Total equity: ${ps.get('total_equity_usd', 0):.2f} | "
+            f"P&L: ${ps.get('total_pnl_usd', 0):+.2f} ({ps.get('total_pnl_pct', 0):+.2f}%)\n"
+            f"Aggregate win rate: {ps.get('agg_win_rate_pct', 0):.0f}% across {ps.get('agg_trades', 0)} trades\n"
+            f"Net USD exposure: ${ps.get('net_exposure_usd', 0):.2f}\n"
+            f"Worst pair drawdown: {ps.get('worst_drawdown_pct', 0):.1f}%\n\n"
+            f"PER-PAIR BREAKDOWN:\n" + "\n".join(pair_lines) + "\n\n"
+            f"RECENT TRADES (all pairs, chronological):\n"
+            + ("\n".join(trade_lines) if trade_lines else "  No trades yet") + "\n\n"
+            f"Provide your portfolio assessment."
+        )
+
     # ─── Prompt Builders ───
 
     @staticmethod
@@ -450,6 +520,36 @@ class HydraBrain:
         lines = "\nCROSS-PAIR CONTEXT:\n" + "\n".join(parts)
         lines += f"\n  Net SOL exposure: {net_exp.get('SOL', 0):.4f} | Net BTC exposure: {net_exp.get('BTC', 0):.4f}"
         return lines
+
+    @staticmethod
+    def _format_portfolio_summary(state: Dict) -> str:
+        """Format aggregate portfolio stats for prompt inclusion."""
+        ps = state.get("portfolio_summary")
+        if not ps:
+            return ""
+        pair_pnl = " | ".join(f"{p}: ${v:+.2f}" for p, v in ps.get("per_pair_pnl_usd", {}).items())
+        recent = ps.get("recent_trades", [])
+        trade_lines = ""
+        if recent:
+            trade_lines = "\n  Recent trades: " + " | ".join(
+                f"{t['pair']} {t['side']}" for t in recent[-6:]
+            )
+        return (
+            f"\nPORTFOLIO OVERVIEW (all 3 pairs):"
+            f"\n  Total equity: ${ps['total_equity_usd']:.2f} | P&L: ${ps['total_pnl_usd']:+.2f} ({ps['total_pnl_pct']:+.2f}%)"
+            f"\n  Win rate: {ps['agg_win_rate_pct']:.0f}% across {ps['agg_trades']} trades | Worst DD: {ps['worst_drawdown_pct']:.1f}%"
+            f"\n  Net USD exposure: ${ps['net_exposure_usd']:.2f}"
+            f"\n  Per-pair P&L: {pair_pnl}"
+            f"{trade_lines}"
+        )
+
+    @staticmethod
+    def _format_portfolio_guidance(state: Dict) -> str:
+        """Format portfolio strategist guidance for prompt inclusion."""
+        guidance = state.get("portfolio_guidance")
+        if not guidance:
+            return ""
+        return f"\nPORTFOLIO STRATEGIST GUIDANCE (advisory):\n  {guidance}"
 
     def _build_analyst_prompt(self, state: Dict) -> str:
         sig = state.get("signal", {})
@@ -482,7 +582,7 @@ RECENT CLOSES: {recent_closes}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}"""
+RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}"""
 
     def _build_risk_prompt(self, state: Dict, analyst: Dict) -> str:
         sig = state.get("signal", {})
@@ -505,7 +605,7 @@ VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized P&L: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | Peak=${port.get('peak_equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-PERFORMANCE: {perf.get('total_trades', 0)} trades | Win Rate: {perf.get('win_rate_pct', 0):.0f}% | Sharpe: {perf.get('sharpe_estimate', 0):.2f}{self._format_spread(state)}{self._format_triangle_context(state)}"""
+PERFORMANCE: {perf.get('total_trades', 0)} trades | Win Rate: {perf.get('win_rate_pct', 0):.0f}% | Sharpe: {perf.get('sharpe_estimate', 0):.2f}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}"""
 
     def _build_strategist_prompt(self, state: Dict, analyst: Dict, risk: Dict) -> str:
         sig = state.get("signal", {})
@@ -544,7 +644,7 @@ TREND: EMA20={trend.get('ema20', '?')} | EMA50={trend.get('ema50', '?')} | ATR={
 VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
 RECENT CLOSES: {recent_closes}
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
-PORTFOLIO: Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%{self._format_spread(state)}{self._format_triangle_context(state)}
+PORTFOLIO: Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}
 
 Make the final call. Think carefully, then respond with JSON only."""
 
@@ -615,7 +715,9 @@ Make the final call. Think carefully, then respond with JSON only."""
                         self.daily_tokens_out / 1_000_000 * self.OUTPUT_COST_PER_M)
         strategist_cost = (self._daily_strategist_tokens_in / 1_000_000 * COST_XAI[0] +
                            self._daily_strategist_tokens_out / 1_000_000 * COST_XAI[1])
-        return primary_cost + strategist_cost
+        portfolio_cost = (self._daily_portfolio_tokens_in / 1_000_000 * COST_XAI[0] +
+                          self._daily_portfolio_tokens_out / 1_000_000 * COST_XAI[1])
+        return primary_cost + strategist_cost + portfolio_cost
 
     def _maybe_reset_daily(self):
         """Reset daily counters at midnight UTC."""
@@ -628,6 +730,9 @@ Make the final call. Think carefully, then respond with JSON only."""
             self.daily_decisions = 0
             self.daily_overrides = 0
             self.daily_escalations = 0
+            self.daily_portfolio_reviews = 0
+            self._daily_portfolio_tokens_in = 0
+            self._daily_portfolio_tokens_out = 0
             self.daily_reset_date = today
 
     def get_stats(self) -> Dict:
@@ -641,8 +746,10 @@ Make the final call. Think carefully, then respond with JSON only."""
             "has_strategist": self.has_strategist,
             "cost_today": round(self._estimated_cost(), 4),
             "max_daily_cost": self.max_daily_cost,
+            "portfolio_reviews_today": self.daily_portfolio_reviews,
             "tokens_today": (self.daily_tokens_in + self.daily_tokens_out +
-                            self._daily_strategist_tokens_in + self._daily_strategist_tokens_out),
+                            self._daily_strategist_tokens_in + self._daily_strategist_tokens_out +
+                            self._daily_portfolio_tokens_in + self._daily_portfolio_tokens_out),
             "avg_latency_ms": round(
                 self.last_decision.latency_ms if self.last_decision and not self.last_decision.fallback else 0, 0
             ),
