@@ -1122,7 +1122,14 @@ class HydraEngine:
 
         return self._build_state(regime, strategy, signal, trade)
 
-    def _maybe_execute(self, signal: Signal) -> Optional[Trade]:
+    @staticmethod
+    def _apply_size_multiplier(raw: float) -> float:
+        """Apply brain size multiplier: raw below 1.0, exponential above, cap 2.0."""
+        if raw <= 1.0:
+            return raw
+        return min(2.0, 4.0 ** (raw - 1.0))
+
+    def _maybe_execute(self, signal: Signal, size_multiplier: float = 1.0) -> Optional[Trade]:
         """Execute trade if signal is actionable.
 
         HF-002 fix: refuse to execute on a halted engine. Previously, only
@@ -1137,9 +1144,15 @@ class HydraEngine:
             return None
 
         current_price = self.prices[-1]
+        effective_mult = self._apply_size_multiplier(size_multiplier)
 
         if signal.action == SignalAction.BUY and signal.confidence >= self.sizer.min_confidence:
             size = self.sizer.calculate(signal.confidence, self.balance, current_price, self.asset)
+            size = size * effective_mult
+            # Clamp to available balance so multiplier > 1.0 can't overdraw
+            if current_price > 0:
+                max_size = self.balance / current_price
+                size = min(size, max_size)
             if size > 0:
                 cost = size * current_price
                 # Update position (average in)
@@ -1237,7 +1250,8 @@ class HydraEngine:
         return None
 
     def execute_signal(self, action: str, confidence: float, reason: str = "",
-                        strategy: str = "MOMENTUM") -> Optional[Trade]:
+                        strategy: str = "MOMENTUM",
+                        size_multiplier: float = 1.0) -> Optional[Trade]:
         """Execute a trade based on an externally-provided signal.
 
         Use after tick(generate_only=True) to execute with a (possibly modified)
@@ -1248,6 +1262,8 @@ class HydraEngine:
             confidence: Signal confidence 0-1
             reason: Human-readable reason string
             strategy: Strategy name for logging
+            size_multiplier: Brain-derived sizing multiplier (default 1.0).
+                Raw pass-through below 1.0; exponential above 1.0 (cap 2.0).
 
         Returns:
             Trade if executed, None otherwise
@@ -1267,7 +1283,7 @@ class HydraEngine:
             reason=reason,
             strategy=sig_strategy,
         )
-        return self._maybe_execute(signal)
+        return self._maybe_execute(signal, size_multiplier=size_multiplier)
 
     def snapshot_params(self) -> Dict[str, float]:
         """Return a snapshot of the current tunable parameters."""

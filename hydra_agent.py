@@ -1502,6 +1502,7 @@ class HydraAgent:
                     self.brain = HydraBrain(
                         anthropic_key=anthropic_key, openai_key=openai_key,
                         xai_key=xai_key, strategist_threshold=strategist_threshold,
+                        call_interval=3,
                     )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
@@ -2086,6 +2087,7 @@ class HydraAgent:
                         if not state:
                             continue
                         sig = state.get("signal", {})
+                        ai = state.get("ai_decision", {})
                         engine = self.engines[pair]
                         pre_trade_snap = engine.snapshot_position()
                         trade = engine.execute_signal(
@@ -2093,6 +2095,7 @@ class HydraAgent:
                             confidence=sig.get("confidence", 0),
                             reason=sig.get("reason", ""),
                             strategy=state.get("strategy", "MOMENTUM"),
+                            size_multiplier=ai.get("size_multiplier", 1.0),
                         )
                         if trade:
                             is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
@@ -3575,7 +3578,7 @@ def main():
     if args.interval is not None:
         tick_interval = args.interval
     else:
-        tick_interval = 30
+        tick_interval = 300
 
     if args.paper:
         print(f"\n  HYDRA — Paper trading mode. No real money at risk.")
