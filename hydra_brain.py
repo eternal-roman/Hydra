@@ -209,7 +209,7 @@ class HydraBrain:
 
         # Per-pair strategist cooldown: suppress re-escalation for N ticks after Grok fires
         self.strategist_cooldowns: Dict[str, int] = {}
-        self.strategist_cooldown_ticks = 10  # ~5 min at 30s tick interval
+        self.strategist_cooldown_ticks = 3  # ~15 min at 5-min tick interval (1 candle period)
 
     # ─── Main Entry Point ───
 
