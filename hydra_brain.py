@@ -6,8 +6,8 @@ Agent 1: Market Analyst (Claude Sonnet) — fast technical analysis
 Agent 2: Risk Manager (Claude Sonnet) — risk assessment and approval
 Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested decisions
 
-Grok only fires when the pipeline disagrees (ADJUST/OVERRIDE) or conviction is low.
-Clear CONFIRM signals skip Grok entirely to save cost.
+Grok only fires on genuine disagreements: Risk Manager OVERRIDE, or analyst
+disagrees with engine at low conviction (< 0.50). ADJUST does not trigger Grok.
 
 Usage:
     brain = HydraBrain(anthropic_key="sk-ant-...", xai_key="xai-...")
@@ -78,15 +78,17 @@ Respond ONLY with this JSON (no other text):
   "concern": "primary risk or null"
 }"""
 
-RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager. You protect capital above all else. You receive the engine's signal, the analyst's thesis, and portfolio state.
+RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager. You balance capital protection with opportunity capture. You receive the engine's signal, the analyst's thesis, and portfolio state.
 
 Your mandate:
 - NEVER allow a trade when drawdown exceeds 10% — only HOLD or SELL
 - Scale down size_multiplier when multiple risk factors align
 - Override to HOLD if analyst and engine disagree and conviction < 0.6
 - Override to SELL if drawdown is accelerating
-- CONFIRM good setups with size_multiplier 1.0
+- CONFIRM good setups with size_multiplier 1.0 — a missed good trade is also a cost
 - ADJUST by lowering size_multiplier (0.3–0.8) when cautious
+- When the engine signal is strong (confidence >= 0.80) and no concrete risk flags exist, prefer CONFIRM at 1.0 over precautionary reduction
+- Use OVERRIDE sparingly — only when you identify a specific, articulable risk, not general caution
 
 Respond ONLY with this JSON (no other text):
 {
@@ -98,26 +100,25 @@ Respond ONLY with this JSON (no other text):
   "portfolio_health": "HEALTHY" or "CAUTION" or "DANGER"
 }"""
 
-STRATEGIST_PROMPT = """You are HYDRA's Strategic Advisor, a senior portfolio strategist called in when the trading pipeline has a disagreement. The Market Analyst and Risk Manager could not reach a clear consensus, so you are the final decision-maker.
+STRATEGIST_PROMPT = """You are HYDRA's Strategic Advisor, called in to resolve a specific disagreement in the trading pipeline.
 
 You receive:
 - The engine's quantitative signal (rule-based)
 - The Market Analyst's thesis (AI analysis)
-- The Risk Manager's assessment (AI risk evaluation)
+- The Risk Manager's assessment (which triggered this escalation)
 
-Your job: Make the final call. You have the deepest reasoning ability and should consider:
-1. Whether the disagreement is meaningful or noise
-2. The broader market context from the price action
-3. Whether the risk concerns outweigh the opportunity
-4. Position sizing — if the opportunity is real but risky, reduce size rather than reject
+Your job: Decide whether the trade should proceed or be blocked. You are resolving a SPECIFIC disagreement — you do NOT re-evaluate sizing or confidence.
+
+Consider:
+1. Whether the Risk Manager's concern is based on a concrete, current risk or general caution
+2. Whether the opportunity justifies the identified risk
+3. The broader market context from the price action
 
 Think step by step. Then respond ONLY with this JSON:
 {
   "final_action": "BUY" or "SELL" or "HOLD",
-  "conviction": 0.0 to 1.0,
-  "size_multiplier": 0.0 to 1.5,
-  "reasoning": "2-4 sentence strategic analysis explaining your final decision",
-  "decision": "CONFIRM" or "ADJUST" or "OVERRIDE"
+  "reasoning": "2-4 sentence analysis of why you agree or disagree with the risk override",
+  "decision": "CONFIRM" or "OVERRIDE"
 }"""
 
 
@@ -133,9 +134,7 @@ COST_XAI = (2.0, 6.0)
 
 class HydraBrain:
     """3-agent AI reasoning: Claude Analyst + Claude Risk Manager + Grok Strategist.
-    Grok only fires on contested decisions (ADJUST/OVERRIDE or low conviction)."""
-
-    STRATEGIST_THRESHOLD = 0.65  # escalate if conviction below this
+    Grok only fires on genuine disagreements (OVERRIDE or analyst disagrees at low conviction)."""
 
     def __init__(
         self,
@@ -143,8 +142,6 @@ class HydraBrain:
         openai_key: str = "",
         xai_key: str = "",
         max_daily_cost: float = 10.0,
-        call_interval: int = 1,
-        strategist_threshold: float = 0.65,
     ):
         # Primary: Claude for Analyst + Risk Manager
         self.primary_client = None
@@ -181,8 +178,6 @@ class HydraBrain:
         self.model = self.primary_model
         self.provider = self.primary_provider
         self.max_daily_cost = max_daily_cost
-        self.call_interval = call_interval
-        self.strategist_threshold = strategist_threshold
 
         # Cost tracking
         cost_map = {"anthropic": COST_ANTHROPIC, "openai": COST_OPENAI, "xai": COST_XAI}
@@ -207,9 +202,11 @@ class HydraBrain:
         self.last_decision: Optional[BrainDecision] = None
         self._lock = threading.Lock()  # Thread safety for parallel brain calls
 
-        # Per-pair strategist cooldown: suppress re-escalation for N ticks after Grok fires
+        # Per-pair strategist cooldown: suppress re-escalation for N deliberate()
+        # calls after Grok fires.  With 3 pairs, tick_counter increments ~3×
+        # per agent tick, so 9 = ~3 agent ticks (~1 candle period at 15-min candles).
         self.strategist_cooldowns: Dict[str, int] = {}
-        self.strategist_cooldown_ticks = 3  # ~15 min at 5-min tick interval (1 candle period)
+        self.strategist_cooldown_ticks = 9
 
     # ─── Main Entry Point ───
 
@@ -219,9 +216,6 @@ class HydraBrain:
         with self._lock:
             self.tick_counter += 1
             self._maybe_reset_daily()
-
-            if self.call_interval > 1 and self.tick_counter % self.call_interval != 0:
-                return self._fallback(state, reason="Non-AI tick")
 
             if not self.api_available:
                 if self.tick_counter >= self.retry_at_tick:
@@ -252,26 +246,26 @@ class HydraBrain:
             if risk_output is None:
                 raise ValueError("Risk Manager returned no output")
 
-            # Agent 3: Strategic Advisor (Grok) — only on contested decisions
+            # Agent 3: Strategic Advisor (Grok) — only on genuine disagreements
             strategist_output = None
             escalated = False
-            # Default conviction to 0.0 (below any reasonable threshold) so that
-            # a malformed analyst response missing the key escalates to the
-            # strategist rather than silently bypassing it. The old default of
-            # 1.0 treated "unknown" as "fully confident" which is unsafe.
             pair = state.get("asset", "")
             cooldown_active = self.strategist_cooldowns.get(pair, 0) > self.tick_counter
+            risk_decision = risk_output.get("decision", "CONFIRM")
+            # Default signal_agreement to False (not True) so a malformed analyst
+            # response that omits the key doesn't silently bypass escalation.
+            analyst_agrees = analyst_output.get("signal_agreement", False)
+            analyst_conviction = analyst_output.get("conviction", 0.0)
             needs_strategist = (
                 self.has_strategist and not cooldown_active and (
-                    risk_output.get("decision") != "CONFIRM" or
-                    analyst_output.get("conviction", 0.0) < self.strategist_threshold
+                    risk_decision == "OVERRIDE" or
+                    (not analyst_agrees and analyst_conviction < 0.50)
                 )
             )
             if cooldown_active and self.has_strategist:
-                conviction = analyst_output.get("conviction", 0.0)
                 would_escalate = (
-                    risk_output.get("decision") != "CONFIRM" or
-                    conviction < self.strategist_threshold
+                    risk_decision == "OVERRIDE" or
+                    (not analyst_agrees and analyst_conviction < 0.50)
                 )
                 if would_escalate:
                     remaining = self.strategist_cooldowns[pair] - self.tick_counter
@@ -294,10 +288,12 @@ class HydraBrain:
             if needs_strategist and not strategist_output:
                 print(f"  [BRAIN] Strategist returned no usable output — falling back to Risk Manager")
             if strategist_output:
+                # Grok arbitrates the contested point only (action + decision).
+                # Conviction stays from analyst; sizing stays from risk manager.
                 final_action = strategist_output.get("final_action", risk_output.get("final_action", state["signal"]["action"]))
                 final_decision = strategist_output.get("decision", risk_output.get("decision", "CONFIRM"))
-                final_conviction = strategist_output.get("conviction", analyst_output.get("conviction", state["signal"]["confidence"]))
-                final_size = strategist_output.get("size_multiplier", risk_output.get("size_multiplier", 1.0))
+                final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
+                final_size = risk_output.get("size_multiplier", 1.0)
                 strategist_reasoning = strategist_output.get("reasoning", "")
             else:
                 final_action = risk_output.get("final_action", state["signal"]["action"])
@@ -420,7 +416,7 @@ class HydraBrain:
         """Strategic Advisor (Grok 4 Reasoning). Only called on contested decisions."""
         user_msg = self._build_strategist_prompt(state, analyst, risk)
         text, tok_in, tok_out = self._call_llm(
-            STRATEGIST_PROMPT, user_msg, 500,
+            STRATEGIST_PROMPT, user_msg, 350,
             client=self.strategist_client, provider="xai", model=self.strategist_model,
         )
         return self._parse_json(text), tok_in, tok_out

@@ -1451,6 +1451,7 @@ class HydraAgent:
         self.order_journal: List[Dict[str, Any]] = []
         self._snapshot_dir = os.path.dirname(os.path.abspath(__file__))
         self._completed_trades_since_update = 0  # Counter for tuner update cadence
+        self._last_brain_candle_ts: Dict[str, float] = {}  # Per-pair: last candle timestamp brain evaluated
         # Monotonic client tag seeded from wall-clock to avoid collisions
         # across restarts; flows into Kraken as --userref and comes back on
         # the WS executions stream as order_userref for correlation.
@@ -1498,11 +1499,9 @@ class HydraAgent:
             xai_key = os.environ.get("XAI_API_KEY", "")
             if anthropic_key or openai_key or xai_key:
                 try:
-                    strategist_threshold = 0.50 if self.mode == "competition" else 0.65
                     self.brain = HydraBrain(
                         anthropic_key=anthropic_key, openai_key=openai_key,
-                        xai_key=xai_key, strategist_threshold=strategist_threshold,
-                        call_interval=3,
+                        xai_key=xai_key,
                     )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
@@ -2097,6 +2096,11 @@ class HydraAgent:
                             strategy=state.get("strategy", "MOMENTUM"),
                             size_multiplier=ai.get("size_multiplier", 1.0),
                         )
+                        if trade is None and sig.get("action") in ("BUY", "SELL") and ai:
+                            print(f"  [BRAIN] {pair}: {sig['action']} signal did not execute "
+                                  f"(conf={sig.get('confidence', 0):.2f}, "
+                                  f"size_mult={ai.get('size_multiplier', 1.0):.2f}, "
+                                  f"brain={ai.get('action', '?')})")
                         if trade:
                             is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
                             value_decimals = 2 if is_usd_pair else 8
@@ -2358,6 +2362,16 @@ class HydraAgent:
             if test_size == 0:
                 return state  # Signal too weak to trade; don't waste brain tokens
 
+        # Candle-freshness gate: only invoke brain when the pair has a NEW candle.
+        # On forming-candle updates (same interval_begin), the engine deduplicates
+        # in place — indicators are near-identical.  Skip brain to avoid duplicate
+        # evaluation on unchanged data.
+        candles = state.get("candles", [])
+        current_candle_ts = candles[-1]["t"] if candles else 0.0
+        last_ts = self._last_brain_candle_ts.get(pair, 0.0)
+        if current_candle_ts > 0 and current_candle_ts == last_ts:
+            return state  # Same candle as last brain evaluation — skip
+
         # Inject cross-pair triangle context before deliberation
         state["triangle_context"] = self._build_triangle_context(pair, all_engine_states)
 
@@ -2390,19 +2404,26 @@ class HydraAgent:
                 "tokens_used": decision.tokens_used,
                 "latency_ms": round(decision.latency_ms, 0),
             }
+            # Mark candle as evaluated only when brain ran LLM calls (not fallback).
+            # On fallback (budget exceeded, API down), leave timestamp unchanged so
+            # the next tick retries this candle.
+            if not decision.fallback:
+                self._last_brain_candle_ts[pair] = current_candle_ts
+
             # Apply AI decision to engine state
             # Note: engine ran with generate_only=True, so no trade was executed yet.
-            # Modifying the signal here changes what execute_signal() will act on.
+            # Brain controls sizing via size_multiplier only — engine confidence
+            # passes through untouched to Kelly criterion.  confidence_adj is
+            # preserved in state["ai_decision"] for dashboard/logging.
             if decision.action == "OVERRIDE":
                 state["signal"]["action"] = decision.final_signal
-                state["signal"]["confidence"] = decision.confidence_adj
                 state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
             elif decision.action == "ADJUST":
-                state["signal"]["confidence"] = decision.confidence_adj
                 state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
             # CONFIRM leaves signal unchanged, just adds reasoning
         except Exception as e:
             state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
+            # Do NOT update _last_brain_candle_ts — allow retry on next tick
 
         return state
 
@@ -3608,7 +3629,7 @@ def main():
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,
-                        help="Seconds between ticks (default: 30)")
+                        help="Seconds between ticks (default: 300)")
     parser.add_argument("--candle-interval", type=int, default=15, choices=[1, 5, 15, 30, 60],
                         help="OHLC candle period in minutes (default: 15)")
     parser.add_argument("--duration", type=int, default=0,
