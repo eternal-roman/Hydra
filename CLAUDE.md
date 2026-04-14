@@ -110,14 +110,13 @@ python hydra_engine.py
 
 3-agent reasoning pipeline using Claude + Grok:
 - **Market Analyst** (Claude Sonnet) — evaluates engine signals, produces thesis + conviction
-- **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides trades, manages risk exposure
-- **Strategic Advisor** (Grok 4 Reasoning) — called only on contested decisions (ADJUST/OVERRIDE or conviction < 0.65)
-- Only fires on BUY/SELL signals (HOLD is free, no API call — skip logic lives in the agent's `_apply_brain`, not in the brain itself)
-- Falls back to engine-only on API failure, budget exceeded, or missing key
+- **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides trades, manages risk exposure via `size_multiplier` (0.0-1.5). Brain does NOT modify engine confidence — Kelly sizing uses engine confidence directly, brain controls position size via size_multiplier only.
+- **Strategic Advisor** (Grok 4 Reasoning) — called only on genuine disagreements: Risk Manager OVERRIDE, or analyst explicitly disagrees with engine at low conviction (< 0.50). Grok arbitrates the contested action only; conviction stays from analyst, sizing from risk manager.
+- Only fires on BUY/SELL signals with fresh candle data (HOLD is free, no API call — skip logic lives in the agent's `_apply_brain`). Per-pair candle-freshness gating ensures brain evaluates each pair exactly once per new candle, preventing duplicate evaluation on forming-candle updates.
+- Falls back to engine-only on API failure, budget exceeded, or missing key. Fallback does NOT mark the candle as evaluated, so the next tick retries.
 - Enable by setting `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and/or `XAI_API_KEY` in `.env`
-- Cost: ~$3-5/day with Grok escalation on ~20-30% of signals
+- Cost: ~$1-2/day with narrow Grok escalation on ~10-15% of signals
 - Do not change the JSON response format in system prompts — the parser depends on it
-- Escalation threshold is parameterized (0.65 conservative, 0.50 competition) — it controls when Grok fires
 - Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
 
 ## Testing
