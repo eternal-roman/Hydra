@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.9.0] — 2026-04-14
+
+### Added
+
+- **feat(brain):** Portfolio-level self-awareness — `_build_portfolio_summary()` aggregates
+  cross-pair positions, P&L, regime map, and recent fills into a portfolio context injected
+  into analyst and risk manager prompts. Periodic `PORTFOLIO_STRATEGIST` review via Grok
+  produces portfolio-wide guidance that persists across ticks.
+- **feat(agent):** Journal merge supports backfill file (`hydra_order_journal_backfill.json`)
+  for manual trades — one-shot merge on startup, file renamed to `.merged` after processing.
+- **feat(engine):** Adaptive volatility threshold — VOLATILE regime now fires when current
+  ATR% exceeds `volatile_atr_mult` (default 1.8) × the asset's own 20-candle median ATR%.
+  Same logic for BB width. Replaces fixed absolute thresholds (4% ATR / 8% BB width).
+  Floor values (1.5% ATR, 0.03 BB width) prevent degenerate behavior in dead markets.
+- **feat(agent):** Quality signal filtering — default candle interval changed to 15-minute
+  (from 5-minute in v2.7.0), FOREX session-aware confidence modifier (London/NY overlap
+  +0.04, London +0.02, NY +0.02, Asian -0.03, dead zone -0.05), subject to +0.15 total
+  external modifier cap.
+
+### Changed
+
+- **refactor(agent):** Default tick interval changed from 30s to 300s (5 minutes) — with
+  15-minute candles and push-based WS data, faster ticks added noise without new information.
+  Brain fires once per new candle via `call_interval=3` (~1/3 Sonnet cost reduction).
+- **fix(brain):** Brain `size_multiplier` now wired into BUY sizing path in `_apply_brain`.
+- **fix(brain):** Strategist cooldown reduced from 10 to 3 ticks for faster Grok re-evaluation.
+
+### Fixed
+
+- **fix(brain):** Persist `ai_decision` in dashboard state across ticks — previously lost
+  on ticks where brain didn't fire, causing dashboard AI panel to flicker.
+- **fix(brain):** Brain pipeline over-conservatism — timing architecture revised so brain
+  evaluates fresh candle data rather than stale state from previous tick.
+- **fix(engine):** Realized P&L now uses average-cost-basis for sold units only (was using
+  total position avg_entry × total size, overstating realized P&L on partial sells).
+
+---
+
 ## [2.8.3] — 2026-04-14
 
 ### Bug Fix
@@ -125,7 +163,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   up to 4 REST ticker calls per tick.
 - **BalanceStream** (ws balances) — real-time balance updates. Dashboard state
   builder uses stream when healthy; REST polling every 5th tick as fallback.
-  Normalizes BTC→XBT, filters equities.
+  Normalizes XXBT/XBT→BTC, filters equities.
 - **BookStream** (ws book) — push-based order book depth 10 for all pairs.
   Phase 1.75 order book intelligence uses stream when healthy; REST `depth()`
   fallback. Converts WS `{price,qty}` dicts to REST `[price,qty,ts]` format

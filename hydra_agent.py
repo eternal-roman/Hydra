@@ -1423,7 +1423,7 @@ class HydraAgent:
     CROSS_PAIR = "SOL/BTC"          # Opportunistic regime-driven swaps
     BTC_PAIR = "BTC/USDC"           # BTC priced in stablecoin
     ORDER_JOURNAL_CAP = 2000        # Bound in-memory order journal
-    SNAPSHOT_EVERY_N_TICKS = 120    # ~1h at 30s ticks
+    SNAPSHOT_EVERY_N_TICKS = 120    # ~10h at 300s ticks (also triggers immediately on journal writes)
 
     def __init__(
         self,
@@ -3779,7 +3779,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.8.3",
+            "version": "2.9.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

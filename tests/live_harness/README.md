@@ -8,7 +8,7 @@ HF-004 on its first run.** Any PR touching the execution path should use it.
 ## Mandatory for PRs touching
 
 `hydra_agent.py:_place_order`, `_place_paper_order`, `ExecutionStream`,
-the tick-loop wrapper at lines 876-909, any `order_journal.append` site, or
+the tick-loop wrapper at lines 2155-2193, any `order_journal.append` site, or
 `hydra_engine.py:execute_signal`/`_maybe_execute`/`snapshot_position`/
 `restore_position`/`PositionSizer.calculate`.
 
@@ -85,7 +85,7 @@ tests/live_harness/
    doesn't call it anyway).
 
 **The execute wrapper** `harness_execute()` reproduces the tick-loop wrapper
-at `hydra_agent.py:876-909`: snapshot → `execute_signal` → `_place_order` →
+at `hydra_agent.py:2155-2193`: snapshot → `execute_signal` → `_place_order` →
 rollback on failure. Returns a report dict with `outcome`, `pre_snap`,
 `trade`, `trade_dict`, `last_journal_entry` for post-scenario assertions.
 
@@ -192,7 +192,7 @@ field to `HydraEngine` that's serialized by `snapshot_position()` or
 rollback tests while rollback is actually incomplete — exactly the bug class
 that commit `4effbea` fixed.
 
-Current 13 fields (all three must agree):
+Current 15 fields (snapshot_position/runtime must agree; comparator covers rollback-relevant subset):
 
 | Field | `snapshot_position` | `snapshot_runtime` | comparator |
 |---|---|---|---|
@@ -208,6 +208,8 @@ Current 13 fields (all three must agree):
 | `len(equity_history)` | ✓ | ✓ | ✓ |
 | `peak_equity` | ✓ | ✓ | ✓ |
 | `max_drawdown` | ✓ | ✓ | ✓ |
+| `gross_profit` | ✓ | ✓ | — |
+| `gross_loss` | ✓ | ✓ | — |
 | `halted` | — | ✓ | ✓ |
 
 When adding a field, add a row to this table in the same PR. That's how the
