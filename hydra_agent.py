@@ -2747,12 +2747,12 @@ class HydraAgent:
         entry = self._build_journal_entry(pair, trade, state)
         pre_trade_snap = state.get("_pre_trade_snapshot") if isinstance(state, dict) else None
 
-        # ─── Real-balance preflight (BUY only) ───────────────────────────
+        # ─── Real-balance preflight ─────────────────────────────────────
         # The engine sizes orders against its internal bookkeeping balance,
         # which may not reflect actual exchange holdings — especially for
         # non-USD-quoted pairs like SOL/BTC where the engine's BTC balance
         # is derived from a USD split, not real BTC on the account.
-        # Check the actual quote currency balance before burning API calls.
+        # Check the actual currency balance before burning API calls.
         if action == "buy":
             quote = pair.split("/")[1]
             real_bal = self._get_real_quote_balance(quote)
@@ -2769,6 +2769,26 @@ class HydraAgent:
                         entry, terminal_reason=f"insufficient_{quote}_balance",
                     )
                     return False
+        elif action == "sell":
+            base = pair.split("/")[0]
+            real_base_bal = self._get_real_quote_balance(base)
+            if real_base_bal is not None:
+                min_size = PositionSizer.MIN_ORDER_SIZE.get(base, 0.02)
+                if real_base_bal < min_size:
+                    print(f"  [TRADE] Insufficient {base} balance "
+                          f"({real_base_bal:.8f}) for {pair} SELL — "
+                          f"below ordermin ({min_size}) — skipping")
+                    self._finalize_failed_entry(
+                        entry, terminal_reason=f"insufficient_{base}_balance",
+                    )
+                    return False
+                if real_base_bal < amount:
+                    print(f"  [TRADE] {pair} SELL: exchange {base} balance "
+                          f"({real_base_bal:.8f}) < engine amount "
+                          f"({amount:.8f}) — clamping to exchange balance")
+                    amount = real_base_bal
+                    trade["amount"] = amount
+                    entry["intent"]["amount"] = amount
 
         # ─── Ticker fetch (WS stream only — refuse to trade without live price) ───
         ticker = self.ticker_stream.latest_ticker(pair) if self.ticker_stream.healthy else None
