@@ -4,9 +4,11 @@ Verifies that after `engine.restore_position(pre_snap)`, all 13 engine
 fields that are supposed to be rolled back exactly match their pre-trade
 snapshot. Used by every Category F (failure) scenario.
 
-The 13 fields mirror the set in hydra_engine.py:1077-1110 (snapshot_position
-and restore_position), plus engine.halted as a sanity check (halt is not
-part of rollback but should not have toggled during a failed order).
+The 13 fields are a rollback-relevant subset of hydra_engine.py:1320-1359
+(snapshot_position and restore_position), plus engine.halted as a sanity
+check (halt is not part of rollback but should not have toggled during a
+failed order). Note: gross_profit/gross_loss are in snapshot_position but
+not checked here — they are not part of the rollback contract.
 
 Field list comes from commit 4effbea which added equity_history_len,
 peak_equity, and max_drawdown to the snapshot — any future additions
@@ -24,10 +26,10 @@ class RollbackDiff(AssertionError):
 
 
 def capture_engine_state(engine) -> dict[str, Any]:
-    """Capture the 13 fields that must be identical before/after a failed order.
+    """Capture the 13 rollback-relevant fields that must be identical before/after a failed order.
 
-    This captures MORE than `snapshot_position()` so the comparator can also
-    verify that restore_position correctly restored each field.
+    This captures a subset of `snapshot_position()` — it omits gross_profit/gross_loss
+    (which are not part of the rollback contract) and adds halted as a sanity check.
     """
     return {
         "balance": engine.balance,

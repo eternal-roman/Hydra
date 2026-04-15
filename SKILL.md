@@ -71,7 +71,7 @@ Using the OHLC data, compute:
 3. **Bollinger Bands(20, 2)** — band width for regime classification
 
 **Regime Rules:**
-- `ATR% > 4%` OR `BB_width > 8%` → **VOLATILE**
+- ATR% > `volatile_atr_mult` (1.8) × median ATR% OR BB width > `volatile_bb_mult` (1.8) × median BB width → **VOLATILE** *(adaptive per-asset; floor 1.5% ATR, 0.03 BB width)*
 - `EMA20 > EMA50 * 1.005` AND `price > EMA20` → **TREND_UP**
 - `EMA20 < EMA50 * 0.995` AND `price < EMA20` → **TREND_DOWN**
 - Otherwise → **RANGING**
@@ -92,8 +92,8 @@ Each strategy produces a signal: **BUY**, **SELL**, or **HOLD** with a confidenc
 - Divide BB range into 5 zones. BUY in bottom zone, SELL in top zone.
 
 **DEFENSIVE Strategy:**
-- BUY only when RSI < 20 (extreme oversold), small position.
-- SELL when RSI > 50 (reduce exposure).
+- BUY only when RSI < 25 (extreme oversold), small position.
+- SELL when RSI > 40 (reduce exposure early — old threshold of 50 never fired in TREND_DOWN).
 
 ### Phase 4: Size Position (Kelly Criterion)
 
@@ -154,7 +154,7 @@ kraken closed-orders -o json
 ```
 INITIALIZE paper session
 SET assets = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
-SET interval = 30 seconds
+SET interval = 300 seconds  # 5 minutes
 SET max_position_pct = 0.30   # 0.40 in competition mode
 SET min_confidence = 0.65     # quality filter — only ≥15% Kelly edge
 

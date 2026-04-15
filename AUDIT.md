@@ -31,7 +31,7 @@
 **Known limitations at audit time:** 5 (documented in section 9)
 
 Subsequent test suites and fix history are tracked in `CHANGELOG.md`.
-Current: 460+ tests across 15 suites (see `CLAUDE.md` Testing section for the full list).
+Current: 419 tests across 15 suites (see `CLAUDE.md` Testing section for the full list).
 Post-audit bugs surfaced by the live-execution harness are tracked as
 `HF-###` entries in `tests/live_harness/README.md`.
 
@@ -97,9 +97,9 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 - **Notes:** Correct priority ordering. Volatile markets should not be misclassified as trending.
 
 ### 2.2 VOLATILE Regime
-- **Condition:** `ATR% > 4.0` OR `BB width > 0.08`
-- **Code:** `atr_pct = (atr / current) * 100` then `atr_pct > 4.0 or bb["width"] > 0.08`
-- **Result:** PASS — BB width is a ratio (0.08 = 8%), comparison is correct.
+- **Condition (v1.0):** ~~`ATR% > 4.0` OR `BB width > 0.08`~~ — replaced in v2.8.1 with adaptive per-asset thresholds.
+- **Current code:** ATR% > `volatile_atr_mult` (1.8) × median ATR% of the candle history, OR BB width > `volatile_bb_mult` (1.8) × median BB width. Floor values prevent degenerate behavior: 1.5% ATR, 0.03 BB width.
+- **Result:** PASS — adaptive thresholds evaluate each asset against its own baseline.
 
 ### 2.3 TREND_UP Regime
 - **Condition:** `EMA20 > EMA50 * 1.005` AND `price > EMA20`
@@ -142,7 +142,7 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 ### 3.4 DEFENSIVE Strategy
 - **Location:** `SignalGenerator._defensive()` lines 408-432
 - **BUY:** RSI < 25 extreme oversold, confidence 0.50–0.75. Only fires above 0.65 execution threshold at RSI < ~10 — PASS by design
-- **SELL:** RSI > 50, confidence 0.8 — PASS
+- **SELL:** RSI > 40, confidence 0.8 — PASS *(lowered from 50 in v2.8.1 — old threshold never fired in TREND_DOWN)*
 - **Notes:** Intentionally ultra-conservative. In TREND_DOWN, the agent reduces exposure but doesn't buy into falling markets.
 
 ### 3.5 Signal Warmup Guard
@@ -200,8 +200,8 @@ Post-audit bugs surfaced by the live-execution harness are tracked as
 
 ### 5.5 Dead Man's Switch
 - **Location:** Main loop line 366, `KrakenCLI.cancel_after()` line 182
-- **Behavior:** `kraken order cancel-after 60` refreshed every tick (30s default)
-- **Result:** PASS — 60s timeout with 30s refresh gives 30s safety margin.
+- **Behavior:** `kraken order cancel-after 60` refreshed every tick
+- **Result:** PASS — 60s timeout refreshed each tick.
 
 ### 5.6 Order Journal Accuracy
 - **Location:** `_place_order()` lines 475-487
