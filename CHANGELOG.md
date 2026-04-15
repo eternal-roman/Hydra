@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.9.1] — 2026-04-15
+
+### Added
+- **journal_maintenance.py** — standalone maintenance tool for cleaning order journal + session snapshot in lockstep. Replaces error-prone manual two-file editing procedure. Commands: `status` (audit), `purge-failed` (remove PLACEMENT_FAILED entries), `purge <index>` (remove by index). Atomic writes, dry-run support, agent-running detection via PowerShell.
+
+---
+
 ## [2.9.0] — 2026-04-14
 
 ### Added
