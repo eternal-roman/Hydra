@@ -469,15 +469,44 @@ class KrakenCLI:
 # ═══════════════════════════════════════════════════════════════
 
 class DashboardBroadcaster:
-    """Async WebSocket server that broadcasts agent state to dashboard clients."""
+    """Async WebSocket server that broadcasts agent state to dashboard clients.
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
+    Phase 6 refactor (v2.10.0): adds message-type discrimination for the
+    backtest observer, experiment library, and review stream.
+
+    Outbound:
+      - `broadcast(state)` — live per-tick state. With `compat_mode=True`
+        (default), sends BOTH the legacy raw state dict and the new
+        wrapped `{"type": "state", "data": state}` form. Existing
+        dashboards keep reading raw; the Phase 8 dashboard reads wrapped.
+      - `broadcast_message(type, payload)` — new type-discriminated
+        message (e.g., backtest_progress). Always wrapped; legacy
+        dashboards ignore unknown shapes.
+
+    Inbound (Phase 6 additive):
+      - `register_handler(type, fn)` — route JSON messages matching
+        `{"type": type, ...}` to `fn(payload) -> Optional[dict]`. The
+        return dict is sent back as `{"type": f"{type}_ack", ...reply}`.
+      - Unknown message types are silently ignored (we don't want the
+        dashboard DoS'ing the agent via malformed messages).
+
+    Threading: the asyncio loop runs in a daemon thread. `broadcast_*`
+    is thread-safe (uses run_coroutine_threadsafe). Handlers execute
+    on the asyncio loop thread, so long work should be handed off
+    (handlers in this codebase return quickly — they queue into
+    BacktestWorkerPool).
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765,
+                 compat_mode: bool = True):
         self.host = host
         self.port = port
         self.clients = set()
         self.latest_state = {}
         self._loop = None
         self._thread = None
+        self._handlers: Dict[str, Any] = {}
+        self.compat_mode = compat_mode
 
     def start(self):
         """Start WebSocket server in a background thread."""
@@ -503,11 +532,19 @@ class DashboardBroadcaster:
         self.clients.add(websocket)
         print(f"  [WS] Dashboard client connected ({len(self.clients)} total)")
         try:
-            # Send latest state immediately on connect
+            # Send latest state immediately on connect (both formats if compat)
             if self.latest_state:
-                await websocket.send(json.dumps(self.latest_state))
-            async for msg in websocket:
-                pass  # We only broadcast, don't receive
+                if self.compat_mode:
+                    await websocket.send(json.dumps(self.latest_state))
+                await websocket.send(json.dumps({
+                    "type": "state", "data": self.latest_state,
+                }))
+            async for raw in websocket:
+                try:
+                    await self._dispatch_inbound(raw, websocket)
+                except Exception as e:
+                    # Never let a malformed message break the connection.
+                    print(f"  [WS] inbound dispatch error: {type(e).__name__}: {e}")
         except Exception as e:
             if not isinstance(e, (ConnectionError, OSError)):
                 print(f"  [WS] Client handler error: {type(e).__name__}: {e}")
@@ -515,15 +552,68 @@ class DashboardBroadcaster:
             self.clients.discard(websocket)
             print(f"  [WS] Dashboard client disconnected ({len(self.clients)} total)")
 
+    async def _dispatch_inbound(self, raw, websocket):
+        try:
+            msg = json.loads(raw)
+        except (TypeError, ValueError):
+            return  # silently ignore non-JSON
+        if not isinstance(msg, dict):
+            return
+        msg_type = msg.get("type")
+        handler = self._handlers.get(msg_type) if msg_type else None
+        if handler is None:
+            return
+        payload = {k: v for k, v in msg.items() if k != "type"}
+        try:
+            reply = handler(payload)
+        except Exception as e:
+            reply = {"success": False, "error": f"{type(e).__name__}: {e}"}
+        if reply is None:
+            return
+        try:
+            ack_type = f"{msg_type}_ack"
+            await websocket.send(json.dumps({"type": ack_type, **reply}))
+        except Exception:
+            # Client likely dropped mid-send — next broadcast will reap it
+            pass
+
+    def register_handler(self, msg_type: str, fn) -> None:
+        """Route inbound messages with matching `type` to `fn(payload)`."""
+        self._handlers[msg_type] = fn
+
     def broadcast(self, state: dict):
-        """Broadcast state to all connected dashboard clients."""
+        """Broadcast live tick state to all connected dashboard clients.
+
+        `compat_mode=True` emits BOTH the legacy raw state (what v2.9.x
+        dashboards read) and the new wrapped `{type: "state", data}` form
+        (what Phase 8 dashboards read). Set `compat_mode=False` after the
+        dashboard refactor lands to halve per-tick WS bandwidth.
+        """
         self.latest_state = state
-        if self._loop and self.clients:
-            msg = json.dumps(state)
-            for client in list(self.clients):
+        if not (self._loop and self.clients):
+            return
+        wrapped = json.dumps({"type": "state", "data": state})
+        raw = json.dumps(state) if self.compat_mode else None
+        for client in list(self.clients):
+            if raw is not None:
                 asyncio.run_coroutine_threadsafe(
-                    self._safe_send(client, msg), self._loop
+                    self._safe_send(client, raw), self._loop
                 )
+            asyncio.run_coroutine_threadsafe(
+                self._safe_send(client, wrapped), self._loop
+            )
+
+    def broadcast_message(self, msg_type: str, payload: dict):
+        """Emit a typed message (never wrapped as `state`). Always uses
+        the `{type, ...payload}` format.  Safe to call from any thread.
+        """
+        if not (self._loop and self.clients):
+            return
+        msg = json.dumps({"type": msg_type, **payload})
+        for client in list(self.clients):
+            asyncio.run_coroutine_threadsafe(
+                self._safe_send(client, msg), self._loop
+            )
 
     async def _safe_send(self, client, msg):
         try:
@@ -1500,6 +1590,36 @@ class HydraAgent:
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
 
+        # ─── Backtest subsystem (v2.10.0, Phase 6) ─────────────────────
+        # Strictly additive. Kill-switchable via HYDRA_BACKTEST_DISABLED=1
+        # (I6). Any failure inside init leaves the live agent completely
+        # unaffected — we swallow + log, never raise.
+        self.backtest_pool = None
+        self.backtest_dispatcher = None
+        if not os.environ.get("HYDRA_BACKTEST_DISABLED"):
+            try:
+                from hydra_backtest_server import (
+                    BacktestWorkerPool, mount_backtest_routes,
+                )
+                from hydra_backtest_tool import BacktestToolDispatcher
+                from hydra_experiments import ExperimentStore
+                bt_store = ExperimentStore()
+                self.backtest_dispatcher = BacktestToolDispatcher(store=bt_store)
+                self.backtest_pool = BacktestWorkerPool(
+                    max_workers=2,
+                    store=bt_store,
+                    broadcaster=self.broadcaster,
+                )
+                mount_backtest_routes(
+                    self.broadcaster, self.backtest_pool,
+                    dispatcher=self.backtest_dispatcher,
+                )
+                print("  [BACKTEST] subsystem mounted (max_workers=2)")
+            except Exception as e:
+                print(f"  [BACKTEST] init failed ({type(e).__name__}: {e}); disabled for this run")
+                self.backtest_pool = None
+                self.backtest_dispatcher = None
+
         # AI Brain (optional — Claude for analysis, Grok for strategic depth)
         self.brain = None
         if HAS_BRAIN:
@@ -1511,6 +1631,10 @@ class HydraAgent:
                     self.brain = HydraBrain(
                         anthropic_key=anthropic_key, openai_key=openai_key,
                         xai_key=xai_key,
+                        tool_dispatcher=self.backtest_dispatcher,
+                        # Gating stays env-driven (HYDRA_BRAIN_TOOLS_ENABLED=1)
+                        # so brain tool-use is off by default even when the
+                        # subsystem is mounted. Phase 12 flips the default.
                     )
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
@@ -1598,6 +1722,12 @@ class HydraAgent:
                 stream.stop()
             except Exception as e:
                 print(f"  [HYDRA] {label} stop failed: {e}")
+        # Drain the backtest worker pool (daemon threads — best-effort join).
+        if self.backtest_pool is not None:
+            try:
+                self.backtest_pool.shutdown(timeout=3.0)
+            except Exception as e:
+                print(f"  [HYDRA] Backtest pool shutdown failed: {e}")
         # Flush session snapshot for --resume
         try:
             self._save_snapshot()
