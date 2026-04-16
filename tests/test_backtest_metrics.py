@@ -145,6 +145,51 @@ class TestBlockBootstrap(unittest.TestCase):
         b = _block_bootstrap_sample(profits, 10, random.Random(99))
         self.assertEqual(a, b)
 
+    def test_no_circular_wrap_within_block(self):
+        """Fix 4: a block must not contain the sequence [..., n-1, 0, ...].
+        With profits = [0, 1, 2, ..., n-1], that pattern is a strict-decrease
+        followed by 0 inside a single block — impossible if blocks are
+        contiguous non-wrapping slices, but possible under the old modulo
+        implementation."""
+        n = 50
+        profits = [float(i) for i in range(n)]
+        block_len = 10
+        # Sample many times across diverse seeds so a regression would show
+        for seed in range(64):
+            sample = _block_bootstrap_sample(profits, block_len, random.Random(seed))
+            # Walk the sample looking for "... n-1 → 0 ..." inside a block.
+            # Each block is block_len consecutive entries starting at index
+            # 0, block_len, 2*block_len, ... Check every offset inside each
+            # block for the n-1 → 0 transition.
+            for block_start in range(0, n, block_len):
+                block = sample[block_start:block_start + block_len]
+                for k in range(len(block) - 1):
+                    if block[k] == float(n - 1) and block[k + 1] == 0.0:
+                        self.fail(
+                            f"wrap detected in seed={seed} block={block!r} "
+                            "— _block_bootstrap_sample must NOT wrap circularly"
+                        )
+
+    def test_block_contents_are_consecutive(self):
+        """Every block of length block_len in the sample must be a contiguous
+        slice of the original sequence (start..start+block_len-1).
+        With profits = [0, 1, 2, ...] this means each block is an arithmetic
+        progression with step=1."""
+        n = 100
+        profits = [float(i) for i in range(n)]
+        block_len = 15
+        sample = _block_bootstrap_sample(profits, block_len, random.Random(42))
+        for block_start in range(0, len(sample) - block_len + 1, block_len):
+            block = sample[block_start:block_start + block_len]
+            if len(block) < block_len:
+                continue  # truncated tail
+            first = block[0]
+            for offset, value in enumerate(block):
+                self.assertEqual(
+                    value, first + offset,
+                    f"block at {block_start} not consecutive: {block!r}",
+                )
+
 
 class TestReturnsHelpers(unittest.TestCase):
     def test_returns_from_profits_happy(self):
