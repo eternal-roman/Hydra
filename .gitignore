@@ -50,3 +50,7 @@ hydra_session_snapshot.json.harness_stash
 # Local agent memory (project-scoped, not tracked)
 HYDRA_MEMORY.md
 .hydra-memory/
+
+# Backtest & experimentation artifacts (v2.10.0+; runtime, not tracked)
+.hydra-experiments/
+hydra_backtest_errors.log
