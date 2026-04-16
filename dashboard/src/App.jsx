@@ -156,6 +156,413 @@ function ConfidenceMeter({ confidence, signal }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Phase 8 (v2.10.0): Backtest UI primitives
+// ═══════════════════════════════════════════════════════════════
+
+// Must stay in lockstep with hydra_experiments.PRESET_LIBRARY keys +
+// hydra_backtest_tool.BACKTEST_TOOLS enum. Order here = order shown in the UI.
+const PRESET_OPTIONS = [
+  { name: "default",          label: "Default",          desc: "Current live params (no overrides)" },
+  { name: "ideal",            label: "Ideal (Tuner)",    desc: "Best params learned by the live tuner" },
+  { name: "divergent",        label: "Divergent",        desc: "Loosened gates + wider RSI" },
+  { name: "aggressive",       label: "Aggressive",       desc: "Competition sizing, lower threshold" },
+  { name: "defensive",        label: "Defensive",        desc: "High conf threshold, narrower RSI" },
+  { name: "regime_trending",  label: "Regime: Trending", desc: "Tuned for TREND_UP/DOWN" },
+  { name: "regime_ranging",   label: "Regime: Ranging",  desc: "Tuned for RANGING" },
+  { name: "regime_volatile",  label: "Regime: Volatile", desc: "Tuned for VOLATILE" },
+];
+
+function TabSwitcher({ activeTab, onChange, backtestRunning }) {
+  const tabs = [
+    { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
+    { key: "BACKTEST", label: "BACKTEST", color: COLORS.blue },
+    { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
+  ];
+  return (
+    <div style={{ display: "flex", gap: 4, padding: "8px 0" }}>
+      {tabs.map(t => {
+        const active = activeTab === t.key;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onChange(t.key)}
+            style={{
+              padding: "6px 14px",
+              fontSize: 11,
+              fontWeight: 700,
+              fontFamily: mono,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              background: active ? `${t.color}18` : "transparent",
+              color: active ? t.color : COLORS.textDim,
+              border: `1px solid ${active ? t.color + "60" : COLORS.panelBorder}`,
+              borderRadius: 4,
+              cursor: "pointer",
+              outline: "none",
+              transition: "all 0.15s ease",
+            }}
+          >
+            {t.label}
+            {t.key === "BACKTEST" && backtestRunning ? (
+              <span style={{ marginLeft: 6, display: "inline-block", width: 6, height: 6,
+                             borderRadius: "50%", background: COLORS.blue, boxShadow: `0 0 4px ${COLORS.blue}` }} />
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FieldLabel({ children, hint }) {
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
+                    letterSpacing: "0.1em", fontFamily: mono, fontWeight: 600 }}>
+        {children}
+      </div>
+      {hint && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: mono, marginTop: 2 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        width: "100%",
+        padding: "7px 10px",
+        background: COLORS.bg,
+        color: COLORS.text,
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 4,
+        fontSize: 12,
+        fontFamily: mono,
+        outline: "none",
+        boxSizing: "border-box",
+      }}
+      onFocus={(e) => (e.target.style.borderColor = COLORS.blue)}
+      onBlur={(e) => (e.target.style.borderColor = COLORS.panelBorder)}
+      {...rest}
+    />
+  );
+}
+
+function StyledSelect({ value, onChange, options }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: "100%",
+        padding: "7px 10px",
+        background: COLORS.bg,
+        color: COLORS.text,
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 4,
+        fontSize: 12,
+        fontFamily: mono,
+        outline: "none",
+      }}
+    >
+      {options.map(o => (
+        <option key={o.name} value={o.name} style={{ background: COLORS.panel }}>
+          {o.label} — {o.desc}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function StyledTextarea({ value, onChange, placeholder, minHeight = 70 }) {
+  return (
+    <textarea
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        width: "100%",
+        minHeight,
+        padding: "8px 10px",
+        background: COLORS.bg,
+        color: COLORS.text,
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 4,
+        fontSize: 12,
+        fontFamily: mono,
+        outline: "none",
+        resize: "vertical",
+        boxSizing: "border-box",
+      }}
+      onFocus={(e) => (e.target.style.borderColor = COLORS.blue)}
+      onBlur={(e) => (e.target.style.borderColor = COLORS.panelBorder)}
+    />
+  );
+}
+
+function Checkbox({ checked, onChange, label, hint }) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontFamily: mono, fontSize: 11, color: COLORS.text }}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}
+             style={{ marginTop: 2, accentColor: COLORS.blue, cursor: "pointer" }} />
+      <span>
+        {label}
+        {hint && <div style={{ fontSize: 9, color: COLORS.textMuted, marginTop: 2 }}>{hint}</div>}
+      </span>
+    </label>
+  );
+}
+
+function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResultId,
+                                completedCount = 0, reviewedCount = 0 }) {
+  const [preset, setPreset] = useState("default");
+  const [hypothesis, setHypothesis] = useState("");
+  const [pairs, setPairs] = useState("SOL/USDC");
+  const [nCandles, setNCandles] = useState(500);
+  const [seed, setSeed] = useState(42);
+  const [withMC, setWithMC] = useState(true);
+  const [withWF, setWithWF] = useState(false);
+
+  const hypothesisValid = hypothesis.trim().length >= 8;
+  const nCandlesNum = Number(nCandles);
+  const nCandlesValid = Number.isFinite(nCandlesNum) && nCandlesNum >= 50 && nCandlesNum <= 20000;
+  const canSubmit = connected && !disabled && hypothesisValid && nCandlesValid;
+
+  const submit = () => {
+    if (!canSubmit) return;
+    // Mirrors hydra_backtest_server._start handler payload.
+    // BacktestConfig requires JSON-encoded dict fields (frozen-safe) — this
+    // keeps `config` shape identical to what `BacktestConfig(...)` accepts.
+    const config = {
+      name: `dashboard:${preset}`,
+      description: "dashboard-submitted run",
+      hypothesis: hypothesis.trim(),
+      pairs: pairs.split(",").map(p => p.trim()).filter(Boolean),
+      initial_balance_per_pair: 100.0,
+      candle_interval: 15,
+      mode: preset === "aggressive" ? "competition" : "conservative",
+      param_overrides_json: "{}",
+      coordinator_enabled: true,
+      data_source: "synthetic",
+      data_source_params_json: JSON.stringify({
+        kind: "gbm", n_candles: nCandlesNum, seed: Number(seed), volatility: 0.02,
+      }),
+      fill_model: "realistic",
+      maker_fee_bps: 16.0,
+      real_time_factor: 0.0,
+      random_seed: Number(seed),
+      max_ticks: 200000,
+    };
+    onSubmit({
+      type: "backtest_start",
+      config,
+      hypothesis: hypothesis.trim(),
+      triggered_by: "dashboard",
+      tags: ["caller:dashboard", `preset:${preset}`, ...(withMC ? ["mc"] : []), ...(withWF ? ["wf"] : [])],
+    });
+  };
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16, alignItems: "start" }}>
+      {/* LEFT: control form */}
+      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                    borderRadius: 8, padding: 16 }}>
+        <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                      marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <FieldLabel>Preset</FieldLabel>
+            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} />
+          </div>
+
+          <div>
+            <FieldLabel hint="Min 8 chars. Logged + reviewed by the AI observer.">Hypothesis *</FieldLabel>
+            <StyledTextarea
+              value={hypothesis}
+              onChange={setHypothesis}
+              placeholder="e.g., tighter RSI upper should reduce false BUYs in VOLATILE regime"
+            />
+            {!hypothesisValid && hypothesis.length > 0 && (
+              <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
+                {8 - hypothesis.trim().length} more character(s) required
+              </div>
+            )}
+          </div>
+
+          <div>
+            <FieldLabel>Pairs (comma-separated)</FieldLabel>
+            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div>
+              <FieldLabel>Candles</FieldLabel>
+              <StyledInput value={nCandles} onChange={setNCandles} type="number" />
+              {!nCandlesValid && (
+                <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
+                  50-20000
+                </div>
+              )}
+            </div>
+            <div>
+              <FieldLabel>Seed</FieldLabel>
+              <StyledInput value={seed} onChange={setSeed} type="number" />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+            <Checkbox
+              checked={withMC} onChange={setWithMC}
+              label="Monte Carlo bootstrap"
+              hint="Block-resample trade profits; computes CIs for the rigor gates."
+            />
+            <Checkbox
+              checked={withWF} onChange={setWithWF}
+              label="Walk-forward re-test"
+              hint="Slides train/test windows; slower but required for wf_majority_improved gate."
+            />
+          </div>
+
+          <button
+            onClick={submit}
+            disabled={!canSubmit}
+            style={{
+              marginTop: 6,
+              padding: "10px 16px",
+              fontSize: 12,
+              fontWeight: 700,
+              fontFamily: mono,
+              textTransform: "uppercase",
+              letterSpacing: "0.1em",
+              background: canSubmit ? COLORS.blue : COLORS.panelBorder,
+              color: canSubmit ? "#0a0a0f" : COLORS.textMuted,
+              border: `1px solid ${canSubmit ? COLORS.blue : COLORS.panelBorder}`,
+              borderRadius: 4,
+              cursor: canSubmit ? "pointer" : "not-allowed",
+              outline: "none",
+              boxShadow: canSubmit ? `0 0 10px ${COLORS.blue}40` : "none",
+              transition: "all 0.15s ease",
+            }}
+          >
+            Run Backtest
+          </button>
+
+          {!connected && (
+            <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono }}>
+              Disconnected — start hydra_agent.py to enable.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* RIGHT: status + ack feedback */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                      borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                        marginBottom: 10 }}>
+            Backtest Status
+          </div>
+          {ackMsg ? (
+            <div>
+              <div style={{ fontFamily: mono, fontSize: 11,
+                            color: ackMsg.success ? COLORS.accent : COLORS.danger }}>
+                {ackMsg.success ? "✓ Submitted" : "✗ Rejected"}
+              </div>
+              {ackMsg.experiment_id && (
+                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
+                  experiment_id: <span style={{ color: COLORS.text }}>{ackMsg.experiment_id.slice(0, 16)}…</span>
+                </div>
+              )}
+              {ackMsg.error && (
+                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.danger, marginTop: 4 }}>
+                  {ackMsg.error}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+              No backtest submitted this session.
+            </div>
+          )}
+          {(lastResultId || completedCount > 0) && (
+            <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 10,
+                          paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+              {lastResultId && (
+                <div>Last completed: <span style={{ color: COLORS.accent }}>{lastResultId.slice(0, 16)}…</span></div>
+              )}
+              <div style={{ marginTop: 4 }}>
+                Session: <span style={{ color: COLORS.text }}>{completedCount}</span> completed
+                {reviewedCount > 0 && (
+                  <>, <span style={{ color: COLORS.purple }}>{reviewedCount}</span> reviewed</>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Observer modal (Phase 9) + review panel (Phase 10) dock into this space */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                      borderRadius: 8, padding: 16, minHeight: 180 }}>
+          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                        marginBottom: 10 }}>
+            Observer
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+            Dual-state observer modal lands in Phase 9 — backtest progress will stream here in real time
+            alongside the LIVE tab's pair cards.
+          </div>
+        </div>
+
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                      borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                        marginBottom: 10 }}>
+            Rigor Gates
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, lineHeight: 1.6 }}>
+            Every completed backtest is reviewed against 7 code-enforced gates:<br />
+            <span style={{ color: COLORS.text }}>min_trades_50</span> • {" "}
+            <span style={{ color: COLORS.text }}>mc_ci_lower_positive</span> • {" "}
+            <span style={{ color: COLORS.text }}>wf_majority_improved</span><br />
+            <span style={{ color: COLORS.text }}>oos_gap_acceptable</span> • {" "}
+            <span style={{ color: COLORS.text }}>improvement_above_2se</span> • {" "}
+            <span style={{ color: COLORS.text }}>cross_pair_majority</span> • {" "}
+            <span style={{ color: COLORS.text }}>regime_not_concentrated</span><br /><br />
+            A proposed param change is auto-apply-eligible ONLY when every gate passes. The AI reviewer
+            cannot override gates via reasoning — anti-handwaving is architectural, not prompt-level.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompareView() {
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                  borderRadius: 8, padding: 24, display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", minHeight: 320 }}>
+      <div style={{ fontSize: 32, color: COLORS.textMuted, marginBottom: 12 }}>⚖</div>
+      <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 8 }}>
+        Compare View
+      </div>
+      <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, textAlign: "center", maxWidth: 420 }}>
+        Multi-experiment ranked comparison with per-metric winners and paired bootstrap p-values.
+        Wiring lands in Phase 10 alongside the experiment library.
+      </div>
+    </div>
+  );
+}
+
 function ConnectionStatus({ connected, tick }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -179,12 +586,35 @@ export default function App() {
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
   const [orderJournal, setOrderJournal] = useState([]);
+  // Phase 8: tab switcher + backtest message stash
+  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | BACKTEST | COMPARE
+  const [btProgress, setBtProgress] = useState({});     // experiment_id -> progress msg
+  const [btResults, setBtResults] = useState({});       // experiment_id -> result summary
+  const [btReviews, setBtReviews] = useState({});       // experiment_id -> review
+  const [btLastAck, setBtLastAck] = useState(null);     // most recent backtest_start_ack
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // Latest `connect` closure — the setTimeout reconnect callback reads
+  // through this ref instead of the stale closure it captured at
+  // definition-time (otherwise ESLint flags a use-before-declare and the
+  // retry can fire against an outdated applyLiveState handler after HMR).
+  const connectRef = useRef(null);
   // mountedRef guards against setState-on-unmounted warnings (noticeable
   // in StrictMode which double-mounts in dev). WS callbacks capture the
   // ref closure and bail out cleanly when the component has unmounted.
   const mountedRef = useRef(true);
+
+  // Shared state applier — invoked by BOTH the legacy raw-state path and
+  // the new wrapped {type:"state", data:state} path.
+  const applyLiveState = useCallback((data) => {
+    setState(data);
+    if (data.pairs) {
+      const liveTotal = data.balance_usd?.total_usd;
+      const engineEquity = Object.values(data.pairs).reduce((sum, p) => sum + (p.portfolio?.equity || 0), 0);
+      setHistory((prev) => [...prev, liveTotal != null ? liveTotal : engineEquity].slice(-500));
+    }
+    if (data.order_journal) setOrderJournal(data.order_journal);
+  }, []);
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
@@ -194,22 +624,66 @@ export default function App() {
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
       try {
-        const data = JSON.parse(event.data);
-        setState(data);
-        if (data.pairs) {
-          const liveTotal = data.balance_usd?.total_usd;
-          const engineEquity = Object.values(data.pairs).reduce((sum, p) => sum + (p.portfolio?.equity || 0), 0);
-          setHistory((prev) => [...prev, liveTotal != null ? liveTotal : engineEquity].slice(-500));
+        const msg = JSON.parse(event.data);
+
+        // Phase 6+ wrapped state: {type:"state", data:{...}}
+        if (msg && msg.type === "state" && msg.data) {
+          applyLiveState(msg.data);
+          return;
         }
-        if (data.order_journal) setOrderJournal(data.order_journal);
+        // New typed messages (Phase 6+)
+        if (msg && typeof msg.type === "string") {
+          switch (msg.type) {
+            case "backtest_progress":
+              setBtProgress((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              return;
+            case "backtest_result":
+              setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              return;
+            case "backtest_review":
+              setBtReviews((prev) => ({ ...prev, [msg.experiment_id]: msg.review }));
+              return;
+            case "backtest_start_ack":
+              setBtLastAck(msg);
+              return;
+            case "error":
+              // Backtest channel errors land here; keep quiet otherwise.
+              if (msg.channel === "backtest") setBtLastAck(msg);
+              return;
+            default:
+              // Unknown wrapped message → fall through to legacy raw-state path
+              // below if and only if it doesn't look like wrapped signaling.
+              if (msg.type.endsWith("_ack")) return;   // ignore other acks
+              break;
+          }
+        }
+        // Legacy: raw live-state dict (compat_mode=true on the broadcaster
+        // side). Treat as the live tick state.
+        applyLiveState(msg);
       } catch (e) { console.error("[HYDRA] Parse error:", e); }
     };
     ws.onclose = () => {
       if (!mountedRef.current) return;
       setConnected(false);
-      reconnectRef.current = setTimeout(connect, 3000);
+      reconnectRef.current = setTimeout(() => connectRef.current?.(), 3000);
     };
     ws.onerror = () => { ws.close(); };
+  }, [applyLiveState]);
+
+  // Keep `connectRef` pointing at the freshest connect closure
+  useEffect(() => { connectRef.current = connect; }, [connect]);
+
+  // Phase 8: send a typed WS message (used by BacktestControlPanel).
+  const sendMessage = useCallback((msg) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify(msg));
+      return true;
+    } catch (e) {
+      console.error("[HYDRA] WS send error:", e);
+      return false;
+    }
   }, []);
 
   useEffect(() => {
@@ -279,6 +753,11 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <TabSwitcher
+            activeTab={activeTab}
+            onChange={setActiveTab}
+            backtestRunning={Object.values(btProgress).some(p => p?.stage === "running")}
+          />
           <div style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.danger}20`, color: aiBrain ? COLORS.blue : COLORS.danger, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.danger}40`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
             {aiBrain ? "AI LIVE" : "LIVE TRADING"}
           </div>
@@ -291,7 +770,28 @@ export default function App() {
         </div>
       </div>
 
-      {(!connected && !state) || (state && pairNames.length === 0) ? (
+      {/* Phase 8: BACKTEST + COMPARE tab content. LIVE falls through to the
+          existing grid below. */}
+      {activeTab === "BACKTEST" && (
+        <div style={{ padding: "16px 24px" }}>
+          <BacktestControlPanel
+            onSubmit={sendMessage}
+            connected={connected}
+            disabled={false}
+            ackMsg={btLastAck}
+            lastResultId={Object.keys(btResults).slice(-1)[0] || null}
+            completedCount={Object.keys(btResults).length}
+            reviewedCount={Object.keys(btReviews).length}
+          />
+        </div>
+      )}
+      {activeTab === "COMPARE" && (
+        <div style={{ padding: "16px 24px" }}>
+          <CompareView />
+        </div>
+      )}
+
+      {activeTab === "LIVE" && ((!connected && !state) || (state && pairNames.length === 0)) ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
           <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
           <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
@@ -302,7 +802,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {state && pairNames.length > 0 && (
+      {activeTab === "LIVE" && state && pairNames.length > 0 && (
         <div style={{ padding: "16px 24px" }}>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
@@ -477,7 +977,7 @@ export default function App() {
                     // the outer `state` component state variable.
                     const entryState = lifecycle.state || "PLACED";
                     const isFilled = entryState === "FILLED";
-                    const isTerminal = entryState === "FILLED" || entryState === "PARTIALLY_FILLED";
+                    const _isTerminal = entryState === "FILLED" || entryState === "PARTIALLY_FILLED";  // reserved for terminal-specific styling
                     const icon = isFilled ? "\u2713" : (entryState === "PLACED" ? "\u22ef" : "\u2717");
                     const iconColor = isFilled ? COLORS.accent : (entryState === "PLACED" ? COLORS.textDim : COLORS.danger);
                     const amount = intent.amount || 0;
