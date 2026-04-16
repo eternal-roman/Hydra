@@ -24,6 +24,18 @@ from hydra_backtest import (  # noqa: E402
 )
 
 
+def _neutralize_circuit_breaker():
+    """Drift test invariant is signal-layer equivalence, not halt-state
+    equivalence. With Fix 5/6, the direct path (no execute_signal) and the
+    backtester path (execute_signal + filler rollback) produce different
+    peak_equity/max_drawdown trajectories — either path can halt while the
+    other doesn't, producing spurious 'drift' at the halt transition.
+    Disabling the circuit breaker at the class level ensures the halt branch
+    is never taken in either path. Both use the same class; this neutralizes
+    both uniformly."""
+    HydraEngine.CIRCUIT_BREAKER_PCT = 10_000.0
+
+
 class TestZeroDrift(unittest.TestCase):
     """The backtester's tick-by-tick engine outputs must match a direct
     HydraEngine loop on the same candles and params (I7).
@@ -35,8 +47,27 @@ class TestZeroDrift(unittest.TestCase):
     signal-layer + pre-fill engine decisions.
     """
 
+    def setUp(self):
+        _neutralize_circuit_breaker()
+        self._original_cb = HydraEngine.CIRCUIT_BREAKER_PCT
+
+    def tearDown(self):
+        HydraEngine.CIRCUIT_BREAKER_PCT = 15.0  # repo default; see hydra_engine.py
+
     def _collect_direct(self, candles, candle_interval=15):
-        """Run a single HydraEngine through the candles and collect per-tick state."""
+        """Run a single HydraEngine through the candles and collect per-tick state.
+
+        Uses tick(generate_only=True) — no execute_signal. Under Fix 5/6
+        (signal-semantic changes), the backtester's execute_signal +
+        SimulatedFiller-rejection path and the direct path's no-execute path
+        produce different balance/position trajectories. setUp()
+        neutralizes HydraEngine.CIRCUIT_BREAKER_PCT at the class level so
+        the halt branch is never taken in either path. The drift invariant
+        we actually care about is: same engine code produces same
+        signal-layer outputs given same candle inputs — halt-state
+        divergence from different execute_signal trajectories is out of
+        scope.
+        """
         engine = HydraEngine(
             initial_balance=100.0,
             asset="SOL/USDC",
