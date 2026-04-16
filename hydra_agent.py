@@ -1554,6 +1554,11 @@ class HydraAgent:
         # Monotonic client tag seeded from wall-clock to avoid collisions
         # across restarts; flows into Kraken as --userref and comes back on
         # the WS executions stream as order_userref for correlation.
+        #
+        # This initial time-seed is a floor — after snapshot load and journal
+        # merge, _reseed_userref_from_history() raises it above anything we've
+        # used in the past. Without that, a restart within the same second as
+        # a killed session could collide with still-open orders' userrefs.
         self._userref_counter = int(time.time()) & 0x7FFFFFFF
 
         # Sizing config based on mode
@@ -1693,6 +1698,11 @@ class HydraAgent:
         # full depth (bounded by ORDER_JOURNAL_CAP).
         self._merge_order_journal()
 
+        # Reseed _userref_counter above anything we've used historically.
+        # Must run AFTER both _load_snapshot (may carry a persisted counter)
+        # AND _merge_order_journal (gives us the historical high-water mark).
+        self._reseed_userref_from_history()
+
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
         sig.signal(sig.SIGTERM, self._handle_shutdown)
@@ -1751,6 +1761,9 @@ class HydraAgent:
             "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
             "coordinator_regime_history": self.coordinator.regime_history,
             "order_journal": self.order_journal[-200:],
+            # Persist the userref counter so a restart never re-issues a
+            # userref already in-flight on the exchange from this session.
+            "userref_counter": self._userref_counter,
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -1806,6 +1819,12 @@ class HydraAgent:
             self._normalize_journal_pairs(self.order_journal)
             if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
+            # Carry the persisted userref floor into _userref_counter. The
+            # _reseed_userref_from_history() call in __init__ will raise it
+            # further if the journal reveals higher values.
+            persisted_uref = snapshot.get("userref_counter")
+            if isinstance(persisted_uref, int) and 0 < persisted_uref < (1 << 31):
+                self._userref_counter = max(self._userref_counter, persisted_uref)
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
@@ -2793,13 +2812,54 @@ class HydraAgent:
 
     # ─── Order placement (writes the journal, registers with the stream) ───
 
+    # Safety gap: when reseeding from journal history, jump this far ahead
+    # so we're not sharing the immediate neighborhood with any recent entry.
+    _USERREF_SAFETY_GAP = 1000
+
+    def _journal_max_userref(self) -> int:
+        """Scan self.order_journal for the highest integer userref seen.
+        Returns 0 if none found."""
+        hi = 0
+        for entry in self.order_journal:
+            if not isinstance(entry, dict):
+                continue
+            ref = entry.get("order_ref") or {}
+            if not isinstance(ref, dict):
+                continue
+            uref = ref.get("order_userref")
+            if isinstance(uref, int) and 0 < uref < (1 << 31) and uref > hi:
+                hi = uref
+        return hi
+
+    def _reseed_userref_from_history(self) -> None:
+        """Raise _userref_counter above anything historically used.
+
+        Called once in __init__ after snapshot load + journal merge. Protects
+        against restart-collision: if the previous session left open orders
+        with userrefs near the current time (the default seed), a fresh seed
+        could re-issue the same userref and route WS fills to the wrong
+        journal entry via _userref_to_order_id.
+        """
+        journal_max = self._journal_max_userref()
+        if journal_max > 0:
+            new_floor = min(journal_max + self._USERREF_SAFETY_GAP, 0x7FFFFFFF)
+            if new_floor > self._userref_counter:
+                self._userref_counter = new_floor
+
     def _next_userref(self) -> int:
         """Monotonic client tag used for --userref on placement so WS
         executions can correlate back to the local journal entry."""
         self._userref_counter += 1
-        # Kraken userref is int32. Wrap defensively.
+        # Kraken userref is int32. Wrap defensively — re-consult history so
+        # the wrap-reseed can't land back on a still-open order's userref.
         if self._userref_counter > 0x7FFFFFFF:
-            self._userref_counter = int(time.time()) & 0x7FFFFFFF
+            time_seed = int(time.time()) & 0x7FFFFFFF
+            journal_max = self._journal_max_userref()
+            self._userref_counter = max(time_seed, journal_max + self._USERREF_SAFETY_GAP)
+            if self._userref_counter > 0x7FFFFFFF:
+                # Extreme degenerate case: journal has values near 2^31. Fall
+                # back to time_seed alone, accepting the micro-collision risk.
+                self._userref_counter = time_seed
         return self._userref_counter
 
     def _build_journal_entry(self, pair: str, trade: dict, state: dict) -> Dict[str, Any]:
