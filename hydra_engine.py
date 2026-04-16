@@ -511,23 +511,40 @@ class SignalGenerator:
                 indicators=indicators,
             )
 
-        # SELL: RSI overbought always triggers; MACD requires meaningful fade
-        # that is worsening or a fresh crossover below zero.
+        # SELL: symmetric with BUY — require ALL of {RSI meaningful, MACD
+        # fading past noise, price below BB mid, fading-or-fresh}. Previously
+        # SELL used OR of just {rsi > upper+5, macd_fading}, letting a single
+        # indicator noise flip us out of trending winners. Fix 5 makes entry
+        # and exit structurally symmetric — "losing entries is just as bad as
+        # losing exits" per the capital-discipline mandate.
+        #
+        # Emergency override at rsi > rsi_upper + 15: a truly extreme
+        # overbought reading is still enough on its own (e.g., RSI > 85 on
+        # default 70 threshold) — this preserves the "panic exit" capability
+        # without letting moderate overbought (75-85) alone trigger.
         macd_fading = (hist < -noise_floor and (hist < prev or prev >= 0))
-        overbought_threshold = rsi_upper + 5
-        rsi_overbought = rsi > overbought_threshold
-        if rsi_overbought or macd_fading:
+        symmetric_sell = (
+            rsi_lower < rsi < rsi_upper
+            and hist < -noise_floor
+            and price < bb["middle"]
+            and (hist < prev or prev >= 0)
+        )
+        extreme_overbought = rsi > rsi_upper + 15
+        if symmetric_sell or extreme_overbought:
             rsi_strength = max(0.0, rsi - rsi_upper) / (100.0 - rsi_upper) if rsi_upper < 100 else 0.0
             macd_strength = min(1.0, abs(hist) / ctx["atr"]) if hist < 0 and ctx["atr"] > 0 else 0.0
             primary = max(rsi_strength, macd_strength)
             vol = SignalGenerator._vol_bonus(ctx)
             conf = min(0.90, BASE + primary * 0.35 + vol)
+            if extreme_overbought and not symmetric_sell:
+                reason = f"Momentum fading: RSI {rsi:.1f} > {rsi_upper + 15:.0f} extreme overbought"
+            else:
+                reason = (f"Momentum fading: MACD hist {hist:.2f} < 0, "
+                          f"price {_fmt_price(price)} < BB mid {_fmt_price(bb['middle'])}, RSI {rsi:.1f}")
             return Signal(
                 action=SignalAction.SELL,
                 confidence=conf,
-                reason=f"Momentum fading: RSI {rsi:.1f}" +
-                       (f" > {overbought_threshold:.0f} overbought" if rsi_overbought
-                        else f", MACD crossed negative"),
+                reason=reason,
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
