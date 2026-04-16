@@ -3223,11 +3223,34 @@ class HydraAgent:
                     print(f"  [HYDRA] {pair} {side} {txid}: {state} "
                           f"(vol={vol_exec:.8f}, reconciled on resume)")
 
-                    # Engine rollback is not possible for previous-session
-                    # entries (pre_trade_snapshot not persisted). If the order
-                    # was CANCELLED_UNFILLED, the engine's position may be
-                    # over-committed from the snapshot restore. Log loudly.
-                    if state in ("CANCELLED_UNFILLED", "REJECTED"):
+                    # Previous-session fills have no pre_trade_snapshot (not
+                    # persisted). We use the arithmetic fallback in
+                    # reconcile_partial_fill for PARTIALLY_FILLED, accepting
+                    # minor avg_entry drift if the original trade was an
+                    # average-in. For fully unfilled, log — operator verifies.
+                    if state == "PARTIALLY_FILLED":
+                        engine = self.engines.get(pair)
+                        placed = float(entry.get("intent", {}).get("amount", 0) or 0)
+                        limit_px = avg_price if avg_price else float(
+                            entry.get("intent", {}).get("limit_price", 0) or 0
+                        )
+                        if engine and placed > 0 and limit_px > 0:
+                            try:
+                                engine.reconcile_partial_fill(
+                                    side=side,
+                                    placed_amount=placed,
+                                    vol_exec=vol_exec,
+                                    limit_price=limit_px,
+                                    pre_trade_snapshot=None,
+                                    reason=f"PARTIALLY_FILLED reconciled on resume ({txid})",
+                                )
+                                print(f"  [HYDRA] {pair} {side} engine adjusted "
+                                      f"(arithmetic fallback; avg_entry may drift "
+                                      f"slightly if original was an average-in)")
+                            except Exception as e:
+                                print(f"  [WARN] {pair} {side} partial-fill reconcile "
+                                      f"failed ({e}); engine over-committed")
+                    elif state in ("CANCELLED_UNFILLED", "REJECTED"):
                         print(f"  [WARN] {pair} {side} was never filled — engine position may be "
                               f"stale from snapshot. Operator should verify.")
                     reconciled += 1
@@ -3321,16 +3344,35 @@ class HydraAgent:
             return
         if state_name == "PARTIALLY_FILLED":
             # Engine was optimistically committed to the full placed_amount;
-            # actual fill was only vol_exec. HydraEngine does not yet
-            # expose a partial-adjust primitive, so v1 leaves the engine
-            # over-committed (erring toward not re-placing on top) and the
-            # journal carries the true vol_exec for correct P&L. Logged
-            # loudly so the operator sees any divergence. Follow-up:
-            # HydraEngine.adjust_position(target_size) for exact handling.
+            # actual fill was only vol_exec. reconcile_partial_fill restores
+            # to the pre-trade snapshot and replays only the vol_exec portion,
+            # leaving engine state indistinguishable from a world in which
+            # execute_signal had been called with the real fill amount.
             ratio = (vol_exec / placed_amount) if placed_amount > 0 else 0.0
-            print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
-                  f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
-                  f"engine over-committed; journal has correct vol_exec")
+            limit_price = float(event.get("avg_fill_price") or 0.0)
+            if limit_price <= 0 and engine is not None and engine.prices:
+                # Fallback when Kraken didn't report an avg_fill_price
+                limit_price = engine.prices[-1]
+            if engine is not None:
+                try:
+                    engine.reconcile_partial_fill(
+                        side=side or "",
+                        placed_amount=float(placed_amount),
+                        vol_exec=float(vol_exec),
+                        limit_price=limit_price,
+                        pre_trade_snapshot=pre_snap,
+                        reason=f"PARTIALLY_FILLED: {event.get('terminal_reason') or ''}",
+                    )
+                    print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                          f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
+                          f"engine reconciled to actual fill")
+                except Exception as e:
+                    print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                          f"reconcile failed ({e}); engine may be over-committed")
+            else:
+                print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                      f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
+                      f"no engine_ref; journal carries truth but engine is stale")
             return
 
     def _run_tuner_update(self):
