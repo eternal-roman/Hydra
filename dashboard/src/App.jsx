@@ -319,7 +319,10 @@ function Checkbox({ checked, onChange, label, hint }) {
 }
 
 function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResultId,
-                                completedCount = 0, reviewedCount = 0 }) {
+                                completedCount = 0, reviewedCount = 0,
+                                observerProgress = null, observerResult = null,
+                                observerReview = null, observerEquity = null,
+                                observerTotalTicks = 0, onObserverClose = null }) {
   const [preset, setPreset] = useState("default");
   const [hypothesis, setHypothesis] = useState("");
   const [pairs, setPairs] = useState("SOL/USDC");
@@ -509,18 +512,31 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           )}
         </div>
 
-        {/* Observer modal (Phase 9) + review panel (Phase 10) dock into this space */}
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 8, padding: 16, minHeight: 180 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                        marginBottom: 10 }}>
-            Observer
+        {/* Phase 9: Dual-state Observer — backtest pair cards stream here
+            live during a run, using the same visual language as LIVE. */}
+        {(observerProgress || observerResult) ? (
+          <ObserverModal
+            progress={observerProgress}
+            result={observerResult}
+            review={observerReview}
+            equityHistory={observerEquity}
+            totalTicks={observerTotalTicks}
+            variant="dock"
+            onClose={onObserverClose}
+          />
+        ) : (
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16, minHeight: 180 }}>
+            <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 10 }}>
+              Observer
+            </div>
+            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+              Submit a backtest to stream per-tick pair state here in real time —
+              the same pair cards, regime badges, and equity curves as the LIVE view.
+            </div>
           </div>
-          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
-            Dual-state observer modal lands in Phase 9 — backtest progress will stream here in real time
-            alongside the LIVE tab's pair cards.
-          </div>
-        </div>
+        )}
 
         <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                       borderRadius: 8, padding: 16 }}>
@@ -542,6 +558,337 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 9: Dual-state Observer Modal
+// ═══════════════════════════════════════════════════════════════
+
+// Stage color map mirrors LIVE signal/regime palette so the observer
+// reads at a glance as a variant of the live view.
+function stageColor(stage) {
+  if (stage === "running") return COLORS.blue;
+  if (stage === "started") return COLORS.textDim;
+  if (stage === "cancelled") return COLORS.warn;
+  if (stage === "failed") return COLORS.danger;
+  if (stage === "complete") return COLORS.accent;
+  return COLORS.textDim;
+}
+
+function ObserverProgressBar({ tick, totalTicks, stage }) {
+  const pct = totalTicks > 0 ? Math.min(100, Math.max(0, (tick / totalTicks) * 100)) : 0;
+  const color = stageColor(stage);
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10,
+                    fontFamily: mono, color: COLORS.textDim, marginBottom: 4 }}>
+        <span>
+          tick <span style={{ color: COLORS.text }}>{tick}</span>
+          {totalTicks > 0 && <> / {totalTicks}</>}
+        </span>
+        <span style={{ color, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+          {stage || "—"}
+        </span>
+      </div>
+      <div style={{ height: 4, background: COLORS.panelBorder, borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: color,
+                      boxShadow: `0 0 6px ${color}80`, transition: "width 0.2s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+// Compact per-pair card for the observer. Intentionally a separate visual
+// from LIVE's PairPanel (simpler, smaller) because the observer coexists
+// with the LIVE grid on the LIVE tab — we want a distinct affordance.
+function ObserverPairCard({ pair, state, equityHistory }) {
+  if (!state) return null;
+  const sig = state.signal || {};
+  const port = state.portfolio || {};
+  const pos = state.position || {};
+  const regimeC = regimeColor(state.regime);
+  const sigC = signalColor(sig.action);
+  const px = pairPrefix(pair);
+
+  return (
+    <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
+                  borderRadius: 6, padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginBottom: 8 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>
+          {pair}
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 9, fontFamily: mono, color: regimeC,
+                         background: `${regimeC}18`, padding: "2px 6px", borderRadius: 3,
+                         letterSpacing: "0.08em" }}>
+            {state.regime || "—"}
+          </span>
+          <span style={{ fontSize: 9, fontFamily: mono, color: sigC, fontWeight: 700 }}>
+            {sig.action || "HOLD"}
+          </span>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10,
+                    fontFamily: mono }}>
+        <span style={{ color: COLORS.textDim }}>Price</span>
+        <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtPrice(state.price, px)}</span>
+        <span style={{ color: COLORS.textDim }}>Equity</span>
+        <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtPrice(port.equity, px)}</span>
+        <span style={{ color: COLORS.textDim }}>Position</span>
+        <span style={{ color: pos.size > 0 ? COLORS.accent : COLORS.textMuted, textAlign: "right" }}>
+          {fmtInd(pos.size)}
+        </span>
+        <span style={{ color: COLORS.textDim }}>P&L%</span>
+        <span style={{ color: (port.pnl_pct || 0) >= 0 ? COLORS.buy : COLORS.sell, textAlign: "right" }}>
+          {(port.pnl_pct || 0).toFixed(2)}%
+        </span>
+      </div>
+      {equityHistory && equityHistory.length >= 2 && (
+        <div style={{ marginTop: 8 }}>
+          <MiniChart
+            data={equityHistory}
+            width={240}
+            height={36}
+            color={(port.pnl_pct || 0) >= 0 ? COLORS.accent : COLORS.danger}
+            filled
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GatesSummary({ review }) {
+  if (!review || !review.gates_passed) return null;
+  const gates = review.gates_passed;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4,
+                  fontFamily: mono, fontSize: 10 }}>
+      {Object.entries(gates).map(([name, passed]) => (
+        <div key={name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 10, height: 10, borderRadius: "50%",
+                         background: passed ? COLORS.accent : COLORS.danger,
+                         boxShadow: passed ? `0 0 4px ${COLORS.accent}80` : `0 0 4px ${COLORS.danger}80`,
+                         display: "inline-block" }} />
+          <span style={{ color: passed ? COLORS.text : COLORS.textDim,
+                         textDecoration: passed ? "none" : "line-through" }}>
+            {name}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReviewPanel({ review }) {
+  if (!review) return null;
+  const verdictColor = {
+    NO_CHANGE:          COLORS.textDim,
+    PARAM_TWEAK:        COLORS.accent,
+    CODE_REVIEW:        COLORS.blue,
+    RESULT_ANOMALOUS:   COLORS.warn,
+    HYPOTHESIS_REFUTED: COLORS.danger,
+  }[review.verdict] || COLORS.textDim;
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim,
+                       textTransform: "uppercase", letterSpacing: "0.1em" }}>
+          AI Reviewer
+        </span>
+        <span style={{ fontSize: 10, fontFamily: mono, fontWeight: 700,
+                       color: verdictColor,
+                       background: `${verdictColor}18`,
+                       padding: "2px 6px", borderRadius: 3, letterSpacing: "0.05em" }}>
+          {review.verdict}
+        </span>
+        {review.all_gates_passed && (
+          <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.accent }}>
+            ✓ all gates passed
+          </span>
+        )}
+        {review.original_verdict && review.original_verdict !== review.verdict && (
+          <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.warn }}>
+            (downgraded from {review.original_verdict})
+          </span>
+        )}
+      </div>
+
+      <GatesSummary review={review} />
+
+      {review.reasoning && (
+        <div style={{ fontSize: 10, fontFamily: mono, color: COLORS.textDim,
+                      marginTop: 8, lineHeight: 1.5 }}>
+          {review.reasoning.length > 280 ? review.reasoning.slice(0, 277) + "…" : review.reasoning}
+        </div>
+      )}
+
+      {Array.isArray(review.proposed_changes) && review.proposed_changes.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim,
+                        textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>
+            Proposed
+          </div>
+          {review.proposed_changes.map((pc, i) => (
+            <div key={i} style={{ fontFamily: mono, fontSize: 10, color: COLORS.text,
+                                   marginBottom: 4, paddingLeft: 6,
+                                   borderLeft: `2px solid ${verdictColor}` }}>
+              <span style={{ color: COLORS.textDim }}>{pc.scope}</span>{" "}
+              <span style={{ color: COLORS.blue }}>{pc.target}</span>
+              {pc.current_value != null && pc.proposed_value != null && (
+                <>: {pc.current_value} → <span style={{ color: COLORS.accent }}>{pc.proposed_value}</span></>
+              )}
+              {pc.expected_impact?.sharpe != null && (
+                <span style={{ color: COLORS.textMuted }}>
+                  {" "}(Δsharpe {pc.expected_impact.sharpe >= 0 ? "+" : ""}{pc.expected_impact.sharpe.toFixed(2)})
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {Array.isArray(review.risk_flags) && review.risk_flags.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 9, fontFamily: mono, color: COLORS.warn }}>
+          ⚠ {review.risk_flags.slice(0, 3).join(" | ")}
+          {review.risk_flags.length > 3 && ` (+${review.risk_flags.length - 3})`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ObserverModal({
+  progress,          // latest backtest_progress message: {experiment_id, tick, stage, dashboard_state}
+  result,            // backtest_result summary when complete
+  review,            // backtest_review payload when reviewed
+  equityHistory,     // {pair -> [equity...]}  accumulated from progress stream
+  totalTicks,        // best-effort total (from result candles_processed or dashboard_state.max)
+  variant = "dock",  // "dock" (fills column) | "floating" (slide-in on LIVE tab)
+  onClose,
+}) {
+  if (!progress && !result) return null;
+  const expId = progress?.experiment_id || result?.experiment_id || "—";
+  const stage = result ? (result.status || "complete") : (progress?.stage || "running");
+  const tick = progress?.tick ?? result?.metrics?.total_trades ?? 0;
+  const pairs = progress?.dashboard_state?.pairs || {};
+  const pairNames = Object.keys(pairs);
+  const summary = result?.metrics;
+  const hypothesis = result?.hypothesis || "";
+  const shellStyle = variant === "floating"
+    ? { position: "fixed", right: 16, top: 80, width: 360, maxHeight: "calc(100vh - 100px)",
+        overflowY: "auto", zIndex: 20,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.45)" }
+    : { };
+
+  return (
+    <div
+      style={{
+        ...shellStyle,
+        background: COLORS.panel,
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 8,
+        padding: 14,
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+                    marginBottom: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+            <span style={{ fontSize: 11, fontFamily: heading, fontWeight: 800,
+                           color: COLORS.blue, letterSpacing: "0.04em",
+                           textTransform: "uppercase" }}>
+              Observer
+            </span>
+            <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textMuted }}>
+              {expId.slice(0, 16)}…
+            </span>
+          </div>
+          {hypothesis && (
+            <div style={{ fontSize: 10, fontFamily: mono, color: COLORS.textDim,
+                          fontStyle: "italic", lineHeight: 1.4, marginTop: 2,
+                          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              "{hypothesis}"
+            </div>
+          )}
+        </div>
+        {onClose && (
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", color: COLORS.textDim, border: "none",
+                     cursor: "pointer", padding: 4, fontSize: 14, lineHeight: 1,
+                     fontFamily: mono }}
+            title="Close observer"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ marginBottom: 10 }}>
+        <ObserverProgressBar tick={tick} totalTicks={totalTicks || 0} stage={stage} />
+      </div>
+
+      {/* Terminal summary (shown once result lands) */}
+      {summary && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6,
+                      fontFamily: mono, fontSize: 10, marginBottom: 10,
+                      padding: "8px 10px", background: COLORS.bg,
+                      border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
+          <span style={{ color: COLORS.textDim }}>Trades</span>
+          <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.total_trades}</span>
+          <span style={{ color: COLORS.textDim }}>Return</span>
+          <span style={{ textAlign: "right",
+                         color: (summary.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
+            {(summary.total_return_pct || 0) >= 0 ? "+" : ""}{(summary.total_return_pct || 0).toFixed(2)}%
+          </span>
+          <span style={{ color: COLORS.textDim }}>Sharpe</span>
+          <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(summary.sharpe)}</span>
+          <span style={{ color: COLORS.textDim }}>Max DD</span>
+          <span style={{ color: COLORS.warn, textAlign: "right" }}>{(summary.max_drawdown_pct || 0).toFixed(2)}%</span>
+          {summary.profit_factor != null && (
+            <>
+              <span style={{ color: COLORS.textDim }}>Profit Factor</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.profit_factor.toFixed(2)}</span>
+            </>
+          )}
+          {summary.win_rate_pct != null && (
+            <>
+              <span style={{ color: COLORS.textDim }}>Win Rate</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.win_rate_pct.toFixed(0)}%</span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Per-pair cards — same visual DNA as LIVE */}
+      {pairNames.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {pairNames.map(pair => (
+            <ObserverPairCard
+              key={pair}
+              pair={pair}
+              state={pairs[pair]}
+              equityHistory={equityHistory?.[pair] || []}
+            />
+          ))}
+        </div>
+      )}
+
+      {!pairNames.length && !summary && (
+        <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textMuted,
+                      textAlign: "center", padding: "20px 0" }}>
+          Waiting for first tick…
+        </div>
+      )}
+
+      {/* AI Reviewer verdict */}
+      {review && <ReviewPanel review={review} />}
     </div>
   );
 }
@@ -592,6 +939,11 @@ export default function App() {
   const [btResults, setBtResults] = useState({});       // experiment_id -> result summary
   const [btReviews, setBtReviews] = useState({});       // experiment_id -> review
   const [btLastAck, setBtLastAck] = useState(null);     // most recent backtest_start_ack
+  // Phase 9: per-experiment rolling equity history for the observer modal.
+  // Shape: {experiment_id -> {pair -> [equity...]}}. Bounded to 500 pts/pair.
+  const [btEquityHistory, setBtEquityHistory] = useState({});
+  const [btActiveExpId, setBtActiveExpId] = useState(null);  // which exp the observer is focused on
+  const [observerClosed, setObserverClosed] = useState(false); // user dismissed → hide until a new run
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -636,6 +988,20 @@ export default function App() {
           switch (msg.type) {
             case "backtest_progress":
               setBtProgress((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              // Accumulate per-pair equity for the observer chart.
+              if (msg.dashboard_state?.pairs) {
+                setBtEquityHistory((prev) => {
+                  const prior = prev[msg.experiment_id] || {};
+                  const next = { ...prior };
+                  for (const [p, ps] of Object.entries(msg.dashboard_state.pairs)) {
+                    next[p] = [...(prior[p] || []), ps.portfolio?.equity || 0].slice(-500);
+                  }
+                  return { ...prev, [msg.experiment_id]: next };
+                });
+              }
+              // Freshest run becomes the observer focus; re-open if the user closed it.
+              setBtActiveExpId(msg.experiment_id);
+              setObserverClosed(false);
               return;
             case "backtest_result":
               setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
@@ -645,6 +1011,10 @@ export default function App() {
               return;
             case "backtest_start_ack":
               setBtLastAck(msg);
+              if (msg.experiment_id) {
+                setBtActiveExpId(msg.experiment_id);
+                setObserverClosed(false);
+              }
               return;
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
@@ -770,26 +1140,72 @@ export default function App() {
         </div>
       </div>
 
-      {/* Phase 8: BACKTEST + COMPARE tab content. LIVE falls through to the
-          existing grid below. */}
-      {activeTab === "BACKTEST" && (
-        <div style={{ padding: "16px 24px" }}>
-          <BacktestControlPanel
-            onSubmit={sendMessage}
-            connected={connected}
-            disabled={false}
-            ackMsg={btLastAck}
-            lastResultId={Object.keys(btResults).slice(-1)[0] || null}
-            completedCount={Object.keys(btResults).length}
-            reviewedCount={Object.keys(btReviews).length}
-          />
-        </div>
-      )}
-      {activeTab === "COMPARE" && (
-        <div style={{ padding: "16px 24px" }}>
-          <CompareView />
-        </div>
-      )}
+      {/* Phase 8/9: BACKTEST + COMPARE tab content. LIVE falls through to the
+          existing grid below. Phase 9: observer modal is also surfaced as a
+          floating right-side panel on LIVE when a run is mid-flight. */}
+      {(() => {
+        // Pick the freshest experiment to observe: the one the user most
+        // recently kicked off, or the freshest progress / result in memory.
+        const obsId = btActiveExpId
+                   || Object.keys(btProgress).slice(-1)[0]
+                   || Object.keys(btResults).slice(-1)[0]
+                   || null;
+        const obsProgress = obsId ? btProgress[obsId] : null;
+        const obsResult = obsId ? btResults[obsId] : null;
+        const obsReview = obsId ? btReviews[obsId] : null;
+        const obsEquity = obsId ? btEquityHistory[obsId] : null;
+        // Best-effort total-ticks hint: parse data_source_params n_candles
+        // from config if we have it on the result; else 0 → indeterminate bar.
+        let totalTicks = 0;
+        if (obsResult?.config?.data_source_params_json) {
+          try { totalTicks = JSON.parse(obsResult.config.data_source_params_json).n_candles || 0; }
+          catch { /* ignore */ }
+        }
+
+        return (
+          <>
+            {activeTab === "BACKTEST" && (
+              <div style={{ padding: "16px 24px" }}>
+                <BacktestControlPanel
+                  onSubmit={sendMessage}
+                  connected={connected}
+                  disabled={false}
+                  ackMsg={btLastAck}
+                  lastResultId={Object.keys(btResults).slice(-1)[0] || null}
+                  completedCount={Object.keys(btResults).length}
+                  reviewedCount={Object.keys(btReviews).length}
+                  observerProgress={observerClosed ? null : obsProgress}
+                  observerResult={observerClosed ? null : obsResult}
+                  observerReview={observerClosed ? null : obsReview}
+                  observerEquity={obsEquity}
+                  observerTotalTicks={totalTicks}
+                  onObserverClose={() => setObserverClosed(true)}
+                />
+              </div>
+            )}
+            {activeTab === "COMPARE" && (
+              <div style={{ padding: "16px 24px" }}>
+                <CompareView />
+              </div>
+            )}
+            {/* Floating observer on LIVE tab — dual-state view. Appears
+                whenever a backtest is mid-run or just completed; user can
+                dismiss. Shares the exact same ObserverModal component as
+                the BACKTEST dock so visuals match. */}
+            {activeTab === "LIVE" && !observerClosed && obsId && (obsProgress || obsResult) && (
+              <ObserverModal
+                progress={obsProgress}
+                result={obsResult}
+                review={obsReview}
+                equityHistory={obsEquity}
+                totalTicks={totalTicks}
+                variant="floating"
+                onClose={() => setObserverClosed(true)}
+              />
+            )}
+          </>
+        );
+      })()}
 
       {activeTab === "LIVE" && ((!connected && !state) || (state && pairNames.length === 0)) ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
