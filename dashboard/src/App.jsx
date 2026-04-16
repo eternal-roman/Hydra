@@ -181,13 +181,18 @@ export default function App() {
   const [orderJournal, setOrderJournal] = useState([]);
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // mountedRef guards against setState-on-unmounted warnings (noticeable
+  // in StrictMode which double-mounts in dev). WS callbacks capture the
+  // ref closure and bail out cleanly when the component has unmounted.
+  const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
-    ws.onopen = () => { setConnected(true); };
+    ws.onopen = () => { if (mountedRef.current) setConnected(true); };
     ws.onmessage = (event) => {
+      if (!mountedRef.current) return;
       try {
         const data = JSON.parse(event.data);
         setState(data);
@@ -199,13 +204,22 @@ export default function App() {
         if (data.order_journal) setOrderJournal(data.order_journal);
       } catch (e) { console.error("[HYDRA] Parse error:", e); }
     };
-    ws.onclose = () => { setConnected(false); reconnectRef.current = setTimeout(connect, 3000); };
+    ws.onclose = () => {
+      if (!mountedRef.current) return;
+      setConnected(false);
+      reconnectRef.current = setTimeout(connect, 3000);
+    };
     ws.onerror = () => { ws.close(); };
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
-    return () => { clearTimeout(reconnectRef.current); wsRef.current?.close(); };
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(reconnectRef.current);
+      wsRef.current?.close();
+    };
   }, [connect]);
 
   const pairs = state?.pairs || {};
@@ -459,16 +473,18 @@ export default function App() {
                     const lifecycle = entry.lifecycle || {};
                     const intent = entry.intent || {};
                     const decision = entry.decision || {};
-                    const state = lifecycle.state || "PLACED";
-                    const isFilled = state === "FILLED";
-                    const isTerminal = state === "FILLED" || state === "PARTIALLY_FILLED";
-                    const icon = isFilled ? "\u2713" : (state === "PLACED" ? "\u22ef" : "\u2717");
-                    const iconColor = isFilled ? COLORS.accent : (state === "PLACED" ? COLORS.textDim : COLORS.danger);
+                    // Renamed from `state` to `entryState` to avoid shadowing
+                    // the outer `state` component state variable.
+                    const entryState = lifecycle.state || "PLACED";
+                    const isFilled = entryState === "FILLED";
+                    const isTerminal = entryState === "FILLED" || entryState === "PARTIALLY_FILLED";
+                    const icon = isFilled ? "\u2713" : (entryState === "PLACED" ? "\u22ef" : "\u2717");
+                    const iconColor = isFilled ? COLORS.accent : (entryState === "PLACED" ? COLORS.textDim : COLORS.danger);
                     const amount = intent.amount || 0;
                     const price = lifecycle.avg_fill_price || intent.limit_price || 0;
                     const reasonLine = lifecycle.terminal_reason
-                      ? `${state}: ${lifecycle.terminal_reason}`
-                      : (decision.reason || state);
+                      ? `${entryState}: ${lifecycle.terminal_reason}`
+                      : (decision.reason || entryState);
                     return (
                       <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderBottom: `1px solid ${COLORS.panelBorder}`, fontSize: 9, fontFamily: mono }}>
                         <span style={{ width: 14, fontWeight: 700, color: iconColor }}>{icon}</span>
@@ -641,7 +657,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.9.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.9.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

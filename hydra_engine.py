@@ -514,7 +514,8 @@ class SignalGenerator:
         # SELL: RSI overbought always triggers; MACD requires meaningful fade
         # that is worsening or a fresh crossover below zero.
         macd_fading = (hist < -noise_floor and (hist < prev or prev >= 0))
-        rsi_overbought = rsi > rsi_upper + 5
+        overbought_threshold = rsi_upper + 5
+        rsi_overbought = rsi > overbought_threshold
         if rsi_overbought or macd_fading:
             rsi_strength = max(0.0, rsi - rsi_upper) / (100.0 - rsi_upper) if rsi_upper < 100 else 0.0
             macd_strength = min(1.0, abs(hist) / ctx["atr"]) if hist < 0 and ctx["atr"] > 0 else 0.0
@@ -525,7 +526,8 @@ class SignalGenerator:
                 action=SignalAction.SELL,
                 confidence=conf,
                 reason=f"Momentum fading: RSI {rsi:.1f}" +
-                       (f" > 75 overbought" if rsi > 75 else f", MACD crossed negative"),
+                       (f" > {overbought_threshold:.0f} overbought" if rsi_overbought
+                        else f", MACD crossed negative"),
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
@@ -572,7 +574,10 @@ class SignalGenerator:
             )
         return Signal(
             action=SignalAction.HOLD,
-            confidence=0.40,
+            # Use BASE for consistency with momentum/defensive HOLD signals.
+            # HOLD confidence is informational only (no trade executes), but
+            # inconsistent values were misleading on the dashboard.
+            confidence=BASE,
             reason=f"Price {_fmt_price(price)} within bands ({_fmt_price(bb['lower'])}--{_fmt_price(bb['upper'])}), no reversion signal",
             strategy=Strategy.MEAN_REVERSION,
             indicators=indicators,
@@ -581,7 +586,7 @@ class SignalGenerator:
     @staticmethod
     def _grid(bb, price, indicators, ctx) -> Signal:
         BASE = SignalGenerator.BASE
-        grid_spacing = (bb["upper"] - bb["lower"]) / 5 if bb["upper"] != bb["lower"] else 1
+        grid_spacing = (bb["upper"] - bb["lower"]) / 5 if bb["upper"] != bb["lower"] else 1.0
         dist_from_lower = (price - bb["lower"]) / grid_spacing if grid_spacing > 0 else 2.5
 
         # Band span vs ATR: reference = 4*ATR (BB = 4*std, std approx ATR)
@@ -1464,12 +1469,18 @@ class HydraEngine:
         for raw in snapshot.get("candles", []):
             if not isinstance(raw, dict):
                 continue
+            # Skip candles without a timestamp rather than fabricating
+            # time.time() — injecting "now" on restore corrupts the time
+            # ordering the Sharpe calculation and ATR-series rely on.
+            ts_raw = raw.get("timestamp")
+            if ts_raw is None:
+                continue
             try:
                 c = Candle(
                     open=float(raw.get("open", 0)), high=float(raw.get("high", 0)),
                     low=float(raw.get("low", 0)), close=float(raw.get("close", 0)),
                     volume=float(raw.get("volume", 0.0)),
-                    timestamp=float(raw.get("timestamp", time.time())),
+                    timestamp=float(ts_raw),
                 )
                 self.candles.append(c)
                 self.prices.append(c.close)

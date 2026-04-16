@@ -690,7 +690,16 @@ Make the final call. Think carefully, then respond with JSON only."""
             action = risk.get("final_action", "HOLD")
             reasoning = analyst.get("thesis", "")
             prefix = ""
-        first_sentence = reasoning.split(".")[0] + "." if "." in reasoning else reasoning
+        # Split on ". " (period + whitespace) so decimal numbers like
+        # "RSI at 30.5" don't truncate mid-number. Falls back to the full
+        # string when no sentence boundary is found.
+        match = re.search(r'\.\s', reasoning)
+        if match:
+            first_sentence = reasoning[:match.end()].rstrip()
+        elif reasoning:
+            first_sentence = reasoning if reasoning.endswith(".") else reasoning + "."
+        else:
+            first_sentence = ""
         if len(first_sentence) > 70:
             first_sentence = first_sentence[:67] + "..."
         return f"{prefix} {decision} {action}: {first_sentence}".strip()
