@@ -64,6 +64,7 @@ from hydra_experiments import (
 ERROR_LOG_NAME = "hydra_backtest_errors.log"
 DEFAULT_QUEUE_DEPTH = 20
 DEFAULT_MAX_WORKERS = 2
+MAX_WORKERS_HARD_CAP = 4     # I11 budget — bounded CPU per worker
 
 
 @dataclass
@@ -104,6 +105,12 @@ class BacktestWorkerPool:
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be ≥ 1")
+        if max_workers > MAX_WORKERS_HARD_CAP:
+            # I11 budget — silently clamp rather than raise so callers
+            # passing an env-based configured value don't crash the agent.
+            print(f"[BACKTEST] max_workers={max_workers} exceeds hard cap "
+                  f"{MAX_WORKERS_HARD_CAP}; clamping.", flush=True)
+            max_workers = MAX_WORKERS_HARD_CAP
 
         self.max_workers = max_workers
         self.store = store if store is not None else ExperimentStore()

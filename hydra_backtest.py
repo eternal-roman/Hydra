@@ -846,6 +846,10 @@ class BacktestRunner:
                 equity_curve=result.equity_curve.get(pair, []),
                 candle_interval_min=cfg.candle_interval,
             )
+            # avg_holding_ticks: FIFO-pair BUY→SELL tick spans from the
+            # trade_log. Pair-scoped so cross-pair strategies don't muddle
+            # the stat. Zero if no complete round-trip trade occurred.
+            m.avg_holding_ticks = _avg_holding_ticks(result.trade_log, pair)
             per_pair[pair] = m
             total_trades_all += engine.total_trades
             wins_all += engine.win_count
@@ -885,6 +889,10 @@ class BacktestRunner:
         agg.fills = fills_total
         agg.rejects = rejects_total
         agg.fill_rate = (fills_total / (fills_total + rejects_total)) if (fills_total + rejects_total) > 0 else 0.0
+        # Aggregate avg_holding_ticks: mean across pairs weighted by pair's
+        # completed round-trip count. Unweighted mean would let a rarely-
+        # traded pair skew the portfolio stat.
+        agg.avg_holding_ticks = _aggregate_avg_holding(result.trade_log)
 
         result.metrics = agg
         result.per_pair_metrics = per_pair
@@ -962,6 +970,60 @@ def _max_dd_pct(equity: List[float]) -> float:
             if dd > max_dd:
                 max_dd = dd
     return max_dd
+
+
+def _avg_holding_ticks(trade_log: List[Dict[str, Any]], pair: str) -> float:
+    """Mean tick span between BUY and matching SELL for `pair`.
+
+    FIFO pairing within the pair — a BUY at tick t is closed by the next
+    SELL at tick t' ≥ t. Open BUYs (no matching SELL) are ignored. Returns
+    0.0 if no complete round-trip exists.
+    """
+    spans: List[int] = []
+    open_buy_ticks: List[int] = []
+    for entry in trade_log:
+        if entry.get("pair") != pair:
+            continue
+        side = entry.get("side")
+        tk = entry.get("tick")
+        if not isinstance(tk, int):
+            continue
+        if side == "BUY":
+            open_buy_ticks.append(tk)
+        elif side == "SELL" and open_buy_ticks:
+            entry_tick = open_buy_ticks.pop(0)
+            spans.append(tk - entry_tick)
+    if not spans:
+        return 0.0
+    return sum(spans) / len(spans)
+
+
+def _aggregate_avg_holding(trade_log: List[Dict[str, Any]]) -> float:
+    """Completed-round-trip-weighted mean of avg_holding_ticks across pairs."""
+    per_pair_counts: Dict[str, Tuple[float, int]] = {}
+    per_pair_open: Dict[str, List[int]] = {}
+    for entry in trade_log:
+        pair = entry.get("pair", "")
+        tk = entry.get("tick")
+        if not pair or not isinstance(tk, int):
+            continue
+        open_list = per_pair_open.setdefault(pair, [])
+        if entry.get("side") == "BUY":
+            open_list.append(tk)
+        elif entry.get("side") == "SELL" and open_list:
+            entry_tick = open_list.pop(0)
+            span = tk - entry_tick
+            mean_so_far, count = per_pair_counts.get(pair, (0.0, 0))
+            new_count = count + 1
+            new_mean = (mean_so_far * count + span) / new_count
+            per_pair_counts[pair] = (new_mean, new_count)
+    if not per_pair_counts:
+        return 0.0
+    total_weight = sum(c for (_, c) in per_pair_counts.values())
+    if total_weight == 0:
+        return 0.0
+    weighted = sum(mean * c for (mean, c) in per_pair_counts.values())
+    return weighted / total_weight
 
 
 def _compute_basic_metrics(

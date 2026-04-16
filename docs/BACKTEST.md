@@ -79,7 +79,7 @@ print(experiment.result.metrics.sharpe_ratio)
 
 ## Preset library
 
-Eight presets ship in `hydra_backtest_presets.json`. Users can add more without
+Eight presets ship in `.hydra-experiments/presets.json`. Users can add more without
 touching code.
 
 | Preset | Intent |
@@ -93,7 +93,7 @@ touching code.
 | `regime_ranging` | Mean-reversion-weighted params for RANGING regime. |
 | `regime_volatile` | Grid-weighted params for VOLATILE regime. |
 
-To add a preset, edit `hydra_backtest_presets.json`. Schema: each entry must
+To add a preset, edit `.hydra-experiments/presets.json`. Schema: each entry must
 carry a `name`, `description`, and `overrides` dict keyed by engine parameter.
 
 ---
@@ -117,12 +117,20 @@ Before any `PARAM_TWEAK` is auto-apply eligible, **seven gates enforced in code*
 | `cross_pair_majority` | Improvement on ≥ 50% of pairs | Avoids single-pair lucky wins. |
 | `regime_not_concentrated` | Not concentrated in one regime | Else downgrades to a scoped `CODE_REVIEW`. |
 
-Gate thresholds are tunable in `hydra_reviewer_config.json`.
+Gate thresholds (and the Opus pricing used for the `$10/day` cost-alert
+threshold) are tunable in `.hydra-experiments/reviewer_config.json`. This
+file is bootstrapped to the current defaults on first reviewer init; edit
+and restart the agent. Malformed JSON reverts silently to built-in defaults
+(regenerate by deleting the file).
 
 **Even when all gates pass, nothing is auto-applied to live.** Param changes
 queue for shadow validation (see below) and require explicit human approval in
-the dashboard. Code changes never auto-apply — the reviewer writes a PR draft
-under `.hydra-experiments/reviews/` for human review.
+the dashboard. Code changes never auto-apply — for every `CODE_REVIEW` verdict
+the reviewer writes an advisory PR draft to
+`.hydra-experiments/pr_drafts/{experiment_id}_{timestamp}.md` with the
+proposed changes, rigor-gate results, evidence snapshot, risk flags, and the
+list of source files the reviewer consulted via `read_source_file`. Open a
+real PR from that draft after human review.
 
 ---
 

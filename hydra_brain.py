@@ -179,6 +179,13 @@ class HydraBrain:
     """3-agent AI reasoning: Claude Analyst + Claude Risk Manager + Grok Strategist.
     Grok only fires on genuine disagreements (OVERRIDE or analyst disagrees at low conviction)."""
 
+    # Cross-component disclosure threshold. When daily_cost first crosses
+    # this, the brain emits a `cost_alert` WS message and a log line — once
+    # per UTC day. Decoupled from max_daily_cost: a caller can disable budget
+    # enforcement (enforce_budget=False, e.g., backtest context) and the
+    # user still gets disclosure.
+    COST_ALERT_USD = 10.0
+
     def __init__(
         self,
         anthropic_key: str = "",
@@ -187,6 +194,9 @@ class HydraBrain:
         max_daily_cost: float = 10.0,
         tool_dispatcher: Optional[Any] = None,
         enable_tool_use: Optional[bool] = None,
+        enforce_budget: bool = True,
+        broadcaster: Optional[Any] = None,
+        tool_iterations_cap: int = 4,
     ):
         # Primary: Claude for Analyst + Risk Manager
         self.primary_client = None
@@ -223,6 +233,9 @@ class HydraBrain:
         self.model = self.primary_model
         self.provider = self.primary_provider
         self.max_daily_cost = max_daily_cost
+        self.enforce_budget = enforce_budget
+        self.broadcaster = broadcaster
+        self._cost_alert_fired_date = None  # UTC date of last alert fire
 
         # Cost tracking
         cost_map = {"anthropic": COST_ANTHROPIC, "openai": COST_OPENAI, "xai": COST_XAI}
@@ -272,7 +285,7 @@ class HydraBrain:
             and self.primary_provider == "anthropic"
             and HAS_ANTHROPIC
         )
-        self._tool_iterations_cap = 4         # hard cap per single LLM call
+        self._tool_iterations_cap = max(1, int(tool_iterations_cap))
         self._tool_use_calls = 0              # lifetime counter for diagnostics
 
     # ─── Main Entry Point ───
@@ -290,7 +303,11 @@ class HydraBrain:
                 else:
                     return self._fallback(state)
 
-            if self._estimated_cost() >= self.max_daily_cost:
+            # Budget cap only applies when enforce_budget=True. Backtest
+            # brains run with enforce_budget=False so experiments never
+            # stall behind a live-cost ceiling — disclosure is handled via
+            # the $10 cost_alert broadcast instead.
+            if self.enforce_budget and self._estimated_cost() >= self.max_daily_cost:
                 return self._fallback(state, reason="Daily budget exceeded")
 
         # API calls run OUTSIDE lock (I/O bound, each creates independent HTTP request)
@@ -400,6 +417,7 @@ class HydraBrain:
                     self.daily_overrides += 1
                 self.consecutive_failures = 0
                 self.last_decision = decision
+                self._maybe_fire_cost_alert()
 
                 asset = state.get("asset", "UNKNOWN")
                 if asset not in self.decision_history:
@@ -561,6 +579,21 @@ class HydraBrain:
                         if (getattr(b, "type", None) == "text"
                             or (isinstance(b, dict) and b.get("type") == "text"))
                     ]
+                    # Edge case: the model stopped with max_tokens while still
+                    # emitting tool_use blocks. We can't process those (no loop
+                    # iteration left with a response to consume), but silently
+                    # dropping them masks a real signal. Log, then proceed
+                    # with whatever text we have.
+                    if stop == "max_tokens":
+                        pending_tool_uses = sum(
+                            1 for b in content
+                            if (getattr(b, "type", None) == "tool_use"
+                                or (isinstance(b, dict) and b.get("type") == "tool_use"))
+                        )
+                        if pending_tool_uses:
+                            print(f"  [BRAIN] max_tokens reached with "
+                                  f"{pending_tool_uses} pending tool_use block(s) "
+                                  f"for {caller}; treating as terminal")
                     return "\n".join(t for t in texts if t), total_in, total_out, tool_calls
 
                 # Tool-use turn: echo the assistant response back + append tool_results
@@ -591,10 +624,28 @@ class HydraBrain:
                     )
                     self._tool_use_calls += 1
                     tool_calls += 1
+                    # 8 KB cap protects against a runaway tool_result
+                    # flooding the model's next context. Naive slicing can
+                    # split JSON mid-object, leaving the LLM parsing junk;
+                    # on overflow, emit a clean JSON envelope with a
+                    # truncated=True flag so the model recognizes the cut.
+                    raw = json.dumps(result)
+                    if len(raw) > 8000:
+                        content_str = json.dumps({
+                            "success": bool(result.get("success", False)),
+                            "truncated": True,
+                            "original_bytes": len(raw),
+                            "notice": ("tool result exceeded 8 KB cap; "
+                                       "full payload persisted server-side, "
+                                       "summary returned here"),
+                            "summary": raw[:6000],
+                        })
+                    else:
+                        content_str = raw
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
-                        "content": json.dumps(result)[:8000],  # guardrail vs huge payloads
+                        "content": content_str,
                         "is_error": not result.get("success", False),
                     })
 
@@ -674,6 +725,7 @@ class HydraBrain:
                 self._daily_portfolio_tokens_in += tok_in
                 self._daily_portfolio_tokens_out += tok_out
                 self.daily_portfolio_reviews += 1
+                self._maybe_fire_cost_alert()
             return text.strip() if text else None
         except Exception as e:
             print(f"  [BRAIN] Portfolio review failed (degrading gracefully): {e}")
@@ -960,6 +1012,40 @@ Make the final call. Think carefully, then respond with JSON only."""
             self._daily_portfolio_tokens_in = 0
             self._daily_portfolio_tokens_out = 0
             self.daily_reset_date = today
+            self._cost_alert_fired_date = None   # re-arm $10 alert
+
+    def _maybe_fire_cost_alert(self):
+        """Emit one-shot disclosure when brain+strategist daily cost crosses
+        COST_ALERT_USD. Called under self._lock by token-accounting paths.
+
+        Independent of enforce_budget — the user gets told regardless of
+        whether we're also capping. Fires at most once per UTC day.
+        """
+        cost = self._estimated_cost()
+        today = self.daily_reset_date
+        if cost < self.COST_ALERT_USD:
+            return
+        if self._cost_alert_fired_date == today:
+            return
+        self._cost_alert_fired_date = today
+        msg = (f"[BRAIN] daily cost ${cost:.2f} has crossed the "
+               f"${self.COST_ALERT_USD:.2f}/day disclosure threshold "
+               f"(enforce_budget={self.enforce_budget})")
+        try:
+            print(msg, flush=True)
+        except Exception:
+            pass
+        if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_message"):
+            try:
+                self.broadcaster.broadcast_message("cost_alert", {
+                    "component": "brain",
+                    "daily_cost_usd": round(cost, 4),
+                    "threshold_usd": self.COST_ALERT_USD,
+                    "day_key": today.isoformat() if today else "",
+                    "enforce_budget": self.enforce_budget,
+                })
+            except Exception:
+                pass
 
     def get_stats(self) -> Dict:
         """Return brain statistics for dashboard."""

@@ -389,6 +389,75 @@ order execution, dashboard components, infrastructure) and
 | Dashboard hosted on a different machine | Set `VITE_HYDRA_WS_URL=ws://agent-host:8765` before `npm run build` or `npm run dev`. Default is `ws://localhost:8765`. |
 | No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 65% |
 
+## Backtesting & Experimentation (v2.10.0)
+
+HYDRA ships with an experimentation platform that runs off the live tick
+loop. Everything here is **strictly additive** and self-contained — the
+default behavior with no opt-in flag is identical to v2.9.x. The kill
+switch is `HYDRA_BACKTEST_DISABLED=1`.
+
+**What it gives you**
+
+- Replay the engine on historical or synthetic candles without touching
+  live state (same `HydraEngine`, same `CrossPairCoordinator`, zero forked
+  math — the drift regression test enforces this).
+- An experiment library: presets (`default`, `ideal`, `divergent`,
+  `aggressive`, `defensive`, `regime_trending`, `regime_ranging`,
+  `regime_volatile`), per-pair parameter overrides, hypothesis field.
+- An AI Reviewer (`hydra_reviewer.py`) that runs after every backtest,
+  gathers evidence (walk-forward, Monte Carlo, out-of-sample, per-regime,
+  per-pair breakdowns), and issues one of `NO_CHANGE`, `PARAM_TWEAK`,
+  `CODE_REVIEW`, `RESULT_ANOMALOUS`, `HYPOTHESIS_REFUTED`. Seven rigor
+  gates are enforced **in code** (not prompt). The reviewer can
+  `read_source_file` to ground `CODE_REVIEW` proposals; every
+  `CODE_REVIEW` emits an advisory PR draft to
+  `.hydra-experiments/pr_drafts/` (I8 invariant: reviewer never
+  auto-applies code changes).
+- Shadow validation: reviewer-approved `PARAM_TWEAK` changes run
+  alongside live as phantom trades before any write to the live tuner,
+  with single-slot FIFO enforcement and depth-1 rollback.
+- A dashboard view (LIVE / BACKTEST / COMPARE tabs) with a dual-state
+  observer modal that renders the running backtest in the same visual
+  language as LIVE.
+
+**Cost disclosure policy (brain + reviewer)**
+
+- `max_daily_cost` caps spend for **live** deliberation only
+  (`enforce_budget=True`). Backtest-triggered brain/reviewer calls pass
+  `enforce_budget=False` — experiments don't stall behind the live cap.
+- Independent of `enforce_budget`, both components emit a one-shot
+  `cost_alert` WS broadcast (and a log line) when cumulative daily spend
+  crosses **$10/day**. Resets at UTC midnight. The dashboard surfaces
+  the alert as a banner.
+
+**Full runbook:** [`docs/BACKTEST.md`](docs/BACKTEST.md). **Authoritative spec:** [`docs/BACKTEST_SPEC.md`](docs/BACKTEST_SPEC.md).
+
+**Common commands**
+
+```bash
+# CLI — submit a backtest from a preset
+python hydra_experiments.py --preset default --hypothesis "smoke test"
+
+# CLI — compare two experiments
+python hydra_experiments.py compare <exp_id_1> <exp_id_2>
+
+# Kill switch (v2.9.x parity)
+HYDRA_BACKTEST_DISABLED=1 python hydra_agent.py --mode competition
+
+# Enable brain tool-use (opt-in; Analyst + Risk Manager only)
+HYDRA_BRAIN_TOOLS_ENABLED=1 python hydra_agent.py --mode competition
+```
+
+**Tests:** 328 new tests cover the backtest stack (engine, metrics,
+experiments, tool API, brain tool-use, server, reviewer, shadow
+validator). Run them alongside the legacy suite with:
+
+```bash
+python -m pytest tests/ -q
+```
+
+---
+
 ## SKILL.md
 
 `SKILL.md` is an agent skill definition file compatible with Claude Code and other MCP-compatible agents. It contains the full specification for HYDRA's trading logic, enabling AI coding assistants to understand, operate, and modify the agent. You can point any MCP agent at this file to give it context on how HYDRA works.
