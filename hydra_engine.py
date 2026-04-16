@@ -1208,18 +1208,21 @@ class HydraEngine:
 
         elif (signal.action == SignalAction.SELL and self.position.size > 0
               and signal.confidence >= self.sizer.min_confidence):
-            sell_pct = 1.0 if signal.confidence > 0.7 else 0.5
-            sell_amount = self.position.size * sell_pct
-            # Enforce Kraken ordermin: if the position itself is below ordermin,
-            # we can't sell at all. If a partial sell would be below ordermin or
-            # would leave dust below ordermin, force a full close instead.
+            # Fix 6: full-close on any SELL signal that passes min_confidence.
+            # Previously a binary 50/50 split at conf=0.7 left partial positions
+            # that were awkward to re-close — the 50% branch even fell through
+            # to "force full close" when the half-sell would land below
+            # ordermin or leave dust, proving the surrounding code found the
+            # binary split inconvenient.
+            # Symmetry principle: Kelly governs ENTRY size (continuous). If we
+            # decided to exit, we exit fully. Spot-only: "half-exit" doesn't
+            # reduce risk proportionally, it just delays the exit until the
+            # next signal at potentially worse prices.
             base_asset = self.asset.split("/")[0] if "/" in self.asset else self.asset
             min_size = self.sizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
             if self.position.size < min_size:
                 return None  # Entire position is below ordermin — unsellable
-            remaining = self.position.size - sell_amount
-            if sell_amount < min_size or (0 < remaining < min_size):
-                sell_amount = self.position.size  # Force full close
+            sell_amount = self.position.size  # Full close
             revenue = sell_amount * current_price
             profit = (current_price - self.position.avg_entry) * sell_amount
             # Capture params before position state is cleared
