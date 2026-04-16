@@ -17,6 +17,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 from typing import Dict, List, Optional, Any
 
 
@@ -83,6 +84,10 @@ class ParameterTracker:
         self.observations: List[Dict[str, Any]] = []
         self.update_count = 0
         self.current_params = self._load_or_default()
+        # Phase 11 (v2.10.0) — rollback history for external updates (e.g.,
+        # shadow-validator-promoted changes). Bounded depth=1 so a rollback
+        # always reverts exactly one apply, never cascades.
+        self._param_history: "deque[Dict[str, float]]" = deque(maxlen=1)
 
     def get_tunable_params(self) -> Dict[str, float]:
         """Return a copy of the current tunable parameters."""
@@ -233,6 +238,80 @@ class ParameterTracker:
             # Surfacing the failure means the outer tick-body try/except in
             # hydra_agent.py will log the traceback to hydra_errors.log.
             print(f"  [WARN] tuner save failed for {self.pair}: {type(e).__name__}: {e}")
+
+    # ─── External write path (Phase 11, v2.10.0) ──────────────────────
+    # Used by hydra_shadow_validator after a PARAM_TWEAK candidate clears
+    # shadow validation AND receives explicit human approval. Deliberately
+    # distinct from the tuner's own exponential-smoothing update loop:
+    # external updates apply immediately, preserve rollback state, and
+    # carry a `source` tag in the audit trail.
+
+    def apply_external_param_update(
+        self,
+        params: Dict[str, float],
+        source: str = "external",
+    ) -> Dict[str, Any]:
+        """Apply an externally-proposed param update (e.g., shadow-approved).
+
+        Invariants:
+          - Unknown keys silently ignored (forward-compat for new params).
+          - Non-finite values rejected (mirror _load_or_default).
+          - Values clamped to PARAM_BOUNDS — extreme proposals become
+            boundary values, never degenerate configs.
+          - Previous params saved to `_param_history` so
+            rollback_to_previous() restores exactly this snapshot.
+          - Does NOT bump `update_count` — that counter is reserved for the
+            tuner's own observation-driven updates. External bumps are
+            tracked per-apply via the returned dict.
+        """
+        self._param_history.append(dict(self.current_params))
+
+        applied: Dict[str, float] = {}
+        skipped: List[str] = []
+        for key, raw in (params or {}).items():
+            if key not in DEFAULT_PARAMS:
+                skipped.append(f"unknown:{key}")
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                skipped.append(f"nan:{key}")
+                continue
+            if not math.isfinite(val):
+                skipped.append(f"nonfinite:{key}")
+                continue
+            lo, hi = PARAM_BOUNDS[key]
+            clamped = max(lo, min(hi, val))
+            self.current_params[key] = clamped
+            applied[key] = clamped
+
+        if applied:
+            self._save()
+        else:
+            # Nothing applied — don't bloat history with a dead snapshot
+            if self._param_history:
+                self._param_history.pop()
+
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "source": source,
+            "timestamp": time.time(),
+            "pair": self.pair,
+        }
+
+    def rollback_to_previous(self) -> bool:
+        """Revert the single most-recent `apply_external_param_update`.
+
+        Returns True on success, False when no snapshot is available
+        (either no prior external apply, or already rolled back once).
+        """
+        if not self._param_history:
+            return False
+        prior = self._param_history.pop()
+        self.current_params = dict(prior)
+        self._save()
+        return True
 
     def reset(self):
         """Reset parameters to defaults and delete saved file."""
