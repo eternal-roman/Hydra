@@ -6,6 +6,137 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.0] — 2026-04-16
+
+Major additive release: backtesting & experimentation platform. Zero live-agent
+logic drift (guaranteed by `tests/test_backtest_drift.py`). Default behavior
+with no opt-in flag is identical to v2.9.x. Full user runbook in
+`docs/BACKTEST.md`; authoritative design spec in `docs/BACKTEST_SPEC.md`.
+
+### Added
+
+- **feat(backtest):** Phase 1 — core replay engine (`hydra_backtest.py`).
+  `BacktestConfig` (frozen dataclass, JSON round-trip, auto-stamped git SHA +
+  param hash + data hash + seed + hydra_version), `BacktestRunner`,
+  `CandleSource` hierarchy (`SyntheticSource`, `CsvSource`,
+  `KrakenHistoricalSource` with disk cache under
+  `.hydra-experiments/candle_cache/` respecting the 2s Kraken rate limit),
+  `SimulatedFiller` (post-only fill model matching live), `PendingOrder`,
+  `SimulatedFill`, `BacktestMetrics`, `BacktestResult`. Reuses `HydraEngine`
+  verbatim — only I/O is mocked.
+- **feat(backtest):** Phase 2 — advanced metrics (`hydra_backtest_metrics.py`).
+  `bootstrap_ci`, `monte_carlo_resample`, `monte_carlo_improvement`,
+  `regime_conditioned_pnl`, `walk_forward` (in-sample train → out-of-sample
+  test slices), `out_of_sample_gap`, `parameter_sensitivity`.
+  Dataclasses: `WalkForwardSlice`, `WalkForwardReport`, `MonteCarloCI`,
+  `MonteCarloReport`, `ImprovementReport`, `OutOfSampleReport`,
+  `ParamSensitivity`. `annualization_factor` helper + `ListCandleSource`.
+- **feat(backtest):** Phase 3 — experiments framework (`hydra_experiments.py`).
+  `Experiment` dataclass with full JSON round-trip, `ExperimentStore` with
+  `threading.RLock` (NOT Lock — delete→audit_log re-entry would deadlock),
+  eight presets in `hydra_backtest_presets.json` (`default`, `ideal`,
+  `divergent`, `aggressive`, `defensive`, `regime_trending`, `regime_ranging`,
+  `regime_volatile`), `run_experiment`, `sweep_experiment`, `compare`,
+  `_atomic_write_json` with recursive `sanitize_json` for non-finite floats.
+- **feat(backtest):** Phase 4 — agent tool API (`hydra_backtest_tool.py`).
+  Eight Anthropic tool-use schemas (`BACKTEST_TOOLS`):
+  `run_backtest`, `get_experiment`, `list_experiments`, `compare_experiments`,
+  `list_presets`, `get_preset`, `get_metrics_summary`, `get_engine_version`.
+  `BacktestToolDispatcher.execute(tool_name, tool_input, caller)` with
+  `QuotaTracker` (per_caller_daily=10, per_caller_concurrent=3,
+  global_daily=50, UTC midnight reset).
+- **feat(brain):** Phase 5 — tool-use integration (`hydra_brain.py` +180 LOC
+  additive). New `_call_llm_with_tools()` method implements the Anthropic
+  stop_reason loop (4-iteration cap, 8 KB result cap). Analyst + Risk Manager
+  branch on `_tool_use_enabled`; Grok Strategist stays text-only. Opt-in via
+  `HYDRA_BRAIN_TOOLS_ENABLED=1`; tool-use auto-disables when daily budget
+  exceeds 80%. `_call_llm` and `_parse_json` unchanged for fallback path.
+- **feat(backtest):** Phase 6 — backend bridge (`hydra_backtest_server.py`).
+  `BacktestWorkerPool` (max_workers=2, 4 max, daemon threads, queue depth 20).
+  `mount_backtest_routes()` wires `backtest_start`, `backtest_cancel`,
+  `experiment_list_request`, `experiment_get_request`, `experiment_compare_request`,
+  `review_request`. Throttled progress broadcasts (every N ticks OR 500 ms).
+  Worker exceptions routed to `hydra_backtest_errors.log`. `HydraAgent.__init__`
+  mounts pool + dispatcher behind `HYDRA_BACKTEST_DISABLED=1` kill switch;
+  shutdown drains the pool.
+- **feat(backtest):** Phase 7 — AI Reviewer (`hydra_reviewer.py`).
+  Seven **code-enforced rigor gates** in `DEFAULT_GATES` dict:
+  `min_trades_50`, `mc_ci_lower_positive`, `wf_majority_improved`,
+  `oos_gap_acceptable`, `improvement_above_2se`, `cross_pair_majority`,
+  `regime_not_concentrated`. `ResultReviewer.review()`, `batch_review()`,
+  `self_retrospective()`. Five verdicts: `NO_CHANGE`, `PARAM_TWEAK`,
+  `CODE_REVIEW`, `RESULT_ANOMALOUS`, `HYPOTHESIS_REFUTED`. Regime-only failure
+  downgrades to scoped `CODE_REVIEW` (order-sensitive check ordering). LLM
+  optional — heuristic verdict works without client. Reviewer never
+  auto-applies code changes (invariant I8); PR drafts land in
+  `.hydra-experiments/reviews/`. Tunable thresholds in
+  `hydra_reviewer_config.json`.
+- **feat(dashboard):** Phase 8 — tab switcher (LIVE / BACKTEST / COMPARE) +
+  `BacktestControlPanel` with preset picker, pair selector, date range,
+  parameter overrides. All components inline in `App.jsx`, same neon styling.
+  `DashboardBroadcaster` refactor in `hydra_agent.py`: `broadcast()` now wraps
+  as `{type: "state", data}`, `compat_mode=True` dual-emits raw + wrapped for
+  one-release backward compatibility; `broadcast_message(type, payload)`,
+  `register_handler()`, `_dispatch_inbound()`.
+- **feat(dashboard):** Phase 9 — dual-state observer modal. Dockable panel
+  slides in when a backtest runs (human or agent triggered); pair cards,
+  equity chart, and regime ribbon render with the SAME components as live.
+  Replay speed controls; cancel button. `ReviewPanel` displays verdict, gate
+  pass/fail, proposed changes, accept/reject/park controls after run completes.
+- **feat(dashboard):** Phase 10 — `ExperimentLibrary` (paginated, filterable,
+  sortable) + `CompareResults` view highlighting winner per metric across
+  2–4 experiments with significance flagging.
+- **feat(shadow):** Phase 11 — `hydra_shadow_validator.py` single-slot FIFO
+  live-parallel validator. `submit`, `cancel`, `reject`, `approve`,
+  `rollback_last_approval`, `ingest_candle`, `record_live_close`, `tick`,
+  `poll_complete`. Atomic persistence to `.hydra-experiments/shadow_state.json`.
+- **feat(tuner):** `HydraTuner.apply_external_param_update(params, source)`
+  for shadow-approved writes — clamps to `PARAM_BOUNDS`, rejects
+  non-finite/unknown keys, records prior state in depth=1 history deque.
+  `HydraTuner.rollback_to_previous()` reverts exactly one external apply
+  (never cascades). Existing observation-driven tuning loop untouched.
+
+### Tests
+
+- +328 new tests across nine files
+  (`test_backtest_engine.py`, `test_backtest_drift.py`, `test_backtest_metrics.py`,
+  `test_experiments.py`, `test_backtest_tool.py`, `test_brain_tool_use.py`,
+  `test_backtest_server.py`, `test_reviewer.py`, `test_shadow_validator.py`).
+  All 139 legacy tests still pass. Kill switch verified via
+  `tests/live_harness/harness.py --mode smoke` with `HYDRA_BACKTEST_DISABLED=1`.
+
+### Docs
+
+- **docs/BACKTEST_SPEC.md** — authoritative 2200+ line design spec.
+- **docs/BACKTEST.md** — user-facing runbook (dashboard workflow, preset
+  library, AI Reviewer gates, shadow validation flow, kill switch, brain
+  tool-use opt-in, storage layout, env flags, test invocation).
+- **CLAUDE.md** — new "Backtesting & Experimentation" section (module map,
+  invariants, rigor gates, env flags, gotchas).
+
+### Safety invariants (I1–I12, all enforced)
+
+1. Live tick cadence unaffected.
+2. Backtest workers construct own engine instances — never hold refs to live.
+3. Separate storage (`.hydra-experiments/`) — zero writes to live state files.
+4. All workers are daemon threads.
+5. Every worker entry point wrapped in try/except; live loop isolated.
+6. `HYDRA_BACKTEST_DISABLED=1` → v2.9.x behavior exactly.
+7. Drift regression test on every commit (tick-by-tick engine parity).
+8. Reviewer NEVER auto-applies code — PR drafts only.
+9. Param changes require shadow validation + explicit human approval.
+10. Kraken candle fetches respect 2s rate limit; disk cache prevents redundancy.
+11. Worker pool bounded (2 default, 4 max); queue depth 20; 50 experiments/day;
+    200k candles/experiment cap.
+12. Every result stamped with git SHA, param hash, data hash, seed,
+    hydra_version.
+
+### Changed
+
+- `.gitignore` — added `.hydra-experiments/`, `hydra_backtest_errors.log`.
+
+---
+
 ## [2.9.2] — 2026-04-15
 
 ### Fixed

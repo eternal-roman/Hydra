@@ -4000,7 +4000,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.9.2",
+            "version": "2.10.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
