@@ -727,7 +727,9 @@ class ExperimentStore:
     def audit_log(self, event: Dict[str, Any]) -> None:
         event = dict(event)
         event.setdefault("ts", _iso_utc_now())
-        line = json.dumps(event, sort_keys=True) + "\n"
+        # Sanitize — an experiment metric with inf/nan would otherwise
+        # produce a JSONL line stdlib json.loads() can't re-parse on read.
+        line = json.dumps(_sanitize_json(event), sort_keys=True) + "\n"
         with self._lock:
             with self._audit_path.open("a", encoding="utf-8") as fh:
                 fh.write(line)
@@ -750,9 +752,12 @@ class ExperimentStore:
     def log_review(self, exp_id: str, review: Dict[str, Any]) -> None:
         """Append a review record to review_history.jsonl. Phase 7 wiring."""
         record = {"exp_id": exp_id, "ts": _iso_utc_now(), "review": review}
+        # Sanitize — reviewer output can contain non-finite floats from MC
+        # evidence on pathological inputs, which would otherwise break the
+        # round-trip when self_retrospective() reads the log back.
         with self._lock:
             with self._review_history_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, sort_keys=True) + "\n")
+                fh.write(json.dumps(_sanitize_json(record), sort_keys=True) + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════

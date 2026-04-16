@@ -539,6 +539,9 @@ class ShadowValidator:
         cand.decision_by = decision_by
         # Tear down shadow engines — next candidate gets fresh ones
         self._shadow_engines.clear()
+        # Append outcome to shadow_outcomes.jsonl so the reviewer's
+        # self_retrospective() can compute accuracy (M16: feedback loop).
+        self._log_outcome(cand)
         # Advance the queue: remove the candidate from the head; activate next pending
         if self._queue and self._queue[0] is cand:
             # Keep it in the queue as terminal history (we'll trim in _persist)
@@ -553,6 +556,35 @@ class ShadowValidator:
                 self._activate(c)
                 break
         self._persist()
+
+    def _log_outcome(self, cand: ShadowCandidate) -> None:
+        """Append a terminal outcome record to shadow_outcomes.jsonl.
+
+        Consumed by `ResultReviewer.self_retrospective()` to compute the
+        reviewer's historical accuracy. One line per finalize call; append-
+        only; schema-stable (new fields appended, never removed).
+        """
+        try:
+            path = self.store_root / "shadow_outcomes.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "candidate_id": cand.id,
+                "experiment_id": cand.experiment_id,
+                "status": cand.status,
+                "pair": cand.pair,
+                "trades_observed": cand.trades_observed,
+                "live_pnl_sum": cand.live_pnl_sum,
+                "shadow_pnl_sum": cand.shadow_pnl_sum,
+                "delta_pct": self._delta_pct(cand),
+                "decision_by": cand.decision_by,
+                "completed_at": cand.completed_at,
+                "rationale": cand.rationale,
+            }
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True, default=_json_default) + "\n")
+        except Exception:
+            # Outcome logging is strictly observability — never block finalize.
+            pass
 
     # ─── Persistence ───
 

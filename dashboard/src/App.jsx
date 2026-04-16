@@ -160,6 +160,20 @@ function ConfidenceMeter({ confidence, signal }) {
 // Phase 8 (v2.10.0): Backtest UI primitives
 // ═══════════════════════════════════════════════════════════════
 
+// Cap on the number of experiments whose per-pair equity history the
+// dashboard keeps in memory. A long-running session otherwise leaks ~60
+// floats/tick * pairs * experiments. LRU-ish: newest wins, oldest drop.
+const MAX_EQUITY_HISTORY_EXPERIMENTS = 10;
+
+// Known top-level keys on the legacy raw-state dict (compat_mode=true
+// broadcaster shape, from hydra_agent._build_dashboard_state). Used to
+// guard the fallback path from accidentally treating a malformed typed
+// message as live state.
+const LIVE_STATE_KEYS = [
+  "pairs", "order_journal", "journal_stats", "balance", "balance_usd",
+  "ai_brain", "timestamp", "running", "mode", "fee_tier",
+];
+
 // Must stay in lockstep with hydra_experiments.PRESET_LIBRARY keys +
 // hydra_backtest_tool.BACKTEST_TOOLS enum. Order here = order shown in the UI.
 const PRESET_OPTIONS = [
@@ -563,6 +577,47 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Shared visual primitives (live + observer — prevents drift)
+// ═══════════════════════════════════════════════════════════════
+
+// Regime badge: identical coloring + typography in LIVE and observer.
+// size: "compact" for the observer dock, "regular" for the LIVE pair panel.
+function RegimeBadge({ regime, size = "regular" }) {
+  const c = regimeColor(regime);
+  const compact = size === "compact";
+  return (
+    <span style={{
+      fontSize: compact ? 9 : 10,
+      fontFamily: mono,
+      color: c,
+      background: `${c}18`,
+      padding: compact ? "2px 6px" : "3px 8px",
+      borderRadius: 3,
+      letterSpacing: "0.08em",
+    }}>
+      {regime || "—"}
+    </span>
+  );
+}
+
+// Signal chip: same HOLD/BUY/SELL palette everywhere.
+function SignalChip({ action, size = "regular" }) {
+  const c = signalColor(action);
+  const compact = size === "compact";
+  return (
+    <span style={{
+      fontSize: compact ? 9 : 10,
+      fontFamily: mono,
+      color: c,
+      fontWeight: 700,
+      letterSpacing: "0.04em",
+    }}>
+      {action || "HOLD"}
+    </span>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Phase 9: Dual-state Observer Modal
 // ═══════════════════════════════════════════════════════════════
 
@@ -608,8 +663,6 @@ function ObserverPairCard({ pair, state, equityHistory }) {
   const sig = state.signal || {};
   const port = state.portfolio || {};
   const pos = state.position || {};
-  const regimeC = regimeColor(state.regime);
-  const sigC = signalColor(sig.action);
   const px = pairPrefix(pair);
 
   return (
@@ -621,14 +674,8 @@ function ObserverPairCard({ pair, state, equityHistory }) {
           {pair}
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 9, fontFamily: mono, color: regimeC,
-                         background: `${regimeC}18`, padding: "2px 6px", borderRadius: 3,
-                         letterSpacing: "0.08em" }}>
-            {state.regime || "—"}
-          </span>
-          <span style={{ fontSize: 9, fontFamily: mono, color: sigC, fontWeight: 700 }}>
-            {sig.action || "HOLD"}
-          </span>
+          <RegimeBadge regime={state.regime} size="compact" />
+          <SignalChip action={sig.action} size="compact" />
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10,
@@ -1229,8 +1276,9 @@ function CompareResults({ report, experimentsById }) {
 }
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
-                       onView, onCompare, compareReport, loading, filters, onFilterChange }) {
-  const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8;
+                       onView, onCompare, compareReport, loading, filters, onFilterChange,
+                       compareInFlight }) {
+  const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
 
   return (
     <div>
@@ -1274,7 +1322,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
                    outline: "none",
                    boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
         >
-          Compare →
+          {compareInFlight ? "Comparing…" : "Compare →"}
         </button>
       </div>
 
@@ -1394,7 +1442,9 @@ export default function App() {
           switch (msg.type) {
             case "backtest_progress":
               setBtProgress((prev) => ({ ...prev, [msg.experiment_id]: msg }));
-              // Accumulate per-pair equity for the observer chart.
+              // Accumulate per-pair equity for the observer chart. Cap total
+              // stored experiments at MAX_EQUITY_HISTORY_EXPERIMENTS (LRU-ish)
+              // so long sessions don't leak memory across many runs.
               if (msg.dashboard_state?.pairs) {
                 setBtEquityHistory((prev) => {
                   const prior = prev[msg.experiment_id] || {};
@@ -1402,7 +1452,15 @@ export default function App() {
                   for (const [p, ps] of Object.entries(msg.dashboard_state.pairs)) {
                     next[p] = [...(prior[p] || []), ps.portfolio?.equity || 0].slice(-500);
                   }
-                  return { ...prev, [msg.experiment_id]: next };
+                  const merged = { ...prev, [msg.experiment_id]: next };
+                  const keys = Object.keys(merged);
+                  if (keys.length <= MAX_EQUITY_HISTORY_EXPERIMENTS) return merged;
+                  // Drop oldest by insertion order; the freshly-written key
+                  // is last, so slicing preserves it.
+                  const keep = keys.slice(-MAX_EQUITY_HISTORY_EXPERIMENTS);
+                  const trimmed = {};
+                  for (const k of keep) trimmed[k] = merged[k];
+                  return trimmed;
                 });
               }
               // Freshest run becomes the observer focus; re-open if the user closed it.
@@ -1430,6 +1488,7 @@ export default function App() {
               return;
             case "experiment_compare_request_ack":
               setCompareReport(msg);
+              setCompareInFlight(false);
               return;
             case "experiment_get_request_ack":
               // Single-experiment fetch — Phase 10 stretches this via the
@@ -1438,21 +1497,32 @@ export default function App() {
               if (msg.success && msg.experiment) {
                 setViewingExpId(msg.experiment.id);
               }
+              setViewInFlight(null);
               return;
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
               if (msg.channel === "backtest") setBtLastAck(msg);
+              // Release any in-flight gate so the button re-enables.
+              setCompareInFlight(false);
+              setViewInFlight(null);
               return;
             default:
-              // Unknown wrapped message → fall through to legacy raw-state path
-              // below if and only if it doesn't look like wrapped signaling.
-              if (msg.type.endsWith("_ack")) return;   // ignore other acks
-              break;
+              // Unknown typed message → drop silently. Do NOT fall through
+              // to applyLiveState: a malformed backtest-side message with
+              // a misnamed `type` could otherwise overwrite live fields
+              // (e.g., pairs, brain) with partial/stale data. The legacy
+              // raw-state shape has no `type` field at all.
+              return;
           }
         }
-        // Legacy: raw live-state dict (compat_mode=true on the broadcaster
-        // side). Treat as the live tick state.
-        applyLiveState(msg);
+        // Legacy raw live-state dict: only accept payloads WITHOUT a `type`
+        // field AND with at least one recognizable top-level live-state key.
+        // This guards against typos in new typed-message names corrupting
+        // the LIVE view during the one-release compat window.
+        if (msg && typeof msg === "object" && msg.type === undefined
+            && LIVE_STATE_KEYS.some((k) => k in msg)) {
+          applyLiveState(msg);
+        }
       } catch (e) { console.error("[HYDRA] Parse error:", e); }
     };
     ws.onclose = () => {
@@ -1493,18 +1563,26 @@ export default function App() {
 
   const clearSelection = useCallback(() => setCompareSelected([]), []);
 
+  // Debounce for compare and detail-fetch to prevent a trigger-happy user
+  // from flooding the backend with duplicate requests before the ack lands.
+  const [compareInFlight, setCompareInFlight] = useState(false);
+  const [viewInFlight, setViewInFlight] = useState(null);  // experiment_id
+
   const runCompare = useCallback(() => {
-    if (compareSelected.length < 2) return;
-    setCompareReport(null);   // show spinner until ack lands
+    if (compareSelected.length < 2 || compareInFlight) return;
+    setCompareReport(null);     // show spinner until ack lands
+    setCompareInFlight(true);
     sendMessage({
       type: "experiment_compare_request",
       experiment_ids: compareSelected,
     });
-  }, [compareSelected, sendMessage]);
+  }, [compareSelected, sendMessage, compareInFlight]);
 
   const viewExperiment = useCallback((id) => {
+    if (!id || viewInFlight === id) return;   // ignore re-clicks on pending id
+    setViewInFlight(id);
     sendMessage({ type: "experiment_get_request", experiment_id: id });
-  }, [sendMessage]);
+  }, [sendMessage, viewInFlight]);
 
   // Auto-refresh library whenever COMPARE tab activates (freshest state wins).
   useEffect(() => {
@@ -1678,6 +1756,7 @@ export default function App() {
                   loading={libLoading}
                   filters={libFilters}
                   onFilterChange={setLibFilters}
+                  compareInFlight={compareInFlight}
                 />
               </div>
             )}

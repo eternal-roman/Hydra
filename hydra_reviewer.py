@@ -44,6 +44,7 @@ import json
 import math
 import os
 import statistics
+import threading
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -147,6 +148,11 @@ class RepeatabilityEvidence:
     # Trade count sanity
     total_trades_in_sample: int = 0
 
+    # Diagnostic — records "wf:<ExcType>" / "oos:<ExcType>" when optional
+    # analysis passes failed. Surfaces to risk_flags so gate failures like
+    # wf_majority_improved=False aren't silently unexplained.
+    run_failures: List[str] = field(default_factory=list)
+
 
 @dataclass
 class ReviewDecision:
@@ -245,6 +251,12 @@ Respond ONLY with this JSON (no other text):
 class ResultReviewer:
     """Produces a ReviewDecision for each backtest. See module docstring."""
 
+    # Threshold at which a cost_alert is emitted (log + WS broadcast). Fires
+    # at most once per UTC day per reviewer. Decoupled from `max_daily_cost`
+    # so a reviewer with `enforce_budget=False` (backtest mode) still surfaces
+    # spend visibility to the user.
+    COST_ALERT_USD = 10.0
+
     def __init__(
         self,
         anthropic_client: Optional[Any] = None,
@@ -253,6 +265,9 @@ class ResultReviewer:
         store: Optional[ExperimentStore] = None,
         config_path: Optional[Path] = None,
         max_tokens: int = 1200,
+        enforce_budget: bool = True,
+        broadcaster: Optional[Any] = None,
+        source_root: Optional[Path] = None,
     ) -> None:
         self.client = anthropic_client
         self.model = reviewer_model
@@ -260,14 +275,34 @@ class ResultReviewer:
         self.store = store if store is not None else ExperimentStore()
         self.gates = dict(DEFAULT_GATES)
         self.max_tokens = max_tokens
+        self.enforce_budget = enforce_budget
+        self.broadcaster = broadcaster
+        # Root for read_source_file tool — defaults to this module's repo.
+        self.source_root = Path(source_root) if source_root else Path(__file__).resolve().parent
 
-        # Cost tracking (Claude Opus 4.6 list price; override via config).
+        # Cost tracking (Claude Opus list price; override via config).
+        # Protected by self._cost_lock — multiple BacktestWorkerPool threads
+        # may call review() concurrently.
+        self._cost_lock = threading.Lock()
         self._cost_in_per_m = 15.0
         self._cost_out_per_m = 75.0
         self._daily_tokens_in = 0
         self._daily_tokens_out = 0
         self._daily_cost = 0.0
         self._day_key = time.strftime("%Y%m%d", time.gmtime())
+        self._cost_alert_fired_day = ""    # UTC day-key the $10 alert last fired for
+
+        # Resolve config path — explicit arg wins; else .hydra-experiments/reviewer_config.json
+        # bootstrapped on first run so ops can tune gates without reading code.
+        if config_path is None:
+            try:
+                default_path = self.store.root / "reviewer_config.json"
+                if not default_path.exists():
+                    _bootstrap_reviewer_config(default_path, self.gates,
+                                                self._cost_in_per_m, self._cost_out_per_m)
+                config_path = default_path
+            except Exception:
+                config_path = None
 
         if config_path and Path(config_path).exists():
             self._load_config(Path(config_path))
@@ -345,10 +380,11 @@ class ResultReviewer:
         tokens_in = 0
         tokens_out = 0
         llm_used = False
+        source_files_read: List[str] = []
 
         if self.client is not None and self._within_budget():
             try:
-                llm_output, tokens_in, tokens_out = self._llm_deliberate(
+                llm_output, tokens_in, tokens_out, source_files_read = self._llm_deliberate(
                     experiment, evidence, gates,
                 )
                 llm_used = bool(llm_output)
@@ -367,6 +403,7 @@ class ResultReviewer:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             llm_used=llm_used,
+            source_files_read=source_files_read,
         )
 
         # 5. Persist.
@@ -374,6 +411,13 @@ class ResultReviewer:
             self.store.log_review(experiment.id, decision.to_dict())
         except Exception:
             pass
+
+        # 6. PR draft for CODE_REVIEW verdicts (I8-compliant advisory file).
+        if decision.verdict == "CODE_REVIEW":
+            try:
+                write_pr_draft(decision, experiment, self.store.root)
+            except Exception:
+                pass
 
         return decision
 
@@ -391,11 +435,15 @@ class ResultReviewer:
         return out
 
     def self_retrospective(self, lookback_days: int = 30) -> SelfRetrospective:
-        """Audit the reviewer's own prior decisions. Reads review_history.jsonl.
+        """Audit the reviewer's own prior decisions. Reads review_history.jsonl
+        and shadow_outcomes.jsonl (from hydra_shadow_validator) to compute
+        a reviewer_accuracy_score grounded in real shadow-validation outcomes.
 
-        Does NOT currently try to measure whether PARAM_TWEAKs made it to
-        live (that requires shadow-validator telemetry from Phase 11).
-        Counts + distribution now; accuracy scoring wired in Phase 11.
+        Accuracy metric: fraction of PARAM_TWEAK verdicts whose originating
+        experiment made it through shadow validation with `status="approved"`.
+        Denominator is PARAM_TWEAK verdicts that have ANY terminal shadow
+        outcome — open / expired candidates don't count. Returns None for
+        accuracy when the denominator is zero (no signal).
         """
         path = self.store.root / "review_history.jsonl"
         if not path.exists():
@@ -410,6 +458,7 @@ class ResultReviewer:
         cutoff_ts = time.time() - lookback_days * 86400.0
         counts = {"PARAM_TWEAK": 0, "CODE_REVIEW": 0, "NO_CHANGE": 0,
                   "RESULT_ANOMALOUS": 0, "HYPOTHESIS_REFUTED": 0}
+        param_tweak_exp_ids: List[str] = []
         total = 0
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -425,7 +474,55 @@ class ResultReviewer:
             verdict = (rec.get("review") or {}).get("verdict", "")
             if verdict in counts:
                 counts[verdict] += 1
+            if verdict == "PARAM_TWEAK":
+                eid = rec.get("exp_id")
+                if eid:
+                    param_tweak_exp_ids.append(eid)
             total += 1
+
+        # Join against shadow outcomes to compute accuracy.
+        shadow_path = self.store.root / "shadow_outcomes.jsonl"
+        outcomes_by_exp: Dict[str, str] = {}   # exp_id -> last terminal status
+        if shadow_path.exists():
+            try:
+                for line in shadow_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    eid = out.get("experiment_id")
+                    status = out.get("status")
+                    if not eid or status not in {"approved", "rejected",
+                                                  "expired", "cancelled"}:
+                        continue
+                    # Later entries for the same experiment win (same review
+                    # might be revalidated after a tweak).
+                    outcomes_by_exp[eid] = status
+            except OSError:
+                pass
+
+        # Compute accuracy.
+        approved = 0
+        evaluated = 0
+        for eid in param_tweak_exp_ids:
+            status = outcomes_by_exp.get(eid)
+            if status is None:
+                continue            # no outcome yet — don't count either way
+            evaluated += 1
+            if status == "approved":
+                approved += 1
+
+        accuracy: Optional[float] = None
+        notes: List[str] = []
+        if evaluated == 0:
+            notes.append("no terminal shadow outcomes in lookback window")
+        else:
+            accuracy = approved / evaluated
+            notes.append(f"accuracy computed from {approved}/{evaluated} "
+                         f"param_tweaks with terminal shadow outcomes")
 
         return SelfRetrospective(
             generated_at=_iso_utc_now(),
@@ -435,9 +532,48 @@ class ResultReviewer:
             code_reviews_proposed=counts["CODE_REVIEW"],
             no_change_verdicts=counts["NO_CHANGE"],
             anomalous_verdicts=counts["RESULT_ANOMALOUS"],
-            reviewer_accuracy_score=None,   # requires shadow telemetry
-            notes=["accuracy_score wired in Phase 11 (shadow validator)"],
+            reviewer_accuracy_score=accuracy,
+            notes=notes,
         )
+
+    # Rolling-accuracy cache used for confidence decay. Recomputed lazily
+    # with a TTL so self_retrospective() isn't re-run on every review.
+    _ACCURACY_CACHE_TTL_SEC = 300.0       # 5 minutes
+    # Confidence penalty threshold: if recent accuracy drops below this,
+    # HIGH → MEDIUM downgrade is applied to new decisions. 0.5 means
+    # "the reviewer is worse than a coin flip" — a reasonable floor.
+    _CONFIDENCE_DECAY_THRESHOLD = 0.5
+    # Minimum evaluated sample before we apply decay — prevents noise
+    # from the first few validations from suppressing confidence.
+    _CONFIDENCE_DECAY_MIN_SAMPLE = 5
+
+    def _recent_accuracy(self) -> Tuple[Optional[float], int]:
+        """Cached (accuracy, evaluated_count) over the last 30 days.
+        Returns (None, 0) if there's no signal yet.
+        """
+        now = time.time()
+        cached = getattr(self, "_accuracy_cache", None)
+        if cached and (now - cached[0]) < self._ACCURACY_CACHE_TTL_SEC:
+            return cached[1], cached[2]
+        try:
+            retro = self.self_retrospective(lookback_days=30)
+            acc = retro.reviewer_accuracy_score
+            # Re-derive evaluated_count from the note (stable format above).
+            evaluated = 0
+            for n in retro.notes:
+                if "param_tweaks with terminal shadow outcomes" in n:
+                    try:
+                        parts = n.split()
+                        for p in parts:
+                            if "/" in p:
+                                evaluated = int(p.split("/")[1])
+                                break
+                    except (ValueError, IndexError):
+                        pass
+            self._accuracy_cache = (now, acc, evaluated)
+            return acc, evaluated
+        except Exception:
+            return None, 0
 
     # ─── evidence gathering ───
 
@@ -452,13 +588,15 @@ class ResultReviewer:
         ev = RepeatabilityEvidence()
         ev.total_trades_in_sample = result.metrics.total_trades
 
-        # Walk-forward — run if not already on experiment
+        # Walk-forward — run if not already on experiment. Failures are
+        # recorded on the evidence so downstream gates fail informatively.
         wf: Optional[WalkForwardReport] = experiment.wf_report
         if wf is None:
             try:
                 wf = walk_forward(experiment.config, n_windows=3)
-            except Exception:
+            except Exception as e:
                 wf = None
+                ev.run_failures.append(f"wf:{type(e).__name__}")
         if wf is not None:
             ev.wf_slices_tested = wf.n_windows
             ev.wf_improved_slices = wf.improved_slices
@@ -466,13 +604,15 @@ class ResultReviewer:
             ev.wf_mean_sharpe = wf.mean_sharpe
             ev.wf_sharpe_stability = wf.sharpe_stability
 
-        # Out-of-sample — reuse or compute
+        # Out-of-sample — reuse or compute. Failures are recorded; the gate
+        # still fails (correctly) because oos_gap_pct stays at its default.
         oos: Optional[OutOfSampleReport] = experiment.oos_report
         if oos is None:
             try:
                 oos = out_of_sample_gap(experiment.config, in_sample_pct=0.8)
-            except Exception:
+            except Exception as e:
                 oos = None
+                ev.run_failures.append(f"oos:{type(e).__name__}")
         if oos is not None:
             ev.oos_held_out_pct = 1.0 - oos.in_sample_pct
             ev.in_sample_sharpe = oos.in_sample_sharpe
@@ -628,51 +768,237 @@ class ResultReviewer:
     # ─── LLM deliberation ───
 
     def _within_budget(self) -> bool:
-        # Rollover daily counter at UTC midnight
+        # Rollover daily counter at UTC midnight. Protected — multiple
+        # BacktestWorkerPool threads may call review() concurrently.
+        # `enforce_budget=False` (set on the reviewer for backtest-only
+        # workers) bypasses the cap entirely but still rolls counters.
         today = time.strftime("%Y%m%d", time.gmtime())
-        if today != self._day_key:
-            self._day_key = today
-            self._daily_tokens_in = 0
-            self._daily_tokens_out = 0
-            self._daily_cost = 0.0
-        return self._daily_cost < self.max_daily_cost
+        with self._cost_lock:
+            if today != self._day_key:
+                self._day_key = today
+                self._daily_tokens_in = 0
+                self._daily_tokens_out = 0
+                self._daily_cost = 0.0
+                self._cost_alert_fired_day = ""
+            if not self.enforce_budget:
+                return True
+            return self._daily_cost < self.max_daily_cost
+
+    # Cap on read_source_file invocations per review — prevents the LLM
+    # from burning budget slurping the whole repo.
+    _SOURCE_READS_PER_REVIEW = 6
+    # Max file bytes returned per read; larger files are truncated with a
+    # notice appended so the LLM sees the boundary explicitly.
+    _SOURCE_BYTES_CAP = 16_000
+    # Max tool-use loop iterations. Safety net against runaway loops.
+    _TOOL_LOOP_ITERATIONS_CAP = 6
 
     def _llm_deliberate(
         self,
         experiment: Experiment,
         evidence: RepeatabilityEvidence,
         gates: Dict[str, bool],
-    ) -> Tuple[Dict[str, Any], int, int]:
-        """Ask Claude for a structured ReviewDecision. Returns
-        (parsed_dict, tokens_in, tokens_out). parsed_dict is {} on failure."""
+    ) -> Tuple[Dict[str, Any], int, int, List[str]]:
+        """Ask Claude for a structured ReviewDecision using tool-use loop.
+
+        Returns (parsed_dict, tokens_in, tokens_out, source_files_read).
+        `parsed_dict` is {} on failure. `source_files_read` is the ordered
+        list of paths the LLM fetched via read_source_file (allow-listed).
+        """
         user_msg = self._build_user_message(experiment, evidence, gates)
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=REVIEWER_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-            timeout=60.0,
-        )
-        text = ""
-        for block in getattr(response, "content", []) or []:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    text += block.get("text", "")
-            elif getattr(block, "type", None) == "text":
-                text += getattr(block, "text", "")
-        usage = getattr(response, "usage", None)
-        tin = getattr(usage, "input_tokens", 0) if usage else 0
-        tout = getattr(usage, "output_tokens", 0) if usage else 0
+        messages: List[Dict[str, Any]] = [
+            {"role": "user", "content": user_msg},
+        ]
+        source_files_read: List[str] = []
+        reads_remaining = self._SOURCE_READS_PER_REVIEW
+        tin_total = 0
+        tout_total = 0
+        final_text = ""
 
-        self._daily_tokens_in += tin
-        self._daily_tokens_out += tout
-        self._daily_cost += (
-            tin / 1_000_000 * self._cost_in_per_m
-            + tout / 1_000_000 * self._cost_out_per_m
-        )
+        for _ in range(self._TOOL_LOOP_ITERATIONS_CAP):
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=REVIEWER_PROMPT,
+                messages=messages,
+                tools=REVIEWER_TOOLS,
+                timeout=60.0,
+            )
+            usage = getattr(response, "usage", None)
+            tin_total += getattr(usage, "input_tokens", 0) if usage else 0
+            tout_total += getattr(usage, "output_tokens", 0) if usage else 0
 
-        parsed = _parse_json(text) or {}
-        return parsed, tin, tout
+            content_blocks = getattr(response, "content", []) or []
+            stop_reason = getattr(response, "stop_reason", None)
+
+            # Extract text + tool_use blocks from this response.
+            text_out = ""
+            tool_uses: List[Dict[str, Any]] = []
+            for block in content_blocks:
+                btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+                if btype == "text":
+                    text_out += (block.get("text", "") if isinstance(block, dict)
+                                  else getattr(block, "text", ""))
+                elif btype == "tool_use":
+                    tool_uses.append({
+                        "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", ""),
+                        "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", ""),
+                        "input": block.get("input") if isinstance(block, dict) else getattr(block, "input", {}),
+                    })
+
+            final_text = text_out  # last text block wins
+
+            if stop_reason != "tool_use":
+                # Terminal. If model hit max_tokens mid-thought while a
+                # tool_use was pending, surface the oddity — we don't silently
+                # drop signal. (Normal end_turn leaves tool_uses empty.)
+                if stop_reason == "max_tokens" and tool_uses:
+                    print(f"[REVIEWER] max_tokens reached with {len(tool_uses)} "
+                          f"pending tool_use block(s); treating as terminal",
+                          flush=True)
+                break
+
+            # Echo assistant content back (Anthropic requires the full
+            # content, including tool_use blocks, on the next turn).
+            messages.append({
+                "role": "assistant",
+                "content": self._serialize_content_for_echo(content_blocks),
+            })
+
+            # Dispatch each tool_use → tool_result.
+            tool_results_block: List[Dict[str, Any]] = []
+            for tu in tool_uses:
+                tool_results_block.append(self._dispatch_reviewer_tool(
+                    tu, source_files_read, lambda: reads_remaining,
+                ))
+                # Only read_source_file is rate-limited; decrement when used.
+                if tu.get("name") == "read_source_file":
+                    reads_remaining -= 1
+
+            messages.append({
+                "role": "user",
+                "content": tool_results_block,
+            })
+        else:
+            print(f"[REVIEWER] tool-use loop cap ({self._TOOL_LOOP_ITERATIONS_CAP}) "
+                  f"reached without end_turn; using last text", flush=True)
+
+        # Account daily cost + fire alert (single-lock write).
+        call_cost = self._compute_cost(tin_total, tout_total)
+        with self._cost_lock:
+            self._daily_tokens_in += tin_total
+            self._daily_tokens_out += tout_total
+            self._daily_cost += call_cost
+            daily_cost_snapshot = self._daily_cost
+            day_key_snapshot = self._day_key
+            should_alert = (
+                daily_cost_snapshot >= self.COST_ALERT_USD
+                and self._cost_alert_fired_day != day_key_snapshot
+            )
+            if should_alert:
+                self._cost_alert_fired_day = day_key_snapshot
+
+        if should_alert:
+            self._emit_cost_alert(daily_cost_snapshot, day_key_snapshot)
+
+        parsed = _parse_json(final_text) or {}
+        return parsed, tin_total, tout_total, source_files_read
+
+    @staticmethod
+    def _serialize_content_for_echo(blocks: List[Any]) -> List[Dict[str, Any]]:
+        """Convert SDK content blocks into dicts safe to echo back to Anthropic."""
+        out: List[Dict[str, Any]] = []
+        for b in blocks:
+            if isinstance(b, dict):
+                out.append(b)
+                continue
+            btype = getattr(b, "type", None)
+            if btype == "text":
+                out.append({"type": "text", "text": getattr(b, "text", "")})
+            elif btype == "tool_use":
+                out.append({
+                    "type": "tool_use",
+                    "id": getattr(b, "id", ""),
+                    "name": getattr(b, "name", ""),
+                    "input": getattr(b, "input", {}) or {},
+                })
+            else:
+                # Unknown block type: skip rather than send garbage.
+                continue
+        return out
+
+    def _dispatch_reviewer_tool(
+        self,
+        tu: Dict[str, Any],
+        source_files_read: List[str],
+        reads_remaining_getter: Any,
+    ) -> Dict[str, Any]:
+        """Route one tool_use to the right handler; always return a
+        tool_result block even on error (Anthropic requires pairing)."""
+        tool_name = tu.get("name") or ""
+        tool_id = tu.get("id") or ""
+        tool_input = tu.get("input") or {}
+        is_error = False
+        try:
+            if tool_name == "read_source_file":
+                reads_remaining = int(reads_remaining_getter()) if callable(reads_remaining_getter) else 0
+                if reads_remaining <= 0:
+                    content = ("ERROR: read_source_file quota exhausted "
+                               f"({self._SOURCE_READS_PER_REVIEW} per review)")
+                    is_error = True
+                else:
+                    path = str(tool_input.get("path") or "")
+                    content = _safe_read_source_file(
+                        path, self.source_root, self._SOURCE_BYTES_CAP,
+                    )
+                    if content.startswith("ERROR:"):
+                        is_error = True
+                    else:
+                        source_files_read.append(path)
+            else:
+                content = f"ERROR: unknown tool {tool_name!r}"
+                is_error = True
+        except Exception as e:
+            content = f"ERROR: {type(e).__name__}: {e}"
+            is_error = True
+
+        block: Dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": tool_id,
+            "content": content[:self._SOURCE_BYTES_CAP],
+        }
+        if is_error:
+            block["is_error"] = True
+        return block
+
+    def _compute_cost(self, tin: int, tout: int) -> float:
+        """Single source of truth for token→USD conversion."""
+        return (tin / 1_000_000 * self._cost_in_per_m
+                + tout / 1_000_000 * self._cost_out_per_m)
+
+    def _emit_cost_alert(self, daily_cost: float, day_key: str) -> None:
+        """One-shot disclosure when reviewer daily spend crosses COST_ALERT_USD.
+
+        Fires at most once per UTC day via `_cost_alert_fired_day`. Survives
+        enforce_budget=False (the point: tell the user regardless of cap).
+        """
+        msg = (f"[REVIEWER] daily cost ${daily_cost:.2f} has crossed the "
+               f"${self.COST_ALERT_USD:.2f}/day disclosure threshold (day={day_key})")
+        try:
+            print(msg, flush=True)
+        except Exception:
+            pass
+        if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_message"):
+            try:
+                self.broadcaster.broadcast_message("cost_alert", {
+                    "component": "reviewer",
+                    "daily_cost_usd": round(daily_cost, 4),
+                    "threshold_usd": self.COST_ALERT_USD,
+                    "day_key": day_key,
+                    "enforce_budget": self.enforce_budget,
+                })
+            except Exception:
+                pass
 
     def _build_user_message(
         self,
@@ -724,6 +1050,7 @@ class ResultReviewer:
         tokens_in: int,
         tokens_out: int,
         llm_used: bool,
+        source_files_read: Optional[List[str]] = None,
     ) -> ReviewDecision:
         # Default verdict: heuristic from gates only
         default_verdict = self._heuristic_verdict(gates, all_passed, evidence)
@@ -735,6 +1062,12 @@ class ResultReviewer:
         original_verdict = verdict
         risk_flags: List[str] = list(llm_output.get("risk_flags") or [])
 
+        # Surface any run_failures from evidence gathering so operators can
+        # explain gate misses (e.g., wf_majority_improved=False because WF
+        # raised ValueError on too-few candles).
+        for rf in evidence.run_failures:
+            risk_flags.append(f"run_failed:{rf}")
+
         observations = list(llm_output.get("observations") or [])
         reasoning = str(llm_output.get("reasoning") or "")
         root_cause = str(llm_output.get("root_cause_hypothesis") or "")
@@ -743,6 +1076,21 @@ class ResultReviewer:
             confidence = "LOW"
 
         proposed_changes = self._parse_proposed_changes(llm_output.get("proposed_changes"))
+
+        # Confidence decay: if recent PARAM_TWEAK accuracy (from shadow
+        # outcomes) is below threshold, downgrade HIGH → MEDIUM on this
+        # decision. Protects against a reviewer that's gotten optimistic
+        # and is now routinely suggesting changes that fail validation.
+        recent_acc, evaluated = self._recent_accuracy()
+        if (confidence == "HIGH"
+                and recent_acc is not None
+                and evaluated >= self._CONFIDENCE_DECAY_MIN_SAMPLE
+                and recent_acc < self._CONFIDENCE_DECAY_THRESHOLD):
+            confidence = "MEDIUM"
+            risk_flags.append(
+                f"confidence_decayed:recent_accuracy={recent_acc:.2f}"
+                f":evaluated={evaluated}"
+            )
 
         # ─── Downgrade logic: anti-handwaving, code-enforced ───
         # Order matters. Most-specific downgrade (regime-scoped) is checked
@@ -753,9 +1101,10 @@ class ResultReviewer:
 
         # A) Regime-concentrated improvement is the ONLY failing gate →
         #    scope-down to regime CODE_REVIEW (real signal, narrow scope).
+        #    Set-equality (not list) so gate iteration order is irrelevant.
         if (verdict == "PARAM_TWEAK"
                 and evidence.dominant_regime is not None
-                and failed_gates == ["regime_not_concentrated"]):
+                and set(failed_gates) == {"regime_not_concentrated"}):
             risk_flags.append(
                 f"regime_concentrated:{evidence.dominant_regime}:"
                 f"{evidence.regime_concentration:.2f}"
@@ -821,12 +1170,9 @@ class ResultReviewer:
             all_gates_passed=all_passed,
             confidence=confidence,
             risk_flags=risk_flags,
-            source_files_read=[],   # Phase 7 does not use read_source_file tool
+            source_files_read=list(source_files_read or []),
             tokens_used=tokens_in + tokens_out,
-            cost_usd=round(
-                (tokens_in / 1_000_000 * self._cost_in_per_m
-                 + tokens_out / 1_000_000 * self._cost_out_per_m), 4,
-            ),
+            cost_usd=round(self._compute_cost(tokens_in, tokens_out), 4),
             llm_used=llm_used,
             original_verdict=original_verdict if original_verdict != verdict else None,
         )
@@ -931,6 +1277,274 @@ def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return obj.__dict__
     return str(obj)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Reviewer tool-use: read_source_file + schemas
+# ═══════════════════════════════════════════════════════════════
+
+REVIEWER_TOOLS: List[Dict[str, Any]] = [
+    {
+        "name": "read_source_file",
+        "description": (
+            "Read one Hydra source or test file, returning its contents as "
+            "plain text (UTF-8, truncated to a safe cap). Scoped to this "
+            "repository; any path outside the allow-list is refused. Use this "
+            "to ground CODE_REVIEW proposals in real code — never infer what "
+            "the code does when you can read it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Repo-relative path. Allowed: hydra_*.py at repo root "
+                        "and tests/**/*.py. Denied: .env, *config*.json, any "
+                        "path containing '..' or an absolute prefix."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+
+_SOURCE_ALLOW_GLOBS = (r"^hydra_[A-Za-z0-9_]+\.py$", r"^tests/[A-Za-z0-9_/\-]+\.py$")
+_SOURCE_DENY_SUBSTR = (".env", "config.json", "credentials", "secret", "token")
+
+
+def _safe_read_source_file(
+    path_arg: str,
+    source_root: Path,
+    bytes_cap: int,
+) -> str:
+    """Allow-list + deny-list resolver for read_source_file.
+
+    Returns file contents (UTF-8) on success or an "ERROR: ..." string.
+    Never raises. Never follows symlinks out of the repo. Truncates to
+    `bytes_cap` with a trailing "[...truncated at N bytes...]" notice.
+    """
+    import re as _re
+    import posixpath as _pp
+
+    raw = (path_arg or "").strip().replace("\\", "/")
+    if not raw:
+        return "ERROR: empty path"
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+        return "ERROR: absolute paths not allowed"
+    if ".." in raw.split("/"):
+        return "ERROR: parent-dir traversal not allowed"
+
+    # Normalize. posixpath.normpath preserves relative semantics without
+    # introducing OS-specific separators.
+    norm = _pp.normpath(raw)
+    if norm.startswith("..") or norm.startswith("/"):
+        return "ERROR: path escapes repo root"
+
+    # Deny-list substring check.
+    lowered = norm.lower()
+    for needle in _SOURCE_DENY_SUBSTR:
+        if needle in lowered:
+            return f"ERROR: path matches deny-list ({needle!r})"
+
+    # Allow-list regex check.
+    if not any(_re.match(pat, norm) for pat in _SOURCE_ALLOW_GLOBS):
+        return ("ERROR: path not in allow-list; allowed are hydra_*.py at "
+                "repo root and tests/**/*.py")
+
+    try:
+        resolved = (source_root / norm).resolve()
+        # Reject symlinks escaping the repo.
+        root_resolved = source_root.resolve()
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError:
+            return "ERROR: path resolves outside repo root"
+        if not resolved.exists():
+            return f"ERROR: file not found: {norm}"
+        if not resolved.is_file():
+            return f"ERROR: not a regular file: {norm}"
+        raw_bytes = resolved.read_bytes()
+    except Exception as e:
+        return f"ERROR: {type(e).__name__}: {e}"
+
+    truncated = False
+    if len(raw_bytes) > bytes_cap:
+        raw_bytes = raw_bytes[:bytes_cap]
+        truncated = True
+
+    try:
+        text = raw_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"ERROR: decode failed: {type(e).__name__}: {e}"
+
+    if truncated:
+        text += f"\n\n[...truncated at {bytes_cap} bytes...]"
+    return text
+
+
+def _bootstrap_reviewer_config(
+    path: Path,
+    default_gates: Dict[str, float],
+    cost_in_per_m: float,
+    cost_out_per_m: float,
+) -> None:
+    """Write a default reviewer_config.json to `path` so ops can tune
+    thresholds without editing code. Idempotent (caller guards existence)."""
+    data = {
+        "_description": (
+            "Hydra ResultReviewer configuration. Edit and restart the agent. "
+            "Unknown keys are ignored; malformed files are silently reverted "
+            "to built-in defaults. Regenerate by deleting this file."
+        ),
+        "gates": dict(default_gates),
+        "cost": {
+            "input_per_million": cost_in_per_m,
+            "output_per_million": cost_out_per_m,
+            "_note": (
+                "Update these when Anthropic's published Opus pricing changes; "
+                "they drive the $10/day disclosure and the cost_usd stamped "
+                "on each ReviewDecision."
+            ),
+        },
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        # Bootstrapping is a convenience; failure is non-fatal.
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# PR-draft emitter — I8 guarantee lives here.
+# ═══════════════════════════════════════════════════════════════
+
+def write_pr_draft(
+    decision: "ReviewDecision",
+    experiment: "Experiment",
+    store_root: Path,
+) -> Optional[Path]:
+    """Emit a human-readable PR draft markdown for CODE_REVIEW verdicts.
+
+    Writes to `{store_root}/pr_drafts/{experiment_id}_{timestamp}.md`. The
+    file is advisory — it names the proposed changes, the evidence, and the
+    risk flags, so the operator can open a real PR from a grounded starting
+    point. Never touches source files; I8 forbids auto-apply of code changes.
+
+    Returns the path on success, None on failure (reviewer never throws).
+    """
+    try:
+        drafts_dir = store_root / "pr_drafts"
+        drafts_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        safe_eid = "".join(c if c.isalnum() or c in "-_" else "_"
+                            for c in (experiment.id or "unknown"))[:60]
+        out = drafts_dir / f"{safe_eid}_{ts}.md"
+
+        lines: List[str] = []
+        lines.append(f"# PR Draft — experiment `{experiment.id}`")
+        lines.append("")
+        lines.append(f"- **Verdict:** `{decision.verdict}`"
+                     + (f" (downgraded from `{decision.original_verdict}`)"
+                        if decision.original_verdict else ""))
+        lines.append(f"- **Reviewer:** {decision.reviewer_model} "
+                     f"({decision.reviewer_version})")
+        lines.append(f"- **Reviewed at:** {decision.reviewed_at}")
+        lines.append(f"- **Confidence:** {decision.confidence}")
+        lines.append(f"- **All gates passed:** `{decision.all_gates_passed}`")
+        lines.append(f"- **Hypothesis:** {experiment.hypothesis or '(none)'}")
+        lines.append(f"- **Materiality score:** {decision.materiality_score:.3f}")
+        lines.append("")
+        lines.append("## Summary")
+        lines.append("")
+        lines.append(decision.reasoning.strip() or "_(no reasoning captured)_")
+        if decision.root_cause_hypothesis:
+            lines.append("")
+            lines.append("### Root-cause hypothesis")
+            lines.append("")
+            lines.append(decision.root_cause_hypothesis.strip())
+        lines.append("")
+        lines.append("## Proposed Changes")
+        lines.append("")
+        if not decision.proposed_changes:
+            lines.append("_(reviewer produced no concrete proposals — this is a flag; "
+                         "CODE_REVIEW without proposed_changes usually means the "
+                         "evidence is ambiguous.)_")
+        else:
+            for i, pc in enumerate(decision.proposed_changes, 1):
+                lines.append(f"### {i}. `{pc.change_type}` @ `{pc.scope}` → `{pc.target}`")
+                lines.append("")
+                if pc.current_value is not None or pc.proposed_value is not None:
+                    lines.append(f"- **Current:** `{pc.current_value}`")
+                    lines.append(f"- **Proposed:** `{pc.proposed_value}`")
+                if pc.expected_impact:
+                    lines.append(f"- **Expected impact:** `{pc.expected_impact}`")
+                if pc.evidence_refs:
+                    lines.append(f"- **Evidence refs:** {', '.join(f'`{r}`' for r in pc.evidence_refs)}")
+                lines.append("")
+                if pc.rationale:
+                    lines.append(f"**Rationale:** {pc.rationale}")
+                    lines.append("")
+                if pc.risk_notes:
+                    lines.append(f"**Risks:** {pc.risk_notes}")
+                    lines.append("")
+
+        if decision.risk_flags:
+            lines.append("## Risk Flags")
+            lines.append("")
+            for rf in decision.risk_flags:
+                lines.append(f"- `{rf}`")
+            lines.append("")
+
+        if decision.source_files_read:
+            lines.append("## Source files consulted")
+            lines.append("")
+            for sf in decision.source_files_read:
+                lines.append(f"- `{sf}`")
+            lines.append("")
+
+        lines.append("## Rigor gates")
+        lines.append("")
+        lines.append("| Gate | Passed |")
+        lines.append("|------|--------|")
+        for gate_name, passed in decision.gates_passed.items():
+            lines.append(f"| `{gate_name}` | {'yes' if passed else 'NO'} |")
+        lines.append("")
+
+        lines.append("## Evidence snapshot")
+        lines.append("")
+        ev = decision.repeatability
+        lines.append(f"- total_trades_in_sample: {ev.total_trades_in_sample}")
+        lines.append(f"- MC mean_improvement: {ev.mc_mean_improvement:.4f} "
+                     f"(95% CI: [{ev.mc_ci_95[0]:.4f}, {ev.mc_ci_95[1]:.4f}], "
+                     f"p={ev.mc_p_value:.3f}, iters={ev.mc_iterations})")
+        lines.append(f"- Walk-forward: {ev.wf_improved_slices}/{ev.wf_slices_tested} "
+                     f"slices improved (mean sharpe {ev.wf_mean_sharpe:.3f})")
+        lines.append(f"- Out-of-sample gap: {ev.oos_gap_pct:.2f}% "
+                     f"(in-sample sharpe {ev.in_sample_sharpe:.3f} vs "
+                     f"oos sharpe {ev.oos_sharpe:.3f})")
+        lines.append(f"- Cross-pair improved: {ev.pairs_improved}/{ev.pairs_total}")
+        lines.append(f"- Regime concentration: {ev.regime_concentration:.3f} "
+                     f"(dominant: {ev.dominant_regime or 'none'})")
+        if ev.run_failures:
+            lines.append(f"- Run failures: {', '.join(ev.run_failures)}")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append("_Generated by Hydra ResultReviewer — advisory only. I8 "
+                     "forbids auto-apply of code changes. Open a real PR from "
+                     "this draft after human review._")
+
+        out.write_text("\n".join(lines), encoding="utf-8")
+        return out
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════

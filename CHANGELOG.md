@@ -34,10 +34,12 @@ with no opt-in flag is identical to v2.9.x. Full user runbook in
 - **feat(backtest):** Phase 3 — experiments framework (`hydra_experiments.py`).
   `Experiment` dataclass with full JSON round-trip, `ExperimentStore` with
   `threading.RLock` (NOT Lock — delete→audit_log re-entry would deadlock),
-  eight presets in `hydra_backtest_presets.json` (`default`, `ideal`,
+  eight in-code presets in `PRESET_LIBRARY` (`default`, `ideal`,
   `divergent`, `aggressive`, `defensive`, `regime_trending`, `regime_ranging`,
-  `regime_volatile`), `run_experiment`, `sweep_experiment`, `compare`,
+  `regime_volatile`) bootstrapped to `.hydra-experiments/presets.json` on
+  first run for user edits, `run_experiment`, `sweep_experiment`, `compare`,
   `_atomic_write_json` with recursive `sanitize_json` for non-finite floats.
+  `audit_log` and `log_review` writes also run through `sanitize_json`.
 - **feat(backtest):** Phase 4 — agent tool API (`hydra_backtest_tool.py`).
   Eight Anthropic tool-use schemas (`BACKTEST_TOOLS`):
   `run_backtest`, `get_experiment`, `list_experiments`, `compare_experiments`,
@@ -47,10 +49,17 @@ with no opt-in flag is identical to v2.9.x. Full user runbook in
   global_daily=50, UTC midnight reset).
 - **feat(brain):** Phase 5 — tool-use integration (`hydra_brain.py` +180 LOC
   additive). New `_call_llm_with_tools()` method implements the Anthropic
-  stop_reason loop (4-iteration cap, 8 KB result cap). Analyst + Risk Manager
-  branch on `_tool_use_enabled`; Grok Strategist stays text-only. Opt-in via
-  `HYDRA_BRAIN_TOOLS_ENABLED=1`; tool-use auto-disables when daily budget
-  exceeds 80%. `_call_llm` and `_parse_json` unchanged for fallback path.
+  stop_reason loop with an injectable `tool_iterations_cap` (default 4) and
+  an 8 KB result cap that truncates via a structured JSON envelope (not a
+  naive byte-slice) so the LLM sees a `truncated:true` signal instead of
+  malformed JSON. `max_tokens` terminal with pending `tool_use` blocks is
+  logged rather than silently dropped. Analyst + Risk Manager branch on
+  `_tool_use_enabled`; Grok Strategist stays text-only. Opt-in via
+  `HYDRA_BRAIN_TOOLS_ENABLED=1`. `_call_llm` and `_parse_json` unchanged for
+  fallback path.
+  Two new kwargs on `HydraBrain.__init__`: `enforce_budget` (default True;
+  backtest brains pass False so experiments don't stall behind a live-cost
+  ceiling) and `broadcaster` (for $10/day `cost_alert` WS disclosure).
 - **feat(backtest):** Phase 6 — backend bridge (`hydra_backtest_server.py`).
   `BacktestWorkerPool` (max_workers=2, 4 max, daemon threads, queue depth 20).
   `mount_backtest_routes()` wires `backtest_start`, `backtest_cancel`,
@@ -66,11 +75,21 @@ with no opt-in flag is identical to v2.9.x. Full user runbook in
   `regime_not_concentrated`. `ResultReviewer.review()`, `batch_review()`,
   `self_retrospective()`. Five verdicts: `NO_CHANGE`, `PARAM_TWEAK`,
   `CODE_REVIEW`, `RESULT_ANOMALOUS`, `HYPOTHESIS_REFUTED`. Regime-only failure
-  downgrades to scoped `CODE_REVIEW` (order-sensitive check ordering). LLM
-  optional — heuristic verdict works without client. Reviewer never
-  auto-applies code changes (invariant I8); PR drafts land in
-  `.hydra-experiments/reviews/`. Tunable thresholds in
-  `hydra_reviewer_config.json`.
+  downgrades to scoped `CODE_REVIEW` via set-equality check (order-independent).
+  LLM optional — heuristic verdict works without client.
+  Tool-use loop invokes `read_source_file` (allow-list: `hydra_*.py` +
+  `tests/**/*.py`; deny-list blocks `.env`, `*config*.json`, secrets, tokens;
+  6 reads per review, 16 KB per file with truncation notice). `CODE_REVIEW`
+  verdicts emit advisory PR drafts to
+  `.hydra-experiments/pr_drafts/{exp_id}_{timestamp}.md` — I8 invariant:
+  reviewer never auto-applies code changes. Cost tracking protected by a
+  `threading.Lock` so multi-worker concurrent reviews don't corrupt the
+  daily counter. WF/OOS run failures surface to
+  `RepeatabilityEvidence.run_failures` and promote into `risk_flags` so
+  gate misses are self-explaining. New kwargs: `enforce_budget` (default
+  True), `broadcaster` (WS hook for `cost_alert`), `source_root` (allow-list
+  root). Tunable gates + Opus pricing live in
+  `.hydra-experiments/reviewer_config.json`, bootstrapped on first init.
 - **feat(dashboard):** Phase 8 — tab switcher (LIVE / BACKTEST / COMPARE) +
   `BacktestControlPanel` with preset picker, pair selector, date range,
   parameter overrides. All components inline in `App.jsx`, same neon styling.
