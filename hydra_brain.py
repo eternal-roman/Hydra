@@ -15,11 +15,13 @@ Usage:
 """
 
 import json
+import os
 import time
 import re
 import threading
+import traceback
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 
 try:
@@ -123,6 +125,32 @@ Think step by step. Then respond ONLY with this JSON:
   "decision": "CONFIRM" or "OVERRIDE"
 }"""
 
+# Appended to ANALYST_PROMPT / RISK_MANAGER_PROMPT when tool-use is enabled.
+# Keeps the base prompts untouched for the no-tools path (drift-sensitive —
+# existing prompt wording is load-bearing for the JSON output contract).
+TOOLS_GUIDANCE = """
+
+Tools available (Anthropic tool-use format):
+- run_backtest(preset, hypothesis, overrides?, n_candles?): validate a concrete \
+hypothesis against a synthetic market run. Returns sharpe, return, drawdown, trades.
+- find_best(metric, min_trades): recall the historically best experiment on a metric.
+- list_experiments(limit, tag?, triggered_by?): browse recent experiments.
+- get_experiment(experiment_id): fetch full record.
+- compare_experiments(experiment_ids): per-metric winners across 2-8 experiments.
+- sweep_param(preset, param, values, hypothesis): narrow parameter sweep.
+- list_presets: enumerate available presets.
+
+RULES OF USE:
+1. Use tools sparingly. A confidently-held prior doesn't need backtest evidence; \
+reserve tool calls for genuinely uncertain judgments where evidence would change \
+your recommendation.
+2. ALWAYS pass a specific hypothesis ("does RSI<25 entry outperform default in \
+RANGING regime?"). Vague hypotheses get audited and rejected.
+3. Per-agent quota: 10 backtest runs/day; exceeding returns an error — fall back \
+to engine-only reasoning in that case.
+4. After running tools, produce the SAME JSON output format as without tools. \
+Tools inform your reasoning; the output contract doesn't change."""
+
 PORTFOLIO_STRATEGIST_PROMPT = """You are HYDRA's Portfolio Strategist, reviewing the aggregate state of a 3-pair crypto trading portfolio (SOL/USDC, SOL/BTC, BTC/USDC).
 
 Your job: Produce a brief portfolio-level assessment that per-pair trading agents will use as advisory context. You are NOT making trade decisions — you are providing strategic guidance.
@@ -157,6 +185,8 @@ class HydraBrain:
         openai_key: str = "",
         xai_key: str = "",
         max_daily_cost: float = 10.0,
+        tool_dispatcher: Optional[Any] = None,
+        enable_tool_use: Optional[bool] = None,
     ):
         # Primary: Claude for Analyst + Risk Manager
         self.primary_client = None
@@ -225,6 +255,25 @@ class HydraBrain:
         # per agent tick, so 9 = ~3 agent ticks (~1 candle period at 15-min candles).
         self.strategist_cooldowns: Dict[str, int] = {}
         self.strategist_cooldown_ticks = 9
+
+        # ─── Tool-use (Phase 5) ───
+        # Gated three ways so the default path is IDENTICAL to v2.9.x:
+        #   1) caller passed a dispatcher instance
+        #   2) enable_tool_use=True OR env HYDRA_BRAIN_TOOLS_ENABLED=1
+        #   3) primary provider is anthropic (tool-use format is Anthropic-specific)
+        # If any condition fails, self._tool_use_enabled is False and all
+        # existing call sites take the legacy _call_llm path.
+        self._tool_dispatcher = tool_dispatcher
+        flag_env = os.getenv("HYDRA_BRAIN_TOOLS_ENABLED") == "1"
+        flag_param = bool(enable_tool_use) if enable_tool_use is not None else flag_env
+        self._tool_use_enabled = (
+            tool_dispatcher is not None
+            and flag_param
+            and self.primary_provider == "anthropic"
+            and HAS_ANTHROPIC
+        )
+        self._tool_iterations_cap = 4         # hard cap per single LLM call
+        self._tool_use_calls = 0              # lifetime counter for diagnostics
 
     # ─── Main Entry Point ───
 
@@ -418,16 +467,184 @@ class HydraBrain:
                 print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}) — increasing tolerance")
             return text, response.usage.input_tokens, response.usage.output_tokens
 
+    # ─── Tool-use loop (Phase 5) ───
+
+    @staticmethod
+    def _content_block_to_dict(block: Any) -> Dict[str, Any]:
+        """Normalize an Anthropic ContentBlock (or a pre-dicted block) into a
+        plain dict safe to echo back in a subsequent messages.create call.
+
+        Handles both SDK objects (duck-typed via attributes) and dicts (used
+        by tests with mock clients).
+        """
+        if isinstance(block, dict):
+            return block
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            return {"type": "text", "text": getattr(block, "text", "")}
+        if btype == "tool_use":
+            return {
+                "type": "tool_use",
+                "id": getattr(block, "id", ""),
+                "name": getattr(block, "name", ""),
+                "input": getattr(block, "input", {}) or {},
+            }
+        # Unknown block type — emit a marker so it shows up in logs but
+        # doesn't break messages=[...] serialization.
+        return {"type": "text", "text": f"[unknown block type: {btype}]"}
+
+    def _call_llm_with_tools(
+        self,
+        system_prompt: str,
+        user_msg: str,
+        tools: List[Dict[str, Any]],
+        caller: str,
+        max_tokens: int = 400,
+    ) -> Tuple[str, int, int, int]:
+        """Anthropic tool-use loop for the brain's agents.
+
+        Runs up to `self._tool_iterations_cap` iterations. Each iteration:
+          1) call messages.create(tools=tools)
+          2) accumulate tokens
+          3) if stop_reason == "end_turn" → return joined text blocks
+          4) if stop_reason == "tool_use" → dispatch every tool_use block,
+             append tool_result blocks, continue loop
+          5) anything else → bail with whatever text we have (fail-safe)
+
+        Returns: (final_text, input_tokens, output_tokens, tool_calls_made)
+
+        Invariants:
+          - Never raises. On unexpected exceptions returns ("", 0, 0, 0)
+            so the caller falls back to engine-only reasoning (same
+            pattern as _call_llm's outer try in _run_analyst).
+          - Primary provider MUST be "anthropic" — caller is responsible
+            for checking self._tool_use_enabled before calling.
+          - Dispatcher errors are marshaled into tool_result content
+            (as JSON) so the LLM can read + recover, not raised.
+        """
+        if self.primary_provider != "anthropic":
+            # Defensive — should be gated by _tool_use_enabled, but protect
+            # against a future caller that forgets.
+            return "", 0, 0, 0
+
+        messages: List[Dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        total_in = 0
+        total_out = 0
+        tool_calls = 0
+
+        try:
+            for _iter in range(self._tool_iterations_cap):
+                response = self.primary_client.messages.create(
+                    model=self.primary_model,
+                    max_tokens=max_tokens,
+                    system=system_prompt,
+                    tools=tools,
+                    messages=messages,
+                    timeout=45.0,  # tool-use can take longer than plain calls
+                )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    total_in += getattr(usage, "input_tokens", 0) or 0
+                    total_out += getattr(usage, "output_tokens", 0) or 0
+
+                stop = getattr(response, "stop_reason", None)
+                content = getattr(response, "content", []) or []
+
+                if stop != "tool_use":
+                    # Terminal (end_turn, max_tokens, stop_sequence, or None).
+                    # Concatenate all text blocks; JSON parser tolerates
+                    # leading/trailing prose from the model.
+                    texts = [
+                        getattr(b, "text", "") if not isinstance(b, dict)
+                        else b.get("text", "")
+                        for b in content
+                        if (getattr(b, "type", None) == "text"
+                            or (isinstance(b, dict) and b.get("type") == "text"))
+                    ]
+                    return "\n".join(t for t in texts if t), total_in, total_out, tool_calls
+
+                # Tool-use turn: echo the assistant response back + append tool_results
+                assistant_content = [self._content_block_to_dict(b) for b in content]
+                messages.append({"role": "assistant", "content": assistant_content})
+
+                tool_results: List[Dict[str, Any]] = []
+                for block in content:
+                    btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+                    if btype != "tool_use":
+                        continue
+                    if self._tool_dispatcher is None:
+                        tool_name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else "?")
+                        tool_id = getattr(block, "id", None) or (block.get("id") if isinstance(block, dict) else "")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": json.dumps({"success": False,
+                                                    "error": "no dispatcher wired"}),
+                            "is_error": True,
+                        })
+                        continue
+                    tool_name = getattr(block, "name", None) or block.get("name")
+                    tool_input = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+                    tool_id = getattr(block, "id", None) or block.get("id")
+                    result = self._tool_dispatcher.execute(
+                        tool_name, tool_input or {}, caller=caller
+                    )
+                    self._tool_use_calls += 1
+                    tool_calls += 1
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": json.dumps(result)[:8000],  # guardrail vs huge payloads
+                        "is_error": not result.get("success", False),
+                    })
+
+                messages.append({"role": "user", "content": tool_results})
+
+            # Ran out of iterations. Budget-exceeded fail-safe: return empty
+            # so deliberate() falls back to engine-only. Print once so the
+            # ops observer can see it in hydra_errors.log via tick wrap.
+            print(f"  [BRAIN] tool-use hit iteration cap ({self._tool_iterations_cap}) for {caller}; engine fallback")
+            return "", total_in, total_out, tool_calls
+
+        except Exception as e:
+            print(f"  [BRAIN] tool-use exception ({type(e).__name__}: {e}) for {caller}; engine fallback")
+            # Don't swallow the traceback in debug envs
+            if os.getenv("HYDRA_DEBUG_TOOLS") == "1":
+                print(traceback.format_exc())
+            return "", total_in, total_out, tool_calls
+
+    # ─── Agent runners ───
+
     def _run_analyst(self, state: Dict) -> tuple:
         """Market Analyst (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
         user_msg = self._build_analyst_prompt(state)
-        text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 400)
+        if self._tool_use_enabled:
+            from hydra_backtest_tool import BACKTEST_TOOLS
+            text, tok_in, tok_out, _tool_calls = self._call_llm_with_tools(
+                ANALYST_PROMPT + TOOLS_GUIDANCE,
+                user_msg,
+                BACKTEST_TOOLS,
+                caller="brain:analyst",
+                max_tokens=500,  # headroom over plain 400 for tool_result context
+            )
+        else:
+            text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 400)
         return self._parse_json(text), tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:
         """Risk Manager (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
         user_msg = self._build_risk_prompt(state, analyst)
-        text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 350)
+        if self._tool_use_enabled:
+            from hydra_backtest_tool import BACKTEST_TOOLS
+            text, tok_in, tok_out, _tool_calls = self._call_llm_with_tools(
+                RISK_MANAGER_PROMPT + TOOLS_GUIDANCE,
+                user_msg,
+                BACKTEST_TOOLS,
+                caller="brain:risk_manager",
+                max_tokens=450,
+            )
+        else:
+            text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 350)
         return self._parse_json(text), tok_in, tok_out
 
     def _run_strategist(self, state: Dict, analyst: Dict, risk: Dict) -> tuple:
