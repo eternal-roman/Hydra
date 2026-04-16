@@ -546,8 +546,16 @@ class BacktestRunner:
     each owns its own HydraEngine instances (I2).
     """
 
-    def __init__(self, config: BacktestConfig) -> None:
+    def __init__(
+        self,
+        config: BacktestConfig,
+        sources_override: Optional[Dict[str, "CandleSource"]] = None,
+    ) -> None:
         self.config = finalize_stamps(config)
+        # sources_override is consulted in place of make_candle_source() — used by
+        # hydra_backtest_metrics.walk_forward / out_of_sample_gap to feed candle
+        # slices without duplicating _loop. None (default) preserves live path.
+        self._sources_override = sources_override
         self._build_engines_and_coord()
 
     # ---- internal setup ----
@@ -626,7 +634,9 @@ class BacktestRunner:
         cancel_token: Optional[threading.Event],
     ) -> None:
         cfg = self.config
-        sources = {p: make_candle_source(cfg) for p in cfg.pairs}
+        sources = self._sources_override if self._sources_override is not None else (
+            {p: make_candle_source(cfg) for p in cfg.pairs}
+        )
         iterators = {p: iter(sources[p].iter_candles(p)) for p in cfg.pairs}
 
         tick = 0
