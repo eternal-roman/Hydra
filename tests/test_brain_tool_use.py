@@ -464,5 +464,80 @@ class TestAnalystRiskBranching(unittest.TestCase):
         self.assertNotIn("tools", first_call)
 
 
+# ═══════════════════════════════════════════════════════════════
+# Risk Manager size_multiplier clamp
+# ═══════════════════════════════════════════════════════════════
+
+class TestRiskManagerSizeMultiplierClamp(unittest.TestCase):
+    """A model hallucination can emit size_multiplier outside [0.0, 1.5]
+    or as a non-numeric. Downstream Kelly sizing multiplies balance by this
+    directly, so the clamp in _run_risk_manager is load-bearing."""
+
+    def _state(self):
+        return {
+            "asset": "SOL/USDC",
+            "signal": {"action": "BUY", "confidence": 0.72, "reason": "test"},
+            "regime": "TREND_UP", "strategy": "MOMENTUM",
+            "indicators": {}, "portfolio": {"equity": 100, "balance": 100,
+                                            "pnl_pct": 0.0, "max_drawdown_pct": 0.0},
+            "performance": {"total_trades": 0, "win_count": 0, "loss_count": 0,
+                            "fee_paid": 0.0, "realized_pnl": 0.0},
+            "position": {"size": 0, "avg_entry": 0, "unrealized_pnl": 0},
+            "portfolio_overview": {},
+        }
+
+    def _brain_returning(self, raw_value) -> HydraBrain:
+        """Make a brain whose Risk Manager returns the given size_multiplier."""
+        # Build a full, otherwise-valid risk response so _parse_json succeeds.
+        payload = {
+            "decision": "CONFIRM",
+            "final_action": "BUY",
+            "size_multiplier": raw_value,
+            "reasoning": "test",
+            "risk_flags": [],
+            "portfolio_health": "HEALTHY",
+        }
+        fake = _FakeClient([
+            _FakeResponse(
+                content=[_FakeTextBlock(text=json.dumps(payload))],
+                stop_reason="end_turn",
+                usage=_FakeUsage(10, 5),
+            )
+        ])
+        # Tool-use disabled so _run_risk_manager takes the legacy _call_llm path
+        return _make_brain_with_fake_client(fake, enable=False)
+
+    def test_clamp_above_max(self):
+        brain = self._brain_returning(2.5)
+        parsed, _tin, _tout = brain._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["size_multiplier"], 1.5)
+
+    def test_clamp_below_min(self):
+        brain = self._brain_returning(-0.3)
+        parsed, _tin, _tout = brain._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertEqual(parsed["size_multiplier"], 0.0)
+
+    def test_non_numeric_defaults_to_one(self):
+        brain = self._brain_returning("abc")
+        parsed, _tin, _tout = brain._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertEqual(parsed["size_multiplier"], 1.0)
+
+    def test_in_range_passes_through(self):
+        brain = self._brain_returning(0.75)
+        parsed, _tin, _tout = brain._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertEqual(parsed["size_multiplier"], 0.75)
+
+    def test_boundary_values_pass_through(self):
+        # 0.0 and 1.5 are valid; must not be altered
+        brain_low = self._brain_returning(0.0)
+        parsed_low, _i, _o = brain_low._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertEqual(parsed_low["size_multiplier"], 0.0)
+
+        brain_high = self._brain_returning(1.5)
+        parsed_high, _i, _o = brain_high._run_risk_manager(self._state(), {"thesis": "t"})
+        self.assertEqual(parsed_high["size_multiplier"], 1.5)
+
+
 if __name__ == "__main__":
     unittest.main()
