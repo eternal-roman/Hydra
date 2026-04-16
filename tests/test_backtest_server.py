@@ -268,6 +268,7 @@ class TestMountRoutes(_PoolFixture):
         expected = {
             "backtest_start", "backtest_cancel",
             "experiment_list_request", "experiment_get_request",
+            "experiment_compare_request",
             "experiment_delete", "review_request",
         }
         self.assertTrue(expected.issubset(self.bc.handlers.keys()))
@@ -330,6 +331,41 @@ class TestMountRoutes(_PoolFixture):
         reply = self.bc.handlers["experiment_get_request"]({"experiment_id": eid})
         self.assertTrue(reply["success"])
         self.assertEqual(reply["experiment"]["id"], eid)
+
+    def test_compare_handler_requires_two(self):
+        reply = self.bc.handlers["experiment_compare_request"]({"experiment_ids": ["only-one"]})
+        self.assertFalse(reply["success"])
+
+    def test_compare_handler_rejects_too_many(self):
+        reply = self.bc.handlers["experiment_compare_request"]({
+            "experiment_ids": [f"fake-{i}" for i in range(9)],
+        })
+        self.assertFalse(reply["success"])
+        self.assertIn("max 8", reply["error"])
+
+    def test_compare_handler_missing_ids(self):
+        reply = self.bc.handlers["experiment_compare_request"]({
+            "experiment_ids": ["fake-a", "fake-b"],
+        })
+        self.assertFalse(reply["success"])
+        self.assertIn("missing", reply["error"].lower())
+
+    def test_compare_handler_happy(self):
+        cfg = make_quick_config(name="cmp", n_candles=80)
+        cfg = replace(cfg, coordinator_enabled=False)
+        eid1 = self.pool.submit_config(cfg, hypothesis="compare one", triggered_by="cli")
+        eid2 = self.pool.submit_config(cfg, hypothesis="compare two", triggered_by="cli")
+        self._wait_status(eid1, "complete", "failed")
+        self._wait_status(eid2, "complete", "failed")
+        reply = self.bc.handlers["experiment_compare_request"]({
+            "experiment_ids": [eid1, eid2],
+        })
+        self.assertTrue(reply["success"], reply)
+        self.assertIn("winner_per_metric", reply)
+        self.assertIn("rows", reply)
+        self.assertEqual(len(reply["rows"]), 2)
+        # Pairwise p-values keyed as "a__b"
+        self.assertTrue(any("__" in k for k in reply["pairwise_sharpe_p_values"].keys()))
 
     def test_delete_handler_always_denied(self):
         reply = self.bc.handlers["experiment_delete"]({"experiment_id": "anything"})

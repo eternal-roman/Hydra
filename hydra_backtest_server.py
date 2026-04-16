@@ -507,6 +507,39 @@ def mount_backtest_routes(
         return {"success": False,
                 "error": "delete is not exposed via WS; use the CLI tool"}
 
+    def _compare(payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Phase 10 dashboard compare view: takes 2-8 experiment ids and
+        # returns per-metric winners + paired bootstrap p-values via the
+        # Phase 3 `compare()` function.
+        ids: List[str] = list(payload.get("experiment_ids") or [])
+        if len(ids) < 2:
+            return {"success": False, "error": "at least 2 experiment_ids required"}
+        if len(ids) > 8:
+            return {"success": False, "error": "compare supports max 8 experiments"}
+        from hydra_experiments import compare as _compare_fn
+        experiments = []
+        missing = []
+        for eid in ids:
+            try:
+                experiments.append(pool.store.load(eid))
+            except KeyError:
+                missing.append(eid)
+        if missing:
+            return {"success": False, "error": "experiments missing", "missing_ids": missing}
+        from dataclasses import asdict as _asdict
+        report = _compare_fn(experiments)
+        return {
+            "success": True,
+            "experiments": report.experiments,
+            "winner_per_metric": report.winner_per_metric,
+            "rows": [_asdict(r) for r in report.rows],
+            # Tuple keys don't JSON-serialize; flatten to "a__b" → p
+            "pairwise_sharpe_p_values": {
+                f"{a}__{b}": p
+                for (a, b), p in report.pairwise_sharpe_p_values.items()
+            },
+        }
+
     def _review_request(payload: Dict[str, Any]) -> Dict[str, Any]:
         eid = payload.get("experiment_id")
         if not eid:
@@ -531,6 +564,7 @@ def mount_backtest_routes(
     broadcaster.register_handler("backtest_cancel", _cancel)
     broadcaster.register_handler("experiment_list_request", _list)
     broadcaster.register_handler("experiment_get_request", _get)
+    broadcaster.register_handler("experiment_compare_request", _compare)
     broadcaster.register_handler("experiment_delete", _deny_delete)
     broadcaster.register_handler("review_request", _review_request)
 

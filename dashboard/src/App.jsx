@@ -893,19 +893,418 @@ function ObserverModal({
   );
 }
 
-function CompareView() {
+// ═══════════════════════════════════════════════════════════════
+// Phase 10: Experiment Library + Compare View
+// ═══════════════════════════════════════════════════════════════
+
+// Color mapping for verdict badges (matches ReviewPanel colors)
+const VERDICT_COLORS = {
+  NO_CHANGE:          "textDim",
+  PARAM_TWEAK:        "accent",
+  CODE_REVIEW:        "blue",
+  RESULT_ANOMALOUS:   "warn",
+  HYPOTHESIS_REFUTED: "danger",
+};
+
+function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
+                             onView, filters, onFilterChange, loading }) {
+  const count = experiments?.length || 0;
+  const maxSelect = 8;
+  const selCount = selectedIds.length;
+
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 24, display: "flex", flexDirection: "column",
-                  alignItems: "center", justifyContent: "center", minHeight: 320 }}>
-      <div style={{ fontSize: 32, color: COLORS.textMuted, marginBottom: 12 }}>⚖</div>
-      <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 8 }}>
-        Compare View
+                  borderRadius: 8, padding: 16 }}>
+      {/* Header row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
+            Experiment Library
+          </div>
+          <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.textDim }}>
+            {count} experiments
+            {selCount > 0 && (
+              <>
+                {" "}· <span style={{ color: COLORS.purple }}>{selCount}</span> selected
+                {selCount >= maxSelect && <span style={{ color: COLORS.warn }}> (max)</span>}
+              </>
+            )}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {selCount > 0 && (
+            <button
+              onClick={onClearSelection}
+              style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+                       background: "transparent", color: COLORS.textDim,
+                       border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
+                       cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase" }}
+            >
+              Clear
+            </button>
+          )}
+          <button
+            onClick={onRefresh}
+            disabled={loading}
+            style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+                     background: COLORS.blue + "20", color: COLORS.blue,
+                     border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
+                     cursor: loading ? "wait" : "pointer", letterSpacing: "0.1em",
+                     textTransform: "uppercase", opacity: loading ? 0.5 : 1 }}
+          >
+            {loading ? "…" : "Refresh"}
+          </button>
+        </div>
       </div>
-      <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, textAlign: "center", maxWidth: 420 }}>
-        Multi-experiment ranked comparison with per-metric winners and paired bootstrap p-values.
-        Wiring lands in Phase 10 alongside the experiment library.
+
+      {/* Filter row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+        <div>
+          <FieldLabel>Status</FieldLabel>
+          <select
+            value={filters.status || ""}
+            onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
+            style={{ width: "100%", padding: "6px 8px", background: COLORS.bg, color: COLORS.text,
+                     border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
+                     fontSize: 11, fontFamily: mono, outline: "none" }}
+          >
+            <option value="">Any</option>
+            <option value="complete">complete</option>
+            <option value="running">running</option>
+            <option value="pending">pending</option>
+            <option value="failed">failed</option>
+            <option value="cancelled">cancelled</option>
+          </select>
+        </div>
+        <div>
+          <FieldLabel>Triggered By</FieldLabel>
+          <StyledInput
+            value={filters.triggered_by || ""}
+            onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
+            placeholder="e.g. dashboard, brain:analyst"
+          />
+        </div>
+        <div>
+          <FieldLabel>Tag Contains</FieldLabel>
+          <StyledInput
+            value={filters.tag || ""}
+            onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
+            placeholder="e.g. preset:divergent"
+          />
+        </div>
       </div>
+
+      {/* List */}
+      {count === 0 ? (
+        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                      padding: "32px 0", textAlign: "center" }}>
+          {loading ? "Loading…" : "No experiments found. Submit a backtest from the BACKTEST tab."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4,
+                      maxHeight: 420, overflowY: "auto" }}>
+          {experiments.map((e) => {
+            const selected = selectedIds.includes(e.id);
+            const canSelect = selected || selCount < maxSelect;
+            const statusColor = {
+              complete: COLORS.accent, running: COLORS.blue, pending: COLORS.textDim,
+              failed: COLORS.danger, cancelled: COLORS.warn,
+            }[e.status] || COLORS.textDim;
+            const m = e.metrics || {};
+            const retColor = (m.total_return_pct || 0) >= 0 ? COLORS.buy : COLORS.sell;
+            return (
+              <div
+                key={e.id}
+                onClick={() => canSelect && onToggleSelect(e.id)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
+                  gap: 6, alignItems: "center",
+                  padding: "6px 10px",
+                  background: selected ? `${COLORS.purple}12` : COLORS.bg,
+                  border: `1px solid ${selected ? COLORS.purple + "60" : COLORS.panelBorder}`,
+                  borderRadius: 4, fontFamily: mono, fontSize: 10,
+                  cursor: canSelect ? "pointer" : "not-allowed",
+                  opacity: canSelect ? 1 : 0.5,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={!canSelect}
+                  onChange={() => canSelect && onToggleSelect(e.id)}
+                  onClick={(ev) => ev.stopPropagation()}
+                  style={{ accentColor: COLORS.purple, cursor: canSelect ? "pointer" : "not-allowed" }}
+                />
+                <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ color: COLORS.text, fontWeight: 600 }}>{e.name}</span>
+                  <span style={{ color: COLORS.textMuted, marginLeft: 8 }}>{e.id.slice(0, 8)}</span>
+                  {e.base_preset && (
+                    <span style={{ color: COLORS.blue, marginLeft: 6 }}>[{e.base_preset}]</span>
+                  )}
+                </div>
+                <span style={{ color: statusColor, textAlign: "right",
+                               textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  {e.status}
+                </span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {m.total_trades != null ? m.total_trades : "—"}
+                </span>
+                <span style={{ color: retColor, textAlign: "right" }}>
+                  {m.total_return_pct != null
+                    ? `${m.total_return_pct >= 0 ? "+" : ""}${m.total_return_pct.toFixed(1)}%`
+                    : "—"}
+                </span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {m.sharpe != null ? m.sharpe.toFixed(2) : "—"}
+                </span>
+                <span style={{ color: COLORS.warn, textAlign: "right" }}>
+                  {m.max_drawdown_pct != null ? `${m.max_drawdown_pct.toFixed(1)}%` : "—"}
+                </span>
+                <button
+                  onClick={(ev) => { ev.stopPropagation(); onView(e.id); }}
+                  style={{ background: "transparent", border: "none", color: COLORS.textDim,
+                           cursor: "pointer", fontSize: 11, padding: 0, fontFamily: mono }}
+                  title="View details"
+                >
+                  ›
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Column legend */}
+      {count > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
+                      gap: 6, marginTop: 6, padding: "0 10px",
+                      fontFamily: mono, fontSize: 9, color: COLORS.textMuted,
+                      textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          <span />
+          <span>Name / ID</span>
+          <span style={{ textAlign: "right" }}>Status</span>
+          <span style={{ textAlign: "right" }}>Trades</span>
+          <span style={{ textAlign: "right" }}>Return</span>
+          <span style={{ textAlign: "right" }}>Sharpe</span>
+          <span style={{ textAlign: "right" }}>Max DD</span>
+          <span />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompareResults({ report, experimentsById }) {
+  if (!report || !Array.isArray(report.rows) || report.rows.length === 0) return null;
+  const winners = report.winner_per_metric || {};
+  const metrics = [
+    { key: "total_return_pct", label: "Return",     suffix: "%",  higherBetter: true  },
+    { key: "sharpe",           label: "Sharpe",     suffix: "",   higherBetter: true  },
+    { key: "max_drawdown_pct", label: "Max DD",     suffix: "%",  higherBetter: false },
+    { key: "profit_factor",    label: "Profit Fct", suffix: "",   higherBetter: true  },
+  ];
+
+  return (
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                  borderRadius: 8, padding: 16, marginTop: 12 }}>
+      <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                    marginBottom: 10 }}>
+        Comparison
+      </div>
+
+      {/* Ranked table */}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 11 }}>
+          <thead>
+            <tr style={{ color: COLORS.textDim, fontSize: 9, textTransform: "uppercase",
+                         letterSpacing: "0.08em" }}>
+              <th style={{ textAlign: "left",  padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+                Experiment
+              </th>
+              <th style={{ textAlign: "right", padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+                Trades
+              </th>
+              {metrics.map(m => (
+                <th key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                                          borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+                  {m.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {report.rows.map((row) => (
+              <tr key={row.experiment_id}
+                  style={{ borderBottom: `1px solid ${COLORS.bg}` }}>
+                <td style={{ padding: "8px 6px", minWidth: 160 }}>
+                  <div style={{ color: COLORS.text, fontWeight: 600 }}>{row.name}</div>
+                  <div style={{ color: COLORS.textMuted, fontSize: 9 }}>
+                    {row.experiment_id.slice(0, 16)}
+                  </div>
+                </td>
+                <td style={{ textAlign: "right", padding: "8px 6px", color: COLORS.text }}>
+                  {row.total_trades}
+                </td>
+                {metrics.map(m => {
+                  const val = row[m.key];
+                  const isWinner = winners[m.key] === row.experiment_id;
+                  const good = m.higherBetter ? (val > 0) : (val < 10);
+                  const color = isWinner ? COLORS.accent : (good ? COLORS.text : COLORS.textDim);
+                  return (
+                    <td key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                                              color, fontWeight: isWinner ? 700 : 400 }}>
+                      {val != null && Number.isFinite(val)
+                        ? `${m.higherBetter && val > 0 ? "+" : ""}${val.toFixed(2)}${m.suffix}`
+                        : "—"}
+                      {isWinner && (
+                        <span style={{ marginLeft: 4, fontSize: 9, color: COLORS.accent }}>★</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Per-metric winners */}
+      <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}`,
+                    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+        {metrics.map(m => {
+          const winnerId = winners[m.key];
+          const winner = winnerId
+            ? (report.rows.find(r => r.experiment_id === winnerId) || experimentsById?.[winnerId])
+            : null;
+          return (
+            <div key={m.key} style={{ background: COLORS.bg, padding: "8px 10px",
+                                       border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
+              <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
+                            letterSpacing: "0.1em", fontFamily: mono }}>
+                {m.label} winner
+              </div>
+              <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.accent,
+                            marginTop: 4, whiteSpace: "nowrap", overflow: "hidden",
+                            textOverflow: "ellipsis" }}>
+                {winner ? (winner.name || winner.id?.slice(0, 12) || "—") : "—"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Pairwise p-values (significance). "__" is the key separator. */}
+      {report.pairwise_sharpe_p_values && Object.keys(report.pairwise_sharpe_p_values).length > 0 && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+          <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
+                        letterSpacing: "0.1em", fontFamily: mono, marginBottom: 6 }}>
+            Paired bootstrap p-values (per-tick return diffs)
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {Object.entries(report.pairwise_sharpe_p_values).map(([key, p]) => {
+              const [a, b] = key.split("__");
+              const significant = p < 0.05;
+              return (
+                <div key={key} style={{ fontFamily: mono, fontSize: 10,
+                                         padding: "4px 8px",
+                                         background: significant ? `${COLORS.accent}12` : COLORS.bg,
+                                         border: `1px solid ${significant ? COLORS.accent : COLORS.panelBorder}`,
+                                         borderRadius: 3,
+                                         color: significant ? COLORS.accent : COLORS.textDim }}>
+                  {a.slice(0, 6)} vs {b.slice(0, 6)}: p={p.toFixed(3)}
+                  {significant && " ✓"}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono, marginTop: 6 }}>
+            ✓ = difference statistically significant at p&lt;0.05.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
+                       onView, onCompare, compareReport, loading, filters, onFilterChange }) {
+  const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8;
+
+  return (
+    <div>
+      <ExperimentLibrary
+        experiments={experiments}
+        selectedIds={selectedIds}
+        onToggleSelect={onToggleSelect}
+        onClearSelection={onClearSelection}
+        onRefresh={onRefresh}
+        onView={onView}
+        filters={filters}
+        onFilterChange={onFilterChange}
+        loading={loading}
+      />
+
+      {/* Compare action row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                    marginTop: 12, padding: "10px 16px",
+                    background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                    borderRadius: 8 }}>
+        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+          {selectedIds.length === 0 ? (
+            "Select 2-8 experiments from the library above to compare."
+          ) : selectedIds.length === 1 ? (
+            <>1 selected — <span style={{ color: COLORS.warn }}>need at least 2 to compare</span></>
+          ) : (
+            <>
+              <span style={{ color: COLORS.purple }}>{selectedIds.length}</span> selected · ready to compare
+            </>
+          )}
+        </div>
+        <button
+          onClick={onCompare}
+          disabled={!canCompare}
+          style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, fontFamily: mono,
+                   textTransform: "uppercase", letterSpacing: "0.1em",
+                   background: canCompare ? COLORS.purple : COLORS.panelBorder,
+                   color: canCompare ? "#0a0a0f" : COLORS.textMuted,
+                   border: `1px solid ${canCompare ? COLORS.purple : COLORS.panelBorder}`,
+                   borderRadius: 4, cursor: canCompare ? "pointer" : "not-allowed",
+                   outline: "none",
+                   boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
+        >
+          Compare →
+        </button>
+      </div>
+
+      {compareReport && compareReport.success ? (
+        <CompareResults report={compareReport}
+                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))} />
+      ) : compareReport && !compareReport.success ? (
+        <div style={{ marginTop: 12, padding: 16, background: COLORS.panel,
+                      border: `1px solid ${COLORS.danger}40`, borderRadius: 8,
+                      color: COLORS.danger, fontFamily: mono, fontSize: 11 }}>
+          Compare failed: {compareReport.error}
+          {compareReport.missing_ids && (
+            <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
+              Missing: {compareReport.missing_ids.join(", ")}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* Tip */}
+      {!compareReport && (
+        <div style={{ marginTop: 12, padding: "10px 14px",
+                      background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
+                      borderRadius: 6, fontSize: 10, fontFamily: mono, color: COLORS.textDim,
+                      lineHeight: 1.5 }}>
+          Per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
+          Pairwise p-values use paired bootstrap over per-tick return diffs —
+          <span style={{ color: COLORS.accent }}> p&lt;0.05</span> means the sharpe gap isn't just noise.
+        </div>
+      )}
     </div>
   );
 }
@@ -944,6 +1343,13 @@ export default function App() {
   const [btEquityHistory, setBtEquityHistory] = useState({});
   const [btActiveExpId, setBtActiveExpId] = useState(null);  // which exp the observer is focused on
   const [observerClosed, setObserverClosed] = useState(false); // user dismissed → hide until a new run
+  // Phase 10: experiment library + compare state
+  const [libExperiments, setLibExperiments] = useState([]);    // full list from WS
+  const [libFilters, setLibFilters] = useState({});            // {status, triggered_by, tag}
+  const [libLoading, setLibLoading] = useState(false);
+  const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
+  const [compareReport, setCompareReport] = useState(null);    // last compare ack
+  const [viewingExpId, setViewingExpId] = useState(null);      // single-experiment detail view (stretch)
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -1016,6 +1422,23 @@ export default function App() {
                 setObserverClosed(false);
               }
               return;
+            case "experiment_list_request_ack":
+              setLibLoading(false);
+              if (msg.success && Array.isArray(msg.experiments)) {
+                setLibExperiments(msg.experiments);
+              }
+              return;
+            case "experiment_compare_request_ack":
+              setCompareReport(msg);
+              return;
+            case "experiment_get_request_ack":
+              // Single-experiment fetch — Phase 10 stretches this via the
+              // viewing drawer; for now we stash the raw payload so a
+              // future modal can render the full BacktestResult.
+              if (msg.success && msg.experiment) {
+                setViewingExpId(msg.experiment.id);
+              }
+              return;
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
               if (msg.channel === "backtest") setBtLastAck(msg);
@@ -1055,6 +1478,48 @@ export default function App() {
       return false;
     }
   }, []);
+
+  // Phase 10 — library + compare helpers
+  const fetchLibrary = useCallback(() => {
+    setLibLoading(true);
+    sendMessage({ type: "experiment_list_request", limit: 100 });
+  }, [sendMessage]);
+
+  const toggleSelectExperiment = useCallback((id) => {
+    setCompareSelected((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(0, 8)
+    );
+  }, []);
+
+  const clearSelection = useCallback(() => setCompareSelected([]), []);
+
+  const runCompare = useCallback(() => {
+    if (compareSelected.length < 2) return;
+    setCompareReport(null);   // show spinner until ack lands
+    sendMessage({
+      type: "experiment_compare_request",
+      experiment_ids: compareSelected,
+    });
+  }, [compareSelected, sendMessage]);
+
+  const viewExperiment = useCallback((id) => {
+    sendMessage({ type: "experiment_get_request", experiment_id: id });
+  }, [sendMessage]);
+
+  // Auto-refresh library whenever COMPARE tab activates (freshest state wins).
+  useEffect(() => {
+    if (activeTab === "COMPARE" && connected) fetchLibrary();
+  }, [activeTab, connected, fetchLibrary]);
+
+  // Apply client-side filters on top of the server's list response.
+  // Server currently sends everything; filters stay cheap + interactive.
+  const filteredExperiments = (libExperiments || []).filter((e) => {
+    if (libFilters.status && e.status !== libFilters.status) return false;
+    if (libFilters.triggered_by
+        && !(e.triggered_by || "").includes(libFilters.triggered_by)) return false;
+    if (libFilters.tag && !(e.tags || []).some((t) => t.includes(libFilters.tag))) return false;
+    return true;
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1185,7 +1650,35 @@ export default function App() {
             )}
             {activeTab === "COMPARE" && (
               <div style={{ padding: "16px 24px" }}>
-                <CompareView />
+                {viewingExpId && (
+                  <div style={{ marginBottom: 10, padding: "8px 14px",
+                                background: `${COLORS.blue}10`,
+                                border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
+                                fontFamily: mono, fontSize: 10, color: COLORS.blue,
+                                display: "flex", justifyContent: "space-between",
+                                alignItems: "center" }}>
+                    <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
+                    <button onClick={() => setViewingExpId(null)}
+                            style={{ background: "transparent", border: "none",
+                                     color: COLORS.blue, cursor: "pointer",
+                                     fontFamily: mono, fontSize: 10 }}>
+                      dismiss
+                    </button>
+                  </div>
+                )}
+                <CompareView
+                  experiments={filteredExperiments}
+                  selectedIds={compareSelected}
+                  onToggleSelect={toggleSelectExperiment}
+                  onClearSelection={clearSelection}
+                  onRefresh={fetchLibrary}
+                  onView={viewExperiment}
+                  onCompare={runCompare}
+                  compareReport={compareReport}
+                  loading={libLoading}
+                  filters={libFilters}
+                  onFilterChange={setLibFilters}
+                />
               </div>
             )}
             {/* Floating observer on LIVE tab — dual-state view. Appears
