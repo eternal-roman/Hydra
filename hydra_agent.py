@@ -1397,7 +1397,9 @@ class FakeTickerStream(TickerStream):
         return (self._healthy, "fake" if self._healthy else "fake_unhealthy")
 
     def ensure_healthy(self):
-        pass
+        # Match BaseStream contract: return (healthy, reason) tuple rather
+        # than None. Tests are deterministic; never auto-restart.
+        return self.health_status()
 
     def set_healthy(self, h):
         self._healthy = h
@@ -2519,12 +2521,16 @@ class HydraAgent:
             pos = state.get("position", {}).get("size", 0)
             price = state.get("price", 0)
 
-            # Net asset exposure across the triangle
+            # Net asset exposure across the triangle.
+            # Spot positions: holding SOL (whether purchased via USDC or BTC)
+            # only adds SOL exposure. The BTC spent on a SOL/BTC buy is
+            # already reflected in the account's BTC balance, not a
+            # synthetic "short BTC" obligation — this is spot trading, not
+            # margin. BTC exposure comes exclusively from BTC/USDC holdings.
             if pair == "SOL/USDC":
                 sol_exposure += pos
             elif pair == "SOL/BTC":
                 sol_exposure += pos
-                btc_exposure -= pos * price  # long SOL/BTC = short BTC
             elif pair == "BTC/USDC":
                 btc_exposure += pos
 
@@ -3158,7 +3164,13 @@ class HydraAgent:
         """Execute a coordinated cross-pair swap (sell one pair, buy another).
 
         Generates two trades as an atomic unit with a shared swap_id.
-        Executes the sell leg first, then the buy leg.
+        Executes the sell leg first, then the buy leg. If the buy leg cannot
+        proceed after the sell has been placed on the exchange, the resting
+        sell is cancelled so the swap is not left half-executed — the
+        resulting CANCELLED_UNFILLED event rolls back the engine via
+        _apply_execution_event. Pre-flight checks (buy_engine exists,
+        buy_price > 0) run before the sell placement so common failures
+        don't reach the exchange at all.
         """
         sell_pair = swap["sell_pair"]
         buy_pair = swap["buy_pair"]
@@ -3173,6 +3185,16 @@ class HydraAgent:
         sell_engine = self.engines.get(sell_pair)
         if not sell_engine or sell_engine.position.size <= 0:
             print(f"  [SWAP] No position to sell on {sell_pair}, skipping swap")
+            return
+
+        # Pre-flight buy-leg checks — catch deterministic failures BEFORE
+        # placing the sell so we don't leave an orphan sell on the exchange.
+        buy_engine = self.engines.get(buy_pair)
+        if not buy_engine:
+            print(f"  [SWAP] No engine for {buy_pair}, skipping swap (pre-flight)")
+            return
+        if buy_state.get("price", 0) <= 0:
+            print(f"  [SWAP] No price for {buy_pair}, skipping swap (pre-flight)")
             return
 
         self._swap_counter += 1
@@ -3208,16 +3230,60 @@ class HydraAgent:
             print(f"  [ROLLBACK] {sell_pair}: engine state rolled back after failed swap sell")
             return
 
-        # Leg 2: Buy on the target pair
-        # Use the proceeds to size the buy
+        # Capture the sell order_id so we can cancel it if the buy leg fails.
+        # After a successful _place_order, the most recent journal entry is
+        # ours (single-threaded tick loop). Matched by pair+side+swap_id to
+        # defend against any unexpected ordering.
+        sell_order_id: Optional[str] = None
+        for entry in reversed(self.order_journal):
+            if (entry.get("pair") == sell_pair
+                    and entry.get("side") == "SELL"
+                    and (entry.get("decision") or {}).get("swap_id") == swap_id):
+                sell_order_id = (entry.get("order_ref") or {}).get("order_id")
+                break
+
+        def _cancel_orphan_sell(why: str) -> None:
+            """Cancel the in-flight sell on exchange if the buy leg can't proceed.
+
+            Engine rollback happens automatically when cancellation propagates
+            through the execution stream as CANCELLED_UNFILLED (see
+            _apply_execution_event). We don't restore the engine manually
+            because the sell could have partially filled between placement
+            and cancellation — the stream's terminal event carries the
+            authoritative vol_exec.
+
+            In paper mode the sell was filled synthetically at placement
+            time, so there is nothing to cancel on the exchange — we just
+            log the unbalanced swap so the operator can see it.
+            """
+            if self.paper:
+                print(f"  [SWAP] WARNING: paper sell already synthesized as filled; "
+                      f"swap {swap_id} half-executed ({why})")
+                return
+            if not sell_order_id or sell_order_id == "unknown":
+                print(f"  [SWAP] WARNING: no order_id captured for sell leg; "
+                      f"cannot cancel orphan ({why})")
+                return
+            try:
+                time.sleep(2)  # rate limit
+                cancel_result = KrakenCLI.cancel_order(sell_order_id)
+                if isinstance(cancel_result, dict) and "error" in cancel_result:
+                    print(f"  [SWAP] WARNING: cancel orphan sell {sell_order_id} "
+                          f"failed: {cancel_result['error']} ({why}). "
+                          f"Sell may have filled before cancel; check journal.")
+                else:
+                    print(f"  [SWAP] Cancelled orphan sell {sell_order_id} ({why}). "
+                          f"Engine rollback will complete when CANCELLED_UNFILLED "
+                          f"event drains.")
+            except Exception as e:
+                print(f"  [SWAP] WARNING: cancel orphan sell {sell_order_id} "
+                      f"raised {type(e).__name__}: {e} ({why})")
+
+        # Leg 2: Buy on the target pair. Re-read price in case it drifted
+        # during the sell placement's rate-limit sleeps.
         buy_price = buy_state.get("price", 0)
         if buy_price <= 0:
-            print(f"  [SWAP] Cannot execute buy leg: no price for {buy_pair}")
-            return
-
-        buy_engine = self.engines.get(buy_pair)
-        if not buy_engine:
-            print(f"  [SWAP] No engine for {buy_pair}, skipping buy leg")
+            _cancel_orphan_sell("buy price disappeared after sell placement")
             return
 
         # Engine sizes the buy via Kelly criterion — execute_signal handles
@@ -3229,7 +3295,7 @@ class HydraAgent:
             strategy=buy_state.get("strategy", "MOMENTUM"),
         )
         if not buy_trade_obj:
-            print(f"  [SWAP] Engine rejected buy on {buy_pair} (halted or insufficient balance), skipping buy leg")
+            _cancel_orphan_sell("engine rejected buy (halted or insufficient balance)")
             return
 
         # Use the engine's actual executed amount for the exchange order
@@ -3245,6 +3311,7 @@ class HydraAgent:
         if not self._place_order(buy_pair, buy_trade, buy_state):
             buy_engine.restore_position(buy_snap)
             print(f"  [ROLLBACK] {buy_pair}: engine state rolled back after failed swap buy")
+            _cancel_orphan_sell("_place_order failed for buy leg")
             return
 
         # Both legs placed — the swap_id tag on each leg's journal entry
@@ -3602,17 +3669,21 @@ class HydraAgent:
         pos = state["position"]
         is_usd = pair.endswith("USDC") or pair.endswith("USD")
         cur = "$" if is_usd else ""
+        # BTC-quoted pairs trade at ~0.001–0.01; 4 decimals loses precision
+        # (SOL/BTC ~0.00148 would render as "0.0015"). Use 8 decimals for
+        # crypto-quoted pairs, 4 for USD/USDC pairs.
+        pd = 4 if is_usd else 8
 
         signal_icon = {"BUY": "^", "SELL": "v", "HOLD": "-"}.get(s["action"], "?")
 
-        print(f"  | {pair:<10} | {cur}{state['price']:>10,.4f} | "
+        print(f"  | {pair:<10} | {cur}{state['price']:>12,.{pd}f} | "
               f"{state['regime']:<10} -> {state['strategy']:<15} | "
               f"{signal_icon} {s['action']:<4} ({s['confidence']:.2f}) | "
               f"Eq: {cur}{p['equity']:>10,.{2 if is_usd else 8}f} | "
               f"P&L: {p['pnl_pct']:>+.2f}% | DD: {p['max_drawdown_pct']:.1f}%")
 
         if pos["size"] > 0:
-            print(f"  |            | Pos: {pos['size']:.8f} @ {cur}{pos['avg_entry']:,.4f} | "
+            print(f"  |            | Pos: {pos['size']:.8f} @ {cur}{pos['avg_entry']:,.{pd}f} | "
                   f"Unrealized: {cur}{pos['unrealized_pnl']:>+,.{2 if is_usd else 8}f}")
 
         if state.get("ai_decision") and not state["ai_decision"].get("fallback"):
@@ -3622,8 +3693,8 @@ class HydraAgent:
         if state.get("last_trade"):
             t = state["last_trade"]
             _cur = "$" if is_usd else ""
-            profit_str = f" | Profit: {_cur}{t['profit']:+,.2f}" if t.get("profit") is not None else ""
-            print(f"  |  >>> SIGNAL: {t['action']} {t['amount']:.8f} @ {_cur}{t['price']:,.4f}{profit_str}")
+            profit_str = f" | Profit: {_cur}{t['profit']:+,.{2 if is_usd else 8}f}" if t.get("profit") is not None else ""
+            print(f"  |  >>> SIGNAL: {t['action']} {t['amount']:.8f} @ {_cur}{t['price']:,.{pd}f}{profit_str}")
             print(f"  |      Reason: {t['reason'][:75]}")
 
     def _print_banner(self):
@@ -3799,7 +3870,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.9.1",
+            "version": "2.9.2",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

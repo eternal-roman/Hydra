@@ -6,6 +6,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.9.2] — 2026-04-15
+
+### Fixed
+
+- **fix(agent):** Coordinated swap atomicity — if the buy leg cannot proceed
+  after the sell has been placed on the exchange, the resting sell is now
+  cancelled via `KrakenCLI.cancel_order` so the swap is not left
+  half-executed. Engine rollback completes automatically when the
+  CANCELLED_UNFILLED event drains through the execution stream. Pre-flight
+  checks (buy engine exists, buy price > 0) also run before the sell is
+  placed so common failures never reach the exchange. Paper mode logs
+  unbalanced swaps (synthetic fill cannot be cancelled).
+- **fix(engine):** Momentum SELL reason string used a hardcoded "> 75"
+  regardless of the tuned `rsi_upper`. Now reports the actual threshold
+  (`rsi_upper + 5`), so logs remain truthful after the tuner adjusts it.
+- **fix(engine):** Mean-reversion HOLD confidence normalized to `BASE`
+  (0.50), matching momentum/defensive. HOLD confidence is informational
+  only, but the prior 0.40 value was inconsistent on the dashboard.
+- **fix(engine):** `grid_spacing` fallback changed from `1` (int) to `1.0`
+  (float) so downstream arithmetic stays in float domain.
+- **fix(engine):** On `restore_runtime`, candles without a `timestamp`
+  field are now dropped rather than being assigned `time.time()` — the
+  latter silently corrupted time ordering that Sharpe and ATR-series
+  calculations depend on.
+- **fix(agent):** `FakeTickerStream.ensure_healthy()` now returns
+  `(healthy, reason)` to match `BaseStream`'s contract (previously
+  returned `None`, which would break any caller that destructured it).
+- **fix(agent):** `_build_triangle_context` net BTC exposure no longer
+  subtracts `pos * price` for SOL/BTC holdings. Spot-buying SOL with BTC
+  is not equivalent to being short BTC — the BTC spent is already
+  reflected in the account balance. BTC exposure now comes exclusively
+  from BTC/USDC holdings.
+- **fix(agent):** `_print_tick_status` now uses 8-decimal price precision
+  for BTC-quoted pairs (SOL/BTC ~0.00148 would render as `0.0015` at
+  `.4f`). Applied to price, avg_entry, last_trade price/profit in tick
+  status lines.
+- **fix(brain):** `_build_summary` first-sentence extraction now splits
+  on `. ` (period + whitespace) instead of plain `.`, so decimals like
+  "RSI at 30.5" are no longer truncated mid-number.
+- **fix(dashboard):** Renamed `state` to `entryState` inside the
+  `orderJournal.map` callback — the previous name shadowed the component
+  state variable.
+- **fix(dashboard):** Added `mountedRef` guard to WebSocket callbacks to
+  prevent setState-on-unmounted warnings in StrictMode (noticeable in
+  dev double-mounts).
+
+### Docs
+
+- **docs:** README defaults were stale and contradictory in several
+  places. Updated:
+  - Volatility threshold description (now adaptive 1.8× median ATR% /
+    BB width, not fixed 4% / 8%)
+  - Architecture diagram tick cadence (15-min candles, 300s tick)
+  - `--interval` CLI default (300, not 30)
+  - Competition-mode confidence threshold (65%, not 50% — matches both
+    the code and the table elsewhere in README)
+  - Troubleshooting entry ("needs to exceed 65%", not 55%)
+
+---
+
 ## [2.9.1] — 2026-04-15
 
 ### Added

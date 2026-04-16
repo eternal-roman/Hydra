@@ -19,14 +19,14 @@ HYDRA detects **what the market is doing right now** and selects the optimal str
 | **Trending Up** | EMA20 > EMA50 x 1.005, price > EMA20 | **Momentum** | Ride the wave — MACD histogram > 0, RSI 30-70, price > BB middle |
 | **Trending Down** | EMA20 < EMA50 x 0.995, price < EMA20 | **Defensive** | Preserve capital — only buy extreme oversold (RSI < 20), sell rallies |
 | **Ranging** | No clear trend direction | **Mean Reversion** | Buy at lower Bollinger Band (RSI < 35), sell at upper (RSI > 65) |
-| **Volatile** | ATR > 4% or BB width > 8% | **Grid** | Split orders across 5 Bollinger Band zones |
+| **Volatile** | ATR% > 1.8 x median ATR% (or BB width > 1.8 x median), floor 1.5% / 0.03 | **Grid** | Split orders across 5 Bollinger Band zones |
 
 Volatility is checked first — it overrides trend detection. This prevents false trend signals during chaotic markets.
 
 ## Architecture
 
 ```
-HYDRA Agent Loop (5-min candles, 30s tick)
+HYDRA Agent Loop (15-min candles, 300s tick)
 ==========================================
 
   WS Candle Stream ──> Regime Detector ──> Strategy Selector
@@ -194,7 +194,7 @@ start_all.bat
 --pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)
 --balance          Reference balance for position sizing in USD (default: 100)
 --candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 15)
---interval         Seconds between ticks (default: 30)
+--interval         Seconds between ticks (default: 300)
 --duration         Total duration in seconds, 0 = forever (default: 0)
 --ws-port          WebSocket port for dashboard (default: 8765)
 --mode             Sizing mode: conservative (quarter-Kelly) or competition (half-Kelly)
@@ -215,7 +215,7 @@ python hydra_agent.py --mode competition --paper
 python hydra_agent.py --mode competition
 ```
 
-Competition mode uses half-Kelly (2x position sizes), 50% confidence threshold (trades more often), and 40% max position. On shutdown, exports `competition_results_{timestamp}.json` with full PnL proof.
+Competition mode uses half-Kelly (2x position sizes), 65% confidence threshold (same quality filter as conservative — only high-edge signals trade), and 40% max position. On shutdown, exports `competition_results_{timestamp}.json` with full PnL proof.
 
 | Setting | Conservative | Competition |
 |---------|-------------|-------------|
@@ -387,7 +387,7 @@ order execution, dashboard components, infrastructure) and
 | Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |
 | Dashboard shows "DISCONNECTED" | Ensure agent is running — it hosts the WebSocket server on port 8765 |
 | Dashboard hosted on a different machine | Set `VITE_HYDRA_WS_URL=ws://agent-host:8765` before `npm run build` or `npm run dev`. Default is `ws://localhost:8765`. |
-| No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 55% |
+| No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 65% |
 
 ## SKILL.md
 
