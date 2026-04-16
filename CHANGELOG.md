@@ -6,6 +6,98 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.1] — 2026-04-16
+
+Bug-fix release: audit-driven profit-leak fixes across the brain, agent,
+engine, and metrics layers. No new features. All changes are net-safer
+or net-more-symmetric than v2.10.0; signal-generation changes (Fix 5 and
+Fix 6) are behind a data-driven revert gate (see
+`tests/_ad_hoc_fix56_backtest_compare.py`).
+
+### Fixed
+
+- **fix(brain):** Risk Manager `size_multiplier` is now clamped to
+  `[0.0, 1.5]` at the `_run_risk_manager` boundary. Previously the
+  prompt documented the range but nothing enforced it — a model
+  hallucination returning `2.5` would oversize positions by 67%.
+  Non-numeric values fall back to `1.0` with a log line so drift
+  frequency is observable.
+- **fix(agent):** `_userref_counter` now persists across restarts via
+  `_save_snapshot` / `_load_snapshot`, and on startup is reseeded above
+  the historical maximum seen in the order journal
+  (`_reseed_userref_from_history()` with a `_USERREF_SAFETY_GAP=1000`
+  buffer). The wrap-path at `_next_userref` also consults the journal
+  max. Previously a restart within the same second as a killed session
+  could re-issue a userref already in flight on the exchange, routing
+  WS fills to the wrong journal entry.
+- **fix(engine):** new `HydraEngine.reconcile_partial_fill()` corrects
+  the optimistic commitment after a `PARTIALLY_FILLED` execution event.
+  When the pre-trade snapshot is available (current-session fills), the
+  engine restores and replays only the actual `vol_exec` portion via new
+  `_apply_buy_fill` / `_apply_sell_fill` helpers — indistinguishable
+  from having called `execute_signal` with the real fill amount. When
+  the snapshot is unavailable (resume-path), arithmetic fallback
+  adjusts balance and position with loud warning on `avg_entry` drift.
+  Previously `_apply_execution_event` logged *"engine over-committed"*
+  and returned, causing the engine to phantom-hold inventory and
+  oversize the next signal.
+- **fix(metrics):** `_block_bootstrap_sample` now uses non-circular
+  (truncated) block resampling. Previously `profits[(start + j) % n]`
+  wrapped tail-to-head inside a single block, which on small trade
+  counts (`n ≤ ~50`) blurred temporal autocorrelation and produced CIs
+  that were artificially narrow — the reviewer's `mc_ci_lower_positive`
+  rigor gate passed marginal strategies that shouldn't have.
+- **fix(engine):** momentum SELL now uses symmetric AND-gates (RSI in
+  range AND MACD fading past noise AND price below BB mid AND
+  fading-or-fresh) instead of the previous OR of just two. Preserves a
+  panic-exit override at `rsi > rsi_upper + 15` (≈ 85 on default 70
+  threshold). Rationale: "losing entries is just as bad as losing exits"
+  — a single-indicator flip was exiting trending winners on noise.
+- **fix(engine):** any SELL above `min_confidence` now full-closes the
+  position. Previously a 50/50 split at `confidence > 0.7` left awkward
+  partial positions that often re-triggered the "force full close"
+  fallback anyway. Kelly governs ENTRY size; EXIT is binary.
+
+### Not fixed (audit false positives documented for posterity)
+
+These were flagged by the audit subagents but verified against source
+as NOT bugs:
+
+- Drawdown base (`peak_equity` initializes to `initial_balance`; current
+  behavior is actually more conservative than the reported misreading).
+- Modifier-cap "applied too late" (cap DOES clip before `execute_signal`).
+- MACD `prev_histogram` recompute via `prices[:-1]` (iterative EMA
+  produces identical value at position `N-2`; equivalent to prior tick).
+- FOREX midnight off-by-one (hour 0 is correctly caught by the `0 <= h < 7`
+  branch; else branch correctly catches 21–23).
+- Backtest look-ahead (signal uses candle T close, fill at T+1 — correct
+  live-mirror).
+
+### Infrastructure
+
+- `tests/test_partial_fill_reconcile.py`: new, 11 cases covering
+  BUY/SELL × snapshot/fallback × fresh-entry/average-in.
+- `tests/test_resume_reconcile.py`: added `TestUserrefPersistence` with
+  8 cases for journal scan, reseed directionality, wrap handling, and
+  snapshot round-trip.
+- `tests/test_brain_tool_use.py`: added `TestRiskManagerSizeMultiplierClamp`
+  with 5 cases for above-max, below-min, non-numeric, in-range, and
+  boundary values.
+- `tests/test_backtest_metrics.py`: added `test_no_circular_wrap_within_block`
+  and `test_block_contents_are_consecutive` to pin the non-wrap invariant.
+- `tests/test_backtest_drift.py`: neutralized `CIRCUIT_BREAKER_PCT` at
+  class level to prevent halt-state divergence between direct and
+  backtester paths under Fix 5/6 semantics. Drift invariant continues
+  to pin signal-layer equivalence.
+- `tests/_ad_hoc_fix56_backtest_compare.py`: data-driven revert gate for
+  commits 5 and 6 (standalone, not pytest-collected).
+
+All 773 tests pass. 33/33 live-harness (mock mode), including the W4
+PARTIALLY_FILLED scenario which now emits *"engine reconciled to actual
+fill"*.
+
+---
+
 ## [2.10.0] — 2026-04-16
 
 Major additive release: backtesting & experimentation platform. Zero live-agent
