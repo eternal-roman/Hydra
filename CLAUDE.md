@@ -119,6 +119,81 @@ python hydra_engine.py
 - Do not change the JSON response format in system prompts — the parser depends on it
 - Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
 
+## Backtesting & Experimentation (v2.10.0)
+
+Strictly-additive platform layered on top of the live agent. Default behavior with no opt-in flag is identical to v2.9.x. Full user runbook: `docs/BACKTEST.md`. Authoritative design spec: `docs/BACKTEST_SPEC.md`.
+
+### Module map
+- `hydra_backtest.py` — core replay engine (`BacktestConfig`, `BacktestRunner`, `CandleSource` hierarchy, `SimulatedFiller`). Reuses `HydraEngine` verbatim — zero logic drift guaranteed by `tests/test_backtest_drift.py` (invariant I7).
+- `hydra_backtest_metrics.py` — bootstrap CI, walk-forward, Monte Carlo, regime-conditioned P&L, parameter sensitivity.
+- `hydra_experiments.py` — `Experiment` dataclass, `ExperimentStore` (threading.RLock — NOT Lock; delete → audit_log re-enters), 8 presets in `hydra_backtest_presets.json`, `sweep_experiment`, `compare`.
+- `hydra_backtest_tool.py` — 8 Anthropic tool-use schemas (`BACKTEST_TOOLS`) + `BacktestToolDispatcher` + `QuotaTracker` (per_caller_daily=10, concurrent=3, global_daily=50; UTC midnight reset).
+- `hydra_backtest_server.py` — `BacktestWorkerPool` (max_workers=2, daemon, queue=20) + WS message handlers mounted via `mount_backtest_routes`.
+- `hydra_reviewer.py` — AI Reviewer with **7 code-enforced rigor gates** (not prompt). Tunable thresholds in `hydra_reviewer_config.json`.
+- `hydra_shadow_validator.py` — single-slot FIFO live-parallel validation before param writes.
+- `hydra_tuner.py` — added `apply_external_param_update()` + `rollback_to_previous()` (depth=1 history deque) alongside existing observation-driven update loop.
+
+### Safety invariants (I1–I12)
+1. Live tick cadence unaffected (measured pre/post deploy).
+2. Backtest workers construct own engine instances — never hold refs to live.
+3. Separate storage (`.hydra-experiments/`) — zero writes to live state files.
+4. All workers are daemon threads.
+5. Every worker entry wrapped in try/except; live loop isolated.
+6. `HYDRA_BACKTEST_DISABLED=1` → v2.9.x behavior exactly.
+7. Drift regression test on every commit.
+8. Reviewer NEVER auto-applies code — PR drafts only.
+9. Param changes require shadow validation + explicit human approval before live write.
+10. Kraken candle fetches respect 2s rate limit; disk cache prevents redundancy.
+11. Worker pool bounded — `MAX_WORKERS_HARD_CAP=4` clamped in `BacktestWorkerPool.__init__` (silently clamps + logs; configured values above 4 don't crash); queue depth 20; 50 experiments/day; 200k candles/experiment cap.
+12. Every result stamped with git SHA, param hash, data hash, seed, hydra_version.
+
+### Rigor gates (enforced in code, not prompt)
+Before any `PARAM_TWEAK` is auto-apply eligible, all 7 must pass: `min_trades_50`, `mc_ci_lower_positive`, `wf_majority_improved`, `oos_gap_acceptable`, `improvement_above_2se`, `cross_pair_majority`, `regime_not_concentrated`. Regime-only failure downgrades verdict to a scoped `CODE_REVIEW` via **set-equality** check on the failed-gate list (order-independent). See `_assemble_decision` in `hydra_reviewer.py`.
+
+### Reviewer tool-use (read_source_file)
+Reviewer runs an Anthropic tool-use loop (`REVIEWER_TOOLS`) so `CODE_REVIEW` verdicts are grounded in real source. Allow-list: `hydra_*.py` at repo root + `tests/**/*.py`. Deny-list: path substrings `.env`, `config.json`, `credentials`, `secret`, `token`. Per-review: 6 reads, 16 KB per file, 6 loop iterations. Paths resolve against `ResultReviewer.source_root` and reject absolute paths, `..`, and symlinks escaping the repo. The read list lands on `ReviewDecision.source_files_read`.
+
+### Reviewer PR drafts (I8)
+Every `CODE_REVIEW` verdict emits `.hydra-experiments/pr_drafts/{exp_id}_{timestamp}.md` via `write_pr_draft()`. Includes verdict, proposed_changes table, rigor-gate results, evidence snapshot, risk_flags, consulted source files. Never touches source files. Advisory only — open a real PR from the draft.
+
+### Retrospective accuracy + confidence decay
+`ResultReviewer.self_retrospective(lookback_days=30)` joins `review_history.jsonl` (reviewer output) against `shadow_outcomes.jsonl` (shadow validator terminal records) by `experiment_id` and computes `reviewer_accuracy_score = approved / evaluated`. `_recent_accuracy()` caches this for 5 min. If recent accuracy drops below `0.5` with ≥5 evaluated samples, new `HIGH`-confidence verdicts are decayed to `MEDIUM` and a `confidence_decayed:...` risk_flag is appended.
+
+### Cost disclosure ($10/day threshold)
+Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumulative daily cost crosses `COST_ALERT_USD=10.0`, a log line prints and a `cost_alert` WS message broadcasts (`{component, daily_cost_usd, threshold_usd, day_key, enforce_budget}`). **Independent of `enforce_budget`** — a reviewer with `enforce_budget=False` (backtest mode) still alerts. Dashboard renders as a banner.
+
+### Budget policy: live vs backtest
+`HydraBrain` and `ResultReviewer` both take an `enforce_budget=True` kwarg. Live call sites keep default. Backtest-triggered instances pass `enforce_budget=False` so experiments don't stall behind the live `max_daily_cost` cap. Disclosure ($10/day) still fires regardless.
+
+### Env flags
+- `HYDRA_BACKTEST_DISABLED=1` — kill switch. Disables worker pool, WS handlers reject backtest messages.
+- `HYDRA_BRAIN_TOOLS_ENABLED=1` — enables Anthropic tool-use for Analyst + Risk Manager (Grok stays text-only). Off by default; when on, per-agent quotas apply.
+
+### Dashboard
+`dashboard/src/App.jsx` gained tab switcher (LIVE / BACKTEST / COMPARE), `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, and `ReviewPanel`. Shared primitives `RegimeBadge` and `SignalChip` prevent drift between LIVE and observer regime/signal styling. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU-ish) to prevent long-session memory growth. Typed-message fallback to `applyLiveState` is gated on absence of a `type` field AND presence of a `LIVE_STATE_KEYS` member — a malformed typed message can't corrupt LIVE. `compareInFlight` + `viewInFlight` states debounce repeat clicks. `DashboardBroadcaster` in `hydra_agent.py` refactored with `compat_mode=True` dual-emit (raw state + `{type, data}` wrapper) for one-release backward compatibility.
+
+### Brain tool-use
+`HydraBrain.__init__` gained `tool_dispatcher`, `enable_tool_use`, `enforce_budget`, `broadcaster`, and `tool_iterations_cap` kwargs. `_call_llm_with_tools()` implements the Anthropic stop_reason loop with the **injectable iteration cap** (default 4) and an 8 KB result cap that truncates via a structured JSON envelope (not a naive byte-slice) so the LLM sees a `truncated:true` signal instead of malformed JSON. `max_tokens` stop with pending `tool_use` blocks is logged rather than silently dropped. Analyst + Risk Manager branch on `_tool_use_enabled`; `_call_llm` unchanged for fallback and Grok path.
+
+### Tests (328 new + 139 legacy = 467 total)
+```bash
+python -m pytest tests/test_backtest_engine.py tests/test_backtest_drift.py
+python -m pytest tests/test_backtest_metrics.py tests/test_experiments.py
+python -m pytest tests/test_backtest_tool.py tests/test_brain_tool_use.py
+python -m pytest tests/test_backtest_server.py tests/test_reviewer.py
+python -m pytest tests/test_shadow_validator.py
+python tests/live_harness/harness.py --mode smoke   # kill-switch verified
+```
+
+### Gotchas
+- `HYDRA_VERSION` in `hydra_backtest.py` stamps every `BacktestResult` — keep in lockstep with the 6-location version bump.
+- `ExperimentStore` uses `threading.RLock()` — switching to `Lock` deadlocks `delete() → audit_log()` re-entry.
+- `sanitize_json` replaces non-finite floats with None pre-serialize (stdlib `json.dump` emits `Infinity`). Applied on both main persistence AND `audit_log`/`log_review` jsonl writes.
+- `sweep_experiment` clears `param_hash` + `created_at` before `replace()` on the frozen dataclass so `finalize_stamps` recomputes.
+- `ResultReviewer._cost_lock` (threading.Lock) guards `_daily_tokens_in/_out/_daily_cost/_day_key/_cost_alert_fired_day`. Multi-worker concurrent reviews would otherwise race the counters.
+- `.hydra-experiments/presets.json` (not `hydra_backtest_presets.json`) is the on-disk preset library — bootstrapped from `PRESET_LIBRARY` on first `load_presets()` call. `.hydra-experiments/reviewer_config.json` is bootstrapped by the reviewer on first init. Delete either to regenerate.
+- `shadow_outcomes.jsonl` in the store root is append-only; written by `ShadowValidator._log_outcome()` on every `_finalize()`. Consumed by `ResultReviewer.self_retrospective()` for the accuracy score that drives confidence decay.
+
 ## Testing
 
 ```bash
