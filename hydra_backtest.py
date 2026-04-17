@@ -879,8 +879,14 @@ class BacktestRunner:
         agg.loss_count = losses_all
         denom_trades = wins_all + losses_all
         agg.win_rate_pct = (wins_all / denom_trades * 100.0) if denom_trades > 0 else 0.0
+        # When there are no losing trades we used to emit math.inf here, which
+        # sanitises to None on JSON save and then blows up compare() on reload.
+        # Cap at a finite sentinel (999.0) so every downstream consumer sees a
+        # real number. Any real profit_factor over ~10 is already "too good to
+        # be true", so 999 reads as "∞" without dragging non-finite floats
+        # through serialisation / stats code.
         agg.profit_factor = (gross_profit_all / gross_loss_all) if gross_loss_all > 0 else (
-            math.inf if gross_profit_all > 0 else 0.0
+            999.0 if gross_profit_all > 0 else 0.0
         )
         agg.avg_win = (gross_profit_all / wins_all) if wins_all > 0 else 0.0
         agg.avg_loss = (gross_loss_all / losses_all) if losses_all > 0 else 0.0
@@ -948,7 +954,9 @@ def _sortino_from_equity(equity: List[float], candle_interval_min: int) -> float
     mean = sum(rets) / len(rets)
     downside = [r for r in rets if r < 0]
     if not downside:
-        return math.inf if mean > 0 else 0.0
+        # Finite sentinel — see profit_factor note. 999.0 reads as "∞" for
+        # downstream consumers without polluting JSON with None-on-reload.
+        return 999.0 if mean > 0 else 0.0
     ds_var = sum(r * r for r in downside) / len(downside)
     ds_sd = math.sqrt(ds_var)
     if ds_sd <= 0:
@@ -1044,8 +1052,10 @@ def _compute_basic_metrics(
     m.loss_count = engine.loss_count
     denom = engine.win_count + engine.loss_count
     m.win_rate_pct = (engine.win_count / denom * 100.0) if denom > 0 else 0.0
+    # Finite sentinel 999.0 when there are no losing trades — see note on the
+    # aggregate path above. Keeps metrics strictly-numeric across save/reload.
     m.profit_factor = (engine.gross_profit / engine.gross_loss) if engine.gross_loss > 0 else (
-        math.inf if engine.gross_profit > 0 else 0.0
+        999.0 if engine.gross_profit > 0 else 0.0
     )
     m.avg_win = (engine.gross_profit / engine.win_count) if engine.win_count > 0 else 0.0
     m.avg_loss = (engine.gross_loss / engine.loss_count) if engine.loss_count > 0 else 0.0

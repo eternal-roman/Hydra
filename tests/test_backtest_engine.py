@@ -268,10 +268,13 @@ class TestMetricHelpers(unittest.TestCase):
         self.assertGreater(_sharpe_from_equity(equity, 15), 0.0)
 
     def test_sortino_no_downside_handled(self):
-        # Monotonically rising equity → no downside → sortino should be inf (positive) or zero
+        # Monotonically rising equity → no downside. Historically this
+        # returned math.inf, but that sanitises to None on JSON save and
+        # crashes compare() on reload, so the engine now emits a finite
+        # sentinel (999.0) meaning "∞". Accept either form for resilience.
         equity = [100 + i for i in range(30)]
         s = _sortino_from_equity(equity, 15)
-        self.assertTrue(s == math.inf or s == 0.0)
+        self.assertTrue(s == math.inf or s == 999.0 or s == 0.0)
 
     def test_returns_from_equity_zero_prev_safe(self):
         # Internal: ensure divide-by-zero protected
