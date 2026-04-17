@@ -20,17 +20,6 @@ AUDIT.md            — Technical audit with test results
 CHANGELOG.md        — Version history
 ```
 
-## Agent Memory (project-local, gitignored)
-
-This repo has a structured local memory layer for agents. It is **not tracked in git** and is per-machine.
-
-- `HYDRA_MEMORY.md` — readable index: schema, group table, edge vocabulary, usage protocol
-- `.hydra-memory/graph.json` — canonical node/edge graph (groups → categories → nodes, plus typed edges)
-
-**Protocol:** On arrival to a non-trivial task, read `HYDRA_MEMORY.md` for the map, then open `graph.json` for the detail relevant to the task. When you learn something durable — an invariant, a decision, a confluence point, an incident, an open question — update the graph. Full schema, tag vocabulary, edge types, hygiene rules, and query patterns all live in `HYDRA_MEMORY.md` — that file is the single source of truth for how to use this system.
-
-If `HYDRA_MEMORY.md` does not exist on this machine (e.g., fresh clone), it has not been bootstrapped yet — this is expected and the rest of the project still works without it.
-
 ## Key Technical Decisions
 
 - **Pure Python, zero dependencies** — `hydra_engine.py` uses only stdlib. No numpy/pandas. Do not add external dependencies to the engine.
