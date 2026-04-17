@@ -1888,16 +1888,23 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 }
 
 function ConnectionStatus({ connected, tick }) {
+  // The colored, optionally-pulsing dot conveys the live/disconnected state
+  // visually. The text redundantly saying "LIVE" on top of that competes
+  // with the LIVE tab label and the AI/engine pill, so we drop it and show
+  // just the tick count — the thing the user actually can't infer from
+  // anywhere else.
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}
+         title={connected ? "Connected to the agent. Tick number increments each engine tick." : "Disconnected — the agent isn't running or the WebSocket dropped."}>
       <div style={{
         width: 8, height: 8, borderRadius: "50%",
         background: connected ? COLORS.accent : COLORS.danger,
         boxShadow: `0 0 8px ${connected ? COLORS.accent : COLORS.danger}80`,
         animation: connected ? "none" : "pulse 1.5s infinite",
       }} />
-      <span style={{ fontSize: 11, fontFamily: mono, color: connected ? COLORS.accent : COLORS.danger }}>
-        {connected ? `LIVE | Tick #${tick}` : "DISCONNECTED"}
+      <span style={{ fontSize: 11, fontFamily: mono, color: connected ? COLORS.accent : COLORS.danger,
+                     letterSpacing: "0.04em" }}>
+        {connected ? `Tick #${tick}` : "DISCONNECTED"}
       </span>
     </div>
   );
@@ -2228,8 +2235,14 @@ export default function App() {
             onChange={setActiveTab}
             backtestRunning={Object.values(btProgress).some(p => p?.stage === "running")}
           />
-          <div style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.danger}20`, color: aiBrain ? COLORS.blue : COLORS.danger, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.danger}40`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
-            {aiBrain ? "AI LIVE" : "LIVE TRADING"}
+          {/* Mode pill — indicates whether the AI brain is attached on top of
+              the engine. Prior copy was "AI LIVE" / "LIVE TRADING" which
+              collided with the LIVE tab and the connection indicator. */}
+          <div title={aiBrain
+                ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
+                : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
+               style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.panelBorder}60`, color: aiBrain ? COLORS.blue : COLORS.textDim, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.panelBorder}`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            {aiBrain ? "🧠 AI Brain" : "Engine Only"}
           </div>
           <ConnectionStatus connected={connected} tick={tick} />
           {elapsed > 0 && (
