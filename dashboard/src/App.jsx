@@ -294,6 +294,532 @@ const RIGOR_GATES = [
   },
 ];
 
+// ─── Companion subsystem (v2.10.4+) ───
+// Renders an orb + drawer + chat UI. All WS messages use the `companion.*`
+// namespace and do not interfere with LIVE/BACKTEST/COMPARE. When the
+// backend subsystem is disabled the orb never receives a `companion.hello`
+// and stays invisible.
+
+// Companion themes drawn from the existing Hydra palette so the drawer
+// visually belongs to the dashboard. Athena takes the regal purple
+// (wise, mystical), Apex the precise blue (professional), Broski the
+// fiery amber (high-energy, warm).
+const COMPANION_THEMES = {
+  athena: { primary: COLORS.purple,  accent: COLORS.purple, glow: COLORS.purple, sigil: "\u26B2" },
+  apex:   { primary: COLORS.blue,    accent: COLORS.blue,   glow: COLORS.blue,   sigil: "\u25B2" },
+  broski: { primary: COLORS.warn,    accent: COLORS.warn,   glow: COLORS.warn,   sigil: "\u2736" },
+};
+const COMPANION_ORDER = ["athena", "apex", "broski"];
+const COMPANION_NAMES = { athena: "Athena", apex: "Apex", broski: "Broski" };
+
+// Per-soul rhythm + easing. Each companion breathes at their own pace
+// and shape — Athena is slow and deep (patient), Apex is steady and
+// precise (metronome), Broski is quick and slightly irregular (excited).
+// Regime acts as a subtle modulator on top: VOLATILE compresses the
+// cycle, RANGING stretches it, so the orb still tracks market state.
+const SOUL_RHYTHM = {
+  athena: { baseSeconds: 4.2, scaleMax: 1.045, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+  apex:   { baseSeconds: 2.9, scaleMax: 1.038, easing: "ease-in-out" },
+  broski: { baseSeconds: 2.1, scaleMax: 1.060, easing: "cubic-bezier(0.65, 0, 0.35, 1)" },
+};
+
+function CompanionOrb({ theme, onClick, regime, hasUnread, visible, soulId }) {
+  if (!visible) return null;
+  const rhythm = SOUL_RHYTHM[soulId] || SOUL_RHYTHM.apex;
+  // Regime modulator: volatile compresses the cycle by ~25%, ranging
+  // stretches by ~25%. TREND_* leave it at the soul's base cadence.
+  const regimeMult = regime === "VOLATILE" ? 0.75 : regime === "RANGING" ? 1.25 : 1.0;
+  const pulseDuration = `${(rhythm.baseSeconds * regimeMult).toFixed(2)}s`;
+  // Base glow ring values bumped ~15% vs previous (16px/28px -> 18/32, plus
+  // a third outer halo layer for depth). Alpha nudged up too.
+  const restInset = `0 0 4px ${theme.primary}dd inset`;
+  const peakInset = `0 0 6px ${theme.primary}ff inset`;
+  const restGlow  = `0 0 18px ${theme.glow}80, 0 0 34px ${theme.glow}33`;
+  const peakGlow  = `0 0 32px ${theme.glow}c0, 0 0 56px ${theme.glow}55`;
+  // Broski gets an extra mid-cycle "catch" in the breathing curve so it
+  // feels a touch irregular. Apex and Athena are symmetric.
+  const breatheKeyframes = soulId === "broski"
+    ? `@keyframes hc-breathe-${soulId} { 0%,100% { transform: scale(1.00);} 42% { transform: scale(${rhythm.scaleMax});} 58% { transform: scale(${(1 + (rhythm.scaleMax - 1) * 0.85).toFixed(4)});} }`
+    : `@keyframes hc-breathe-${soulId} { 0%,100% { transform: scale(1.00);} 50% { transform: scale(${rhythm.scaleMax});} }`;
+  const glowKeyframes =
+    `@keyframes hc-glow-${soulId} { 0%,100% { box-shadow: ${restGlow}, ${restInset};} 50% { box-shadow: ${peakGlow}, ${peakInset};} }`;
+  return (
+    <>
+      <style>{breatheKeyframes}{glowKeyframes}</style>
+      <button
+        onClick={onClick}
+        aria-label={`Open companion drawer`}
+        title="Click: open \u2022 \u2328 Esc: close"
+        style={{
+          position: "fixed", right: 24, bottom: 24, zIndex: 9000,
+          width: 56, height: 56, borderRadius: "50%",
+          background: `radial-gradient(circle at 35% 30%, ${theme.primary}, ${theme.primary}aa 55%, ${COLORS.panel})`,
+          border: `2px solid ${theme.primary}`,
+          cursor: "pointer", padding: 0,
+          animation: `hc-breathe-${soulId} ${pulseDuration} ${rhythm.easing} infinite, hc-glow-${soulId} ${pulseDuration} ${rhythm.easing} infinite`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: COLORS.text, fontSize: 22, fontFamily: heading, fontWeight: 700,
+          textShadow: `0 0 9px ${theme.glow}`,
+        }}>
+        <span style={{ pointerEvents: "none" }}>{theme.sigil}</span>
+        {hasUnread && (
+          <span style={{
+            position: "absolute", top: 4, right: 4, width: 10, height: 10,
+            borderRadius: "50%", background: theme.glow,
+            boxShadow: `0 0 8px ${theme.glow}`,
+          }} />
+        )}
+      </button>
+    </>
+  );
+}
+
+function CompanionSwitcher({ active, onSwitch }) {
+  // The three IDs are well-known; always enabled. Metadata from the
+  // backend just refines the display name / mood; clicking works even
+  // before connect_ack lands.
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      {COMPANION_ORDER.map((cid) => {
+        const theme = COMPANION_THEMES[cid];
+        const isActive = active === cid;
+        return (
+          <button
+            key={cid}
+            onClick={() => onSwitch(cid)}
+            title={COMPANION_NAMES[cid]}
+            style={{
+              width: 30, height: 30, borderRadius: "50%",
+              background: isActive
+                ? `radial-gradient(circle at 35% 30%, ${theme.primary}, ${theme.primary}88)`
+                : "transparent",
+              border: isActive
+                ? `1px solid ${theme.glow}`
+                : `1px solid ${COLORS.panelBorder}`,
+              color: isActive ? COLORS.text : COLORS.textDim,
+              fontFamily: heading, fontWeight: 700, fontSize: 13,
+              cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              transition: "all 180ms ease",
+              padding: 0,
+            }}>
+            {theme.sigil}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CompanionMessage({ m, theme, userTheme }) {
+  const isUser = m.role === "user";
+  const isProactive = m.proactive === true;
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column",
+      alignItems: isUser ? "flex-end" : "flex-start",
+      margin: "6px 0",
+    }}>
+      {!isUser && m.display_name && (
+        <div style={{ fontSize: 9, color: theme.accent, fontFamily: mono,
+                      letterSpacing: "0.08em", marginBottom: 2, marginLeft: 12, textTransform: "uppercase" }}>
+          {m.display_name}{isProactive ? " \u00b7 unprompted" : ""}
+        </div>
+      )}
+      <div style={{
+        maxWidth: "85%",
+        padding: "8px 12px",
+        borderRadius: 8,
+        borderLeft: isUser ? "none" : `2px solid ${theme.primary}`,
+        background: isUser ? `${COLORS.accent}12` : `${COLORS.panel}`,
+        border: isUser ? `1px solid ${COLORS.accent}33` : `1px solid ${COLORS.panelBorder}`,
+        color: COLORS.text,
+        fontFamily: mono,
+        fontSize: 12, lineHeight: 1.5,
+        whiteSpace: "pre-wrap", wordBreak: "break-word",
+      }}>
+        {m.text}
+        {m.error && (
+          <div style={{ marginTop: 6, fontSize: 10, color: COLORS.red, fontFamily: mono }}>
+            {m.error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Proposal cards (Phase 2+) ───
+function fmtPxShort(p) {
+  if (p == null) return "—";
+  return Number(p) < 100 ? Number(p).toFixed(4) : Number(p).toFixed(2);
+}
+
+function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status }) {
+  // kind: "trade" | "ladder"
+  // status: null | "armed" | "submitting" | "filled" | "rejected" | "failed" | "expired"
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  const [armed, setArmed] = useState(false);
+  const armRef = useRef(null);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 250);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 5000);
+    armRef.current = t;
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  const ttlTotal = Math.max(1, (proposal.expires_at - proposal.created_at) || 60);
+  const remaining = Math.max(0, proposal.expires_at - now);
+  const pctLeft = Math.max(0, Math.min(1, remaining / ttlTotal));
+  const ttlColor = pctLeft > 0.5 ? theme.primary : pctLeft > 0.2 ? COLORS.warn : COLORS.danger;
+  const expired = remaining <= 0;
+
+  const locked = !!status;  // once submitted/filled/rejected, disable buttons
+
+  const handlePrimary = () => {
+    if (locked || expired) return;
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    clearTimeout(armRef.current);
+    setArmed(false);
+    onConfirm();
+  };
+
+  const sideColor = proposal.side === "buy" ? COLORS.buy : COLORS.sell;
+
+  return (
+    <div style={{
+      margin: "8px 0", border: `1px solid ${theme.primary}66`,
+      borderRadius: 10, overflow: "hidden",
+      background: `${theme.primary}10`,
+      opacity: expired && !status ? 0.55 : 1,
+      transition: "opacity 240ms",
+    }}>
+      {/* TTL bar */}
+      <div style={{ height: 3, background: `${theme.primary}22` }}>
+        <div style={{ height: "100%", width: `${pctLeft * 100}%`, background: ttlColor,
+                      transition: "width 250ms linear" }} />
+      </div>
+      <div style={{ padding: "10px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <span style={{
+            background: sideColor, color: COLORS.bg, fontWeight: 700,
+            padding: "2px 8px", borderRadius: 4, fontFamily: mono,
+            fontSize: 10, letterSpacing: "0.08em",
+          }}>{proposal.side.toUpperCase()}</span>
+          <span style={{ color: COLORS.text, fontFamily: mono, fontSize: 12, fontWeight: 700 }}>
+            {proposal.pair}
+          </span>
+          <span style={{ color: COLORS.textMuted, fontFamily: mono, fontSize: 10, marginLeft: "auto" }}>
+            {kind === "ladder" ? `${proposal.rungs.length} rungs` : "1R"}
+          </span>
+        </div>
+
+        {kind === "trade" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px",
+                        fontSize: 11, fontFamily: mono, color: COLORS.text }}>
+            <div><span style={{ color: COLORS.textMuted }}>Size:</span> {proposal.size}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Limit:</span> ${fmtPxShort(proposal.limit_price)}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Stop:</span> ${fmtPxShort(proposal.stop_loss)}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Cost:</span> ${fmtPxShort(proposal.estimated_cost)}</div>
+            <div style={{ gridColumn: "1 / span 2" }}>
+              <span style={{ color: COLORS.textMuted }}>Risk:</span>{" "}
+              ${Number(proposal.risk_usd || 0).toFixed(2)}
+              {proposal.risk_pct_equity ? ` (${Number(proposal.risk_pct_equity).toFixed(2)}% equity)` : ""}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 4, fontFamily: mono }}>
+              {`total ${proposal.total_size} \u00b7 stop $${fmtPxShort(proposal.stop_loss)} \u00b7 invalidate $${fmtPxShort(proposal.invalidation_price)}`}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "2px 8px",
+                          fontSize: 10, fontFamily: mono }}>
+              {proposal.rungs.flatMap((r, i) => [
+                <span key={`l-${i}`} style={{ color: COLORS.textMuted }}>R{i + 1}</span>,
+                <span key={`p-${i}`} style={{ color: COLORS.text }}>${fmtPxShort(r.limit_price)}</span>,
+                <span key={`w-${i}`} style={{ color: COLORS.textDim }}>{Math.round(r.pct_of_total * 100)}%</span>,
+              ])}
+            </div>
+          </div>
+        )}
+
+        {proposal.rationale && (
+          <div style={{ marginTop: 8, fontSize: 11, fontStyle: "italic",
+                        color: theme.accent, lineHeight: 1.35,
+                        borderLeft: `2px solid ${theme.primary}44`, paddingLeft: 8 }}>
+            "{proposal.rationale}"
+          </div>
+        )}
+
+        {status && (
+          <div style={{
+            marginTop: 8, padding: "4px 8px", borderRadius: 4, display: "inline-block",
+            background: status === "filled" ? `${COLORS.accent}22`
+                     : status === "failed" || status === "rejected" ? `${COLORS.danger}22`
+                     : `${theme.primary}22`,
+            color: status === "filled" ? COLORS.accent
+                : status === "failed" || status === "rejected" ? COLORS.danger
+                : theme.primary,
+            fontSize: 10, fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}>{status}</div>
+        )}
+
+        {!locked && !expired && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={handlePrimary} style={{
+              flex: 1, padding: "8px 12px", borderRadius: 4,
+              background: armed ? COLORS.danger : theme.primary,
+              color: COLORS.bg, border: "none", cursor: "pointer",
+              fontFamily: mono, fontSize: 11, fontWeight: 700,
+              letterSpacing: "0.08em", textTransform: "uppercase",
+              transition: "background 160ms",
+            }}>
+              {armed ? "\u25B6 send (5s)" : "arm"}
+            </button>
+            <button onClick={onReject} style={{
+              padding: "8px 12px", borderRadius: 5,
+              background: "transparent", color: COLORS.textMuted,
+              border: `1px solid ${COLORS.panelBorder}`, cursor: "pointer",
+              fontFamily: mono, fontSize: 11,
+            }}>reject</button>
+          </div>
+        )}
+        {expired && !locked && (
+          <div style={{ marginTop: 10, fontSize: 10, color: COLORS.textMuted, fontFamily: mono }}>
+            {"expired \u2014 ask again"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompanionTypingBubble({ theme, name }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", margin: "6px 0" }}>
+      <div style={{ fontSize: 9, color: theme.accent, fontFamily: mono,
+                    letterSpacing: "0.08em", marginBottom: 2, marginLeft: 12, textTransform: "uppercase" }}>
+        {name}
+      </div>
+      <div style={{
+        padding: "8px 14px", borderRadius: 8, borderLeft: `2px solid ${theme.primary}`,
+        background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+        display: "inline-flex", gap: 4,
+      }}>
+        <style>{`@keyframes hc-dot { 0%,80%,100% { opacity: 0.3; transform: translateY(0);} 40% { opacity: 1; transform: translateY(-3px);} }`}</style>
+        {[0, 1, 2].map((i) => (
+          <span key={i} style={{
+            width: 6, height: 6, borderRadius: "50%", background: theme.primary,
+            animation: `hc-dot 1.2s ease-in-out ${i * 0.15}s infinite`,
+          }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CompanionDrawer({
+  open, onClose, active, onSwitch, companions, messages, typing,
+  onSend, onProposalConfirm, onProposalReject, connected, drawerWidth, costAlerts,
+}) {
+  const theme = COMPANION_THEMES[active] || COMPANION_THEMES.apex;
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Auto-scroll to bottom on new messages / typing
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, typing, active]);
+
+  // Focus composer on open / active-change
+  useEffect(() => {
+    if (open && inputRef.current) inputRef.current.focus();
+  }, [open, active]);
+
+  // Esc closes
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  // Submit lock via ref so double-presses within the same React tick
+  // can't slip past the guard (state updates are async; refs are sync).
+  const submitLockRef = useRef(false);
+  const submit = () => {
+    if (submitLockRef.current) return;
+    const text = draft.trim();
+    if (!text) return;
+    submitLockRef.current = true;
+    setSending(true);
+    onSend(text);
+    setDraft("");
+    setTimeout(() => {
+      submitLockRef.current = false;
+      setSending(false);
+    }, 350);
+  };
+
+  const onKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  if (!open) return null;
+  const comp = companions[active];
+  const name = comp?.display_name || COMPANION_NAMES[active] || "Companion";
+  const alert = costAlerts[active];
+
+  return (
+    <div style={{
+      position: "fixed", top: 0, right: 0, bottom: 0, width: drawerWidth,
+      zIndex: 9000, background: `${COLORS.panel}f0`, backdropFilter: "blur(14px)",
+      borderLeft: `1px solid ${theme.primary}66`,
+      boxShadow: `-8px 0 32px rgba(0,0,0,0.5), inset 2px 0 0 ${theme.primary}44`,
+      display: "flex", flexDirection: "column",
+      animation: `hc-slide-in 260ms cubic-bezier(0.32, 0.72, 0, 1), hc-drawer-glow-${active} ${(SOUL_RHYTHM[active]?.baseSeconds || 3)}s ${SOUL_RHYTHM[active]?.easing || "ease-in-out"} infinite`,
+      fontFamily: mono,
+    }}>
+      <style>{`
+        @keyframes hc-slide-in { from { transform: translateX(100%);} to { transform: translateX(0);} }
+        @keyframes hc-drawer-glow-${active} {
+          0%,100% {
+            box-shadow: -8px 0 32px rgba(0,0,0,0.5),
+                        inset 2px 0 0 ${theme.primary}44,
+                        inset 0 0 40px ${theme.primary}08;
+            border-left-color: ${theme.primary}66;
+          }
+          50% {
+            box-shadow: -8px 0 44px rgba(0,0,0,0.55),
+                        inset 3px 0 0 ${theme.primary}88,
+                        inset 0 0 70px ${theme.primary}16;
+            border-left-color: ${theme.primary}aa;
+          }
+        }
+      `}</style>
+
+      {/* Header */}
+      <div style={{
+        padding: "12px 14px", display: "flex", alignItems: "center", gap: 10,
+        borderBottom: `1px solid ${theme.primary}33`,
+        background: `linear-gradient(90deg, ${theme.primary}22, transparent)`,
+      }}>
+        <div style={{
+          width: 32, height: 32, borderRadius: "50%",
+          background: `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary})`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#fff", fontFamily: heading, fontWeight: 700, fontSize: 14,
+        }}>{theme.sigil}</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: heading, fontSize: 14, fontWeight: 700, color: COLORS.text }}>{name}</div>
+          <div style={{ fontSize: 9, color: theme.accent, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            {comp?.mood || "calm"}{comp?.serious_mode ? " \u00b7 serious" : ""}
+          </div>
+        </div>
+        <CompanionSwitcher active={active} onSwitch={onSwitch} />
+        <button onClick={onClose} aria-label="Close drawer" title="Close" style={{
+          background: "transparent", border: `1px solid ${COLORS.panelBorder}`,
+          color: COLORS.textMuted, cursor: "pointer", borderRadius: 4,
+          padding: "4px 10px", fontFamily: mono, fontSize: 13, lineHeight: 1,
+        }}>{"\u00D7"}</button>
+      </div>
+
+      {alert && (
+        <div style={{
+          padding: "6px 14px", fontSize: 10, background: `${theme.glow}22`,
+          borderBottom: `1px solid ${theme.glow}44`, color: theme.accent, fontFamily: mono,
+        }}>
+          budget alert: ${alert.daily_cost_usd} of ${alert.hard_stop_usd} used
+        </div>
+      )}
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{
+        flex: 1, overflowY: "auto", padding: "10px 14px",
+      }}>
+        {messages.length === 0 && !typing && (
+          <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 20, textAlign: "center" }}>
+            {`say hi to ${name.toLowerCase()} \u2014 or type `}
+            <code style={{ color: theme.accent }}>/help</code>
+          </div>
+        )}
+        {messages.map((m) => {
+          if (m.role === "proposal") {
+            return (
+              <ProposalCard
+                key={m.id}
+                proposal={m.proposal}
+                kind={m.kind || "trade"}
+                theme={theme}
+                status={m.status}
+                onConfirm={() => onProposalConfirm(m)}
+                onReject={() => onProposalReject(m)}
+              />
+            );
+          }
+          return <CompanionMessage key={m.id} m={m} theme={theme} userTheme={COLORS.accent} />;
+        })}
+        {typing && <CompanionTypingBubble theme={theme} name={name} />}
+      </div>
+
+      {/* Composer */}
+      <div style={{
+        borderTop: `1px solid ${theme.primary}33`,
+        padding: "10px 12px", background: `${COLORS.panel}ee`,
+      }}>
+        <textarea
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKey}
+          placeholder={active === "apex" ? "message apex \u2014"
+                     : active === "athena" ? "speak to Athena\u2026"
+                     : "yo what's up"}
+          disabled={!connected}
+          style={{
+            width: "100%", minHeight: 40, maxHeight: 140, resize: "none",
+            background: `${COLORS.bg}cc`, color: COLORS.text,
+            border: `1px solid ${theme.primary}55`, borderRadius: 6,
+            padding: "8px 10px", fontFamily: mono, fontSize: 13, lineHeight: 1.4,
+            outline: "none",
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+          <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono }}>
+            {"\u21B5 send \u00b7 Shift+\u21B5 newline \u00b7 Esc close"}
+          </div>
+          <button
+            onClick={submit}
+            disabled={!draft.trim() || !connected || sending}
+            style={{
+              background: draft.trim() && connected ? theme.primary : `${theme.primary}44`,
+              color: "#fff", border: "none", borderRadius: 4,
+              padding: "6px 14px", fontFamily: mono, fontSize: 11, fontWeight: 700,
+              cursor: draft.trim() && connected ? "pointer" : "default",
+              letterSpacing: "0.08em", textTransform: "uppercase",
+            }}>
+            send
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
@@ -2003,6 +2529,73 @@ export default function App() {
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
   const [viewingExpId, setViewingExpId] = useState(null);      // single-experiment detail view (stretch)
+  // ─── Companion state (Phase 1+) ───
+  const [companions, setCompanions] = useState({});             // companion_id -> meta
+  const [activeCompanion, setActiveCompanion] = useState(() => {
+    try { return localStorage.getItem("hydra.companion.active") || "apex"; }
+    catch { return "apex"; }
+  });
+  const [companionDrawerOpen, setCompanionDrawerOpen] = useState(() => {
+    try { return localStorage.getItem("hydra.companion.drawer.open") === "1"; }
+    catch { return false; }
+  });
+  // Drawer width read once from localStorage; interactive resize is a
+  // future enhancement and will flip this to useState when wired.
+  const companionDrawerWidth = (() => {
+    try { return parseInt(localStorage.getItem("hydra.companion.drawer.width") || "380", 10); }
+    catch { return 380; }
+  })();
+  // Per-companion state as INDEPENDENT useState hooks so updates to one
+  // companion physically cannot leak into another. A prior object-keyed
+  // state had a subtle cross-contamination bug where user-echo messages
+  // appeared in all three drawers.
+  const [athenaMessages, setAthenaMessages] = useState([]);
+  const [apexMessages, setApexMessages] = useState([]);
+  const [broskiMessages, setBroskiMessages] = useState([]);
+  const [athenaTyping, setAthenaTyping] = useState(false);
+  const [apexTyping, setApexTyping] = useState(false);
+  const [broskiTyping, setBroskiTyping] = useState(false);
+  const [athenaUnread, setAthenaUnread] = useState(false);
+  const [apexUnread, setApexUnread] = useState(false);
+  const [broskiUnread, setBroskiUnread] = useState(false);
+  // Unified read/write helpers. The setter IS a single companion's setter,
+  // so overlapping state updates are impossible.
+  const getMessages = useCallback((cid) =>
+    cid === "athena" ? athenaMessages
+    : cid === "apex" ? apexMessages
+    : broskiMessages,
+    [athenaMessages, apexMessages, broskiMessages]
+  );
+  const getMessageSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaMessages
+    : cid === "apex" ? setApexMessages
+    : setBroskiMessages,
+    []
+  );
+  const getTypingSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaTyping
+    : cid === "apex" ? setApexTyping
+    : setBroskiTyping,
+    []
+  );
+  const getUnreadSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaUnread
+    : cid === "apex" ? setApexUnread
+    : setBroskiUnread,
+    []
+  );
+  const getTyping = (cid) =>
+    cid === "athena" ? athenaTyping
+    : cid === "apex" ? apexTyping
+    : broskiTyping;
+  const getUnread = (cid) =>
+    cid === "athena" ? athenaUnread
+    : cid === "apex" ? apexUnread
+    : broskiUnread;
+  const [companionCostAlerts, setCompanionCostAlerts] = useState({});
+  const [companionVisible, setCompanionVisible] = useState(true);    // optimistic \u2014 orb shows immediately; hides on failed connect
+  // Track in-flight message timeouts so we can cancel them when a reply arrives.
+  const pendingTimeoutsRef = useRef({});  // { [msgId]: timeoutHandle }
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -2115,6 +2708,161 @@ export default function App() {
               }
               setViewInFlight(null);
               return;
+            // ─── Companion channel ───
+            case "companion.connect_ack": {
+              if (msg.success) {
+                const metas = {};
+                for (const c of (msg.all_companions || [])) metas[c.id] = c;
+                if (msg.companion) metas[msg.companion.id] = msg.companion;
+                setCompanions((prev) => ({ ...prev, ...metas }));
+                setCompanionVisible(true);
+                // Seed history for the specific companion the server named.
+                // (Was previously in the else-branch by mistake, which meant
+                // initial-open history never populated.)
+                if (msg.companion && Array.isArray(msg.history_tail)) {
+                  const seeded = msg.history_tail.map((t, i) => ({
+                    id: `seed-${msg.companion.id}-${i}`,
+                    role: t.role, text: t.content,
+                    display_name: t.role === "assistant" ? msg.companion.display_name : null,
+                  }));
+                  getMessageSetter(msg.companion.id)(seeded);
+                }
+              } else {
+                setCompanionVisible(false);
+              }
+              return;
+            }
+            case "companion.switch_ack": {
+              if (msg.success && msg.companion) {
+                setCompanions((prev) => ({ ...prev, [msg.companion.id]: msg.companion }));
+                if (Array.isArray(msg.history_tail)) {
+                  const seeded = msg.history_tail.map((t, i) => ({
+                    id: `seed-${msg.companion.id}-${i}`,
+                    role: t.role, text: t.content,
+                    display_name: t.role === "assistant" ? msg.companion.display_name : null,
+                  }));
+                  getMessageSetter(msg.companion.id)(seeded);
+                }
+              }
+              return;
+            }
+            case "companion.typing": {
+              const cid = msg.companion_id;
+              if (cid) {
+                getTypingSetter(cid)(msg.state === "thinking");
+              }
+              return;
+            }
+            case "companion.message.complete": {
+              const cid = msg.companion_id;
+              if (cid) {
+                // Cancel the pending 30s timeout for this msg (if any) so we
+                // don't append a "(no response in 30s)" note after the fact.
+                const originalMsgId = msg.message_id;
+                if (originalMsgId && pendingTimeoutsRef.current[originalMsgId]) {
+                  clearTimeout(pendingTimeoutsRef.current[originalMsgId]);
+                  delete pendingTimeoutsRef.current[originalMsgId];
+                }
+                getTypingSetter(cid)(false);
+                // Use a unique assistant id that does NOT collide with the
+                // user echo id (previously we reused msg.message_id which
+                // came from the user's msgId, causing key collisions).
+                const assistantId = `a-${originalMsgId || Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                getMessageSetter(cid)((list) => {
+                  // Dedup: if this assistant id is already in the list,
+                  // don't add a second copy (guards against double-dispatch
+                  // from StrictMode effect re-runs or WS reconnect replays).
+                  if (list.some((m) => m.id === assistantId)) return list;
+                  return [...list, {
+                    id: assistantId,
+                    role: "assistant",
+                    text: msg.text || "",
+                    display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
+                    error: msg.error,
+                    intent: msg.intent,
+                    model_used: msg.model_used,
+                    proactive: msg.proactive === true,
+                  }].slice(-200);
+                });
+                if (!companionDrawerOpen || activeCompanion !== cid) {
+                  getUnreadSetter(cid)(true);
+                }
+              }
+              return;
+            }
+            case "companion.cost_alert": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionCostAlerts((prev) => ({ ...prev, [cid]: msg }));
+              }
+              return;
+            }
+            case "companion.trade.proposal":
+            case "companion.ladder.proposal": {
+              const cid = msg.companion_id;
+              const kind = msg.type === "companion.ladder.proposal" ? "ladder" : "trade";
+              if (cid) {
+                const proposalEntry = {
+                  id: msg.proposal_id, role: "proposal", kind,
+                  proposal: msg.card, token: msg.confirmation_token,
+                  nonce: msg.nonce, ttl: msg.ttl_expires_at, status: null,
+                };
+                getMessageSetter(cid)((list) => [...list, proposalEntry].slice(-200));
+                if (!companionDrawerOpen || activeCompanion !== cid) {
+                  getUnreadSetter(cid)(true);
+                }
+              }
+              return;
+            }
+            case "companion.trade.executed":
+            case "companion.ladder.executed": {
+              const cid = msg.companion_id;
+              if (cid) {
+                getMessageSetter(cid)((list) =>
+                  list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: msg.status || "filled" }
+                    : m));
+              }
+              return;
+            }
+            case "companion.trade.failed": {
+              const cid = msg.companion_id;
+              if (cid) {
+                getMessageSetter(cid)((list) =>
+                  list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: "failed" }
+                    : m));
+              }
+              return;
+            }
+            case "companion.ladder.invalidation_triggered": {
+              const cid = msg.companion_id;
+              if (cid) {
+                // Flip the ladder card to "invalidated" status + drop a
+                // system note so the user sees what happened.
+                getMessageSetter(cid)((list) => {
+                  const updated = list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: "invalidated" }
+                    : m);
+                  const cancelled = (msg.cancelled_userrefs || []).filter((u) => u != null);
+                  return [...updated, {
+                    id: `inv-${msg.proposal_id}-${Date.now()}`,
+                    role: "system",
+                    text: `(ladder invalidated @ $${msg.current_price} \u2014 ` +
+                          `cancelled ${cancelled.length} unfilled rung${cancelled.length === 1 ? "" : "s"})`,
+                  }].slice(-200);
+                });
+              }
+              return;
+            }
+            case "companion.system_note": {
+              const cid = activeCompanion;
+              getMessageSetter(cid)((list) => [...list, {
+                id: `sys-${Date.now()}`,
+                role: "system", text: msg.text || "", display_name: null,
+              }].slice(-200));
+              return;
+            }
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
               if (msg.channel === "backtest") setBtLastAck(msg);
@@ -2164,6 +2912,160 @@ export default function App() {
       return false;
     }
   }, []);
+
+  // ─── Companion send/switch + connect kickoff ───
+  const companionConnect = useCallback(() => {
+    sendMessage({ type: "companion.connect", companion_id: activeCompanion });
+  }, [sendMessage, activeCompanion]);
+
+  const companionProposalConfirm = useCallback((m) => {
+    const type = m.kind === "ladder" ? "companion.ladder.confirm" : "companion.trade.confirm";
+    sendMessage({
+      type,
+      proposal_id: m.id,
+      confirmation_token: m.token,
+      nonce: m.nonce,
+      ttl_expires_at: m.ttl,
+    });
+    // Optimistic: mark submitting so buttons hide
+    getMessageSetter(activeCompanion)((list) =>
+      list.map((x) => x.id === m.id ? { ...x, status: "submitting" } : x));
+  }, [sendMessage, activeCompanion, getMessageSetter]);
+
+  const companionProposalReject = useCallback((m) => {
+    const type = m.kind === "ladder" ? "companion.ladder.reject" : "companion.trade.reject";
+    sendMessage({ type, proposal_id: m.id });
+    getMessageSetter(activeCompanion)((list) =>
+      list.map((x) => x.id === m.id ? { ...x, status: "rejected" } : x));
+  }, [sendMessage, activeCompanion, getMessageSetter]);
+
+  const companionSend = useCallback((text) => {
+    const msgId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const cid = activeCompanion;
+
+    // ─── Slash-command interception (no LLM call) ───
+    const trimmed = text.trim();
+    if (trimmed.startsWith("/")) {
+      const [cmd, ...rest] = trimmed.slice(1).split(/\s+/);
+      const arg = rest.join(" ").trim();
+
+      const sysNote = (note) => ({
+        id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        role: "system", text: note,
+      });
+
+      if (cmd === "clear") {
+        const scope = arg === "all" ? "all" : "one";
+        sendMessage({
+          type: "companion.transcript.clear",
+          companion_id: cid, scope,
+        });
+        if (scope === "all") {
+          setAthenaMessages([sysNote("(all three transcripts cleared)")]);
+          setApexMessages([]);
+          setBroskiMessages([]);
+        } else {
+          getMessageSetter(cid)([sysNote("(transcript cleared)")]);
+        }
+        return;
+      }
+
+      if (cmd === "help") {
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(
+            "commands:\n" +
+            "  /clear         \u2014 clear this companion's transcript\n" +
+            "  /clear all     \u2014 clear all three transcripts\n" +
+            "  /mute [secs]   \u2014 silence proactive nudges (default 1h)\n" +
+            "  /serious [on|off] \u2014 broski: toggle serious mode\n" +
+            "  /help          \u2014 show this list"
+          ),
+        ].slice(-200));
+        return;
+      }
+
+      if (cmd === "mute") {
+        const secs = arg ? parseInt(arg, 10) : 3600;
+        const safe = Number.isFinite(secs) && secs > 0 ? secs : 3600;
+        sendMessage({ type: "companion.nudge.mute", seconds: safe });
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(`(proactive nudges muted for ${safe}s)`),
+        ].slice(-200));
+        return;
+      }
+
+      if (cmd === "serious") {
+        const on = arg !== "off";
+        sendMessage({ type: "companion.set_serious_mode", companion_id: cid, on });
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(on ? "(serious mode on)" : "(serious mode off)"),
+        ].slice(-200));
+        return;
+      }
+    }
+
+    // Optimistic: add the user message immediately to the ACTIVE companion only.
+    // Dedup by msgId so any duplicate invocation (stale-closure guard miss,
+    // double-click race, StrictMode effect re-run) can't double-commit.
+    getMessageSetter(cid)((list) => {
+      if (list.some((m) => m.id === msgId)) return list;
+      return [...list, { id: msgId, role: "user", text }].slice(-200);
+    });
+    getTypingSetter(cid)(true);
+    const ok = sendMessage({
+      type: "companion.message",
+      companion_id: cid,
+      text, message_id: msgId,
+    });
+    if (!ok) {
+      getTypingSetter(cid)(false);
+      getMessageSetter(cid)((list) => [...list, {
+        id: `err-${msgId}`, role: "system",
+        text: "(not connected to agent \u2014 restart Hydra or refresh)",
+      }].slice(-200));
+      return;
+    }
+    // 30s timeout \u2014 helpful error if no reply arrives. Cancellable so a
+    // successful message.complete kills the timer instead of spamming the
+    // "(no response in 30s)" note after the fact.
+    const handle = setTimeout(() => {
+      delete pendingTimeoutsRef.current[msgId];
+      getMessageSetter(cid)((list) => {
+        if (list.some((m) => m.id === `timeout-${msgId}`)) return list;
+        return [...list, {
+          id: `timeout-${msgId}`, role: "system",
+          text: "(no response in 30s \u2014 check the agent console for errors; API key may be missing or model rate-limited)",
+        }].slice(-200);
+      });
+      getTypingSetter(cid)(false);
+    }, 30000);
+    pendingTimeoutsRef.current[msgId] = handle;
+  }, [sendMessage, activeCompanion, getMessageSetter, getTypingSetter]);
+
+  const companionSwitch = useCallback((cid) => {
+    setActiveCompanion(cid);
+    getUnreadSetter(cid)(false);
+    try { localStorage.setItem("hydra.companion.active", cid); } catch {}
+    sendMessage({ type: "companion.switch", to_id: cid });
+  }, [sendMessage, getUnreadSetter]);
+
+  const companionToggle = useCallback(() => {
+    setCompanionDrawerOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch {}
+      if (next) getUnreadSetter(activeCompanion)(false);
+      return next;
+    });
+  }, [activeCompanion, getUnreadSetter]);
+
+  // On WS connect, probe the companion subsystem. If unmounted server-side,
+  // no connect_ack arrives and the orb stays invisible.
+  useEffect(() => {
+    if (connected) companionConnect();
+  }, [connected, companionConnect]);
 
   // Phase 10 — library + compare helpers
   const fetchLibrary = useCallback(() => {
@@ -2811,10 +3713,35 @@ export default function App() {
         </div>
       )}
 
+      {/* ─── Companion Orb + Drawer ─── */}
+      <CompanionOrb
+        theme={COMPANION_THEMES[activeCompanion] || COMPANION_THEMES.apex}
+        onClick={companionToggle}
+        regime={state?.pairs ? (Object.values(state.pairs).map(p => p.regime).find(r => r === "VOLATILE") || "TREND") : "TREND"}
+        hasUnread={getUnread(activeCompanion)}
+        visible={companionVisible && !companionDrawerOpen}
+        soulId={activeCompanion}
+      />
+      <CompanionDrawer
+        open={companionDrawerOpen && companionVisible}
+        onClose={companionToggle}
+        active={activeCompanion}
+        onSwitch={companionSwitch}
+        companions={companions}
+        messages={getMessages(activeCompanion) || []}
+        typing={getTyping(activeCompanion)}
+        onSend={companionSend}
+        onProposalConfirm={companionProposalConfirm}
+        onProposalReject={companionProposalReject}
+        connected={connected}
+        drawerWidth={companionDrawerWidth}
+        costAlerts={companionCostAlerts}
+      />
+
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.10.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.10.11 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

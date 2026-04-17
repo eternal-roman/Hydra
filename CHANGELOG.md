@@ -6,6 +6,274 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.11] — 2026-04-17
+
+Companion subsystem — end-of-day release-readiness audit + bug pass.
+Fixes four correctness bugs, removes dead props, wires up three
+previously-dormant code paths, and adds six unit tests. No feature
+regressions; the same 73+2 test suite is green.
+
+### Fixed — correctness
+
+- **Router fallback cascade** (`hydra_companions/router.py`): now walks
+  the full fallback chain via `already_tried` list. Previously only
+  the first candidate was tried; a double-provider failure failed the
+  whole turn even with viable alternates.
+- **Daily trade-count rollover** (`hydra_companions/coordinator.py`):
+  `_daily_trades` now clears at UTC midnight alongside `_daily_costs`
+  and `_alert_fired`. Previously trade caps persisted across days.
+- **Kraken status health check** (`hydra_companions/executor.py`):
+  validator now reads `agent._last_kraken_status` (the real source)
+  and walks `agent.engines` for halts, instead of
+  `snap.get("kraken_status")` which nothing populates.
+- **UI state cross-talk** (`dashboard/src/App.jsx`): per-companion
+  `useState` hooks for messages/typing/unread replace the previous
+  object-keyed state. Send lock via `useRef` + message-id dedup +
+  cancellable 30s timeout. Addresses the "BooM! leaks to all three
+  drawers" report.
+
+### Wired — previously-dormant code paths
+
+- `companion.set_serious_mode` + `/serious on|off` slash command so
+  Broski's router temperature delta actually has a trigger.
+- `companion.nudge.mute` + `/mute [seconds]` slash command so
+  proactive nudges can be silenced from the UI.
+- `companion.ladder.invalidation_triggered` now rendered on the
+  dashboard: ladder card flips to status "invalidated" and a system
+  note lands in the thread.
+- `CompanionCoordinator.notify_fill(userref)` stub for the
+  ExecutionStream \u2192 LadderWatcher fill bridge.
+- NudgeScheduler init now prints a full traceback on failure instead
+  of silently disabling.
+- `typing:idle` is now broadcast *before* `message.complete` so there's
+  no sub-frame flicker where dots restart after the reply lands.
+
+### Pruned
+
+- `ProposalCard.onStatusReset` and `CompanionDrawer.onResize` \u2014 dead
+  props (no callers, no implementations).
+- Duplicate `import time` in coordinator.py.
+- Unused `field`, `Path`, `os`, `json` imports across six files.
+
+### Added — tests
+
+- `test_fallback_cascade_walks_past_tried_candidates`
+- `test_fallback_cascade_returns_none_when_exhausted`
+- `test_companion_rollover.py` (UTC-midnight clears daily trades + costs)
+
+### Git hygiene
+
+Verified runtime artifacts are ignored across the full history:
+`.hydra-companions/transcripts/*.jsonl`, `memory/*.jsonl`,
+`proposals.jsonl`, `routing.jsonl`, `costs.jsonl` all covered by
+`.gitignore:59`. No runtime data leaked across 24 commits.
+
+---
+
+## [2.10.10] — 2026-04-17
+
+Companion UX fix \u2014 **default-on**. The orb now appears immediately
+when the dashboard connects to an agent. Clicking it IS the
+activation; no env var required.
+
+### Changed
+- `hydra_companions/config.py`: `is_enabled()` defaults to True
+  (kill switch `HYDRA_COMPANION_DISABLED=1` still respected). Chat,
+  proposals, and proactive nudges are on by default. Live execution
+  stays opt-in via `HYDRA_COMPANION_LIVE_EXECUTION=1` (money safety).
+  Individual features can be suppressed with `=0` env overrides.
+- Dashboard: orb renders optimistically on WS connect; only hides if
+  the server reports the subsystem is disabled (failed connect_ack).
+- `start_hydra_companion.bat`: no longer sets env vars; chat is on
+  by default. Paper mode preserved for safe testing.
+
+### Preserved
+- `start_hydra.bat` unchanged \u2014 now also shows the orb, same
+  default-on behaviour.
+- All 66 unit tests green.
+
+---
+
+## [2.10.9] — 2026-04-17
+
+Companion **Phase 6** — proactive nudges + mood visuals. Completes the
+Phase 1\u20136 core delivery arc.
+
+### Added
+- `hydra_companions/nudge_scheduler.py`: daemon that watches
+  live-state transitions and pushes unprompted in-character messages.
+  600 s floor between nudges; suppressed after 90 s of user activity;
+  `/mute` slash command via WS.
+- Dashboard: proactive messages render with a "\u00b7 unprompted" marker
+  next to the companion name. Orb pulse continues to track regime
+  (established in P1).
+- 5 new tests; 66 unique companion tests green.
+
+### Notes
+
+v2.11.0 will cut on merge of the full companion branch (Phases 1\u20136)
+to main as the minor-version delivery of the subsystem.
+
+---
+
+## [2.10.8] — 2026-04-17
+
+Companion **Phase 5** — distilled memory. Topic-bucketed per-companion
+facts loaded into the system prompt on every turn.
+
+### Added
+- `hydra_companions/memory.py` with remember / recall / forget /
+  compose_block. 4KB budget, LRU-by-timestamp eviction.
+- Per-companion isolation: Athena doesn't see what you told Broski.
+- WS routes: `companion.memory.{remember, recall, forget}`.
+- 8 new tests; 61 companion tests green.
+
+---
+
+## [2.10.7] — 2026-04-17
+
+Companion **Phase 4** — LadderWatcher with invalidation cancel. 2 s
+background poll monitors active ladders and cancels remaining unfilled
+rungs if price crosses invalidation in the wrong direction.
+
+### Added
+- `hydra_companions/ladder_watcher.py`: LadderWatcher daemon +
+  register/mark_fill/deregister.
+- LiveExecutor auto-registers ladders after placement.
+- `companion.ladder.invalidation_triggered` WS event for UI.
+- 7 new unit tests; 53 companion tests green.
+
+---
+
+## [2.10.6] — 2026-04-17
+
+Companion **Phase 3** — live single-trade execution. Gated by
+`HYDRA_COMPANION_LIVE_EXECUTION=1` on top of Phases 1 + 2.
+
+### Added
+- `hydra_companions/live_executor.py`: LiveExecutor places real limit
+  post-only orders via `KrakenCLI.order_buy/sell`, tagged with a
+  numeric userref (int31 SHA-256 prefix of proposal_id). Existing
+  ExecutionStream lifecycle handles fills unchanged.
+- Coordinator now enforces per-companion daily trade cap at confirm
+  time when live execution is on (mock mode still counts for
+  observability). Placement failures broadcast
+  `companion.trade.failed`.
+- 6 new tests (userref stability, order path, failure broadcast,
+  ladder distinct userrefs, daily-cap delegation). 46 companion tests
+  green.
+
+---
+
+## [2.10.5] — 2026-04-17
+
+Companion **Phase 2** — proposals + TradeCard/LadderCard UI with
+mock execution. Gated by `HYDRA_COMPANION_PROPOSALS_ENABLED=1` on
+top of Phase 1's `HYDRA_COMPANION_ENABLED=1`.
+
+### Added
+- HMAC-SHA256 proposal tokens with 60 s TTL + nonce.
+- TradeProposal / LadderProposal dataclasses + hard-coded validator
+  (stop-first, price-band, risk cap, Kraken ordermin/costmin,
+  system-status gate). Re-validated at confirm time.
+- MockExecutor: journals to `.hydra-companions/proposals.jsonl` and
+  broadcasts `companion.trade.executed` so the UI renders the full
+  lifecycle without touching real orders.
+- Six new WS routes: `companion.propose.{trade,ladder}` +
+  `companion.{trade,ladder}.{confirm,reject}`.
+- **ProposalCard** (dashboard): inline-rendered in MessageList, no
+  modal. TTL bar, two-step Arm \u2192 Send with 5 s auto-disarm, status
+  pill transitions on submit/fill/reject/fail. Ladder variant shows
+  the rung table. 12 new unit tests; 40 companion tests green.
+
+---
+
+## [2.10.4] — 2026-04-17
+
+Companion subsystem — **Phase 1: read-only chat** (Athena / Apex /
+Broski). Fully functional chat experience behind
+`HYDRA_COMPANION_ENABLED=1`. Default OFF; with the flag unset the
+subsystem is entirely inert and v2.10.3 behaviour is preserved.
+
+### Added
+
+- `hydra_companions/` runtime package: deterministic soul compiler,
+  per-intent per-companion model router, heuristic intent classifier,
+  unified xAI+Anthropic provider shim, 6 read-only tools (live state,
+  pair metrics, positions, balance, recent trades, brain outputs),
+  Companion class (transcript + journal), CompanionCoordinator (thread
+  pool, daily USD budget tracking with 80% alert + 100% hard stop,
+  UTC-midnight rollover), WS route registration.
+- Agent integration: single env-gated init block in `HydraAgent.__init__`
+  with try/except isolation — any init failure leaves the live agent
+  completely unaffected.
+- Dashboard companion UI (all inline-styled, in `App.jsx`):
+  - **CompanionOrb** — 56×56 breathing orb, pulses in sync with market
+    regime (fast on VOLATILE, slow on RANGING); unread dot when a
+    message lands with the drawer closed; per-companion color themes.
+  - **CompanionDrawer** — 380px right-side slide-in with spring easing;
+    glassmorphism over the dashboard; Esc closes; persists open-state
+    and width in localStorage.
+  - **CompanionSwitcher** — 3-sigil strip in drawer header; one-click
+    voice swap; per-companion transcripts kept isolated.
+  - **MessageList** — message bubbles with companion-colored gutters;
+    staggered typing indicator while the turn is in flight; auto-scroll
+    to bottom on new messages.
+  - **Composer** — multiline input, Enter sends, Shift+Enter newline,
+    Esc closes, disabled while disconnected.
+  - Cost-alert banner inside the drawer when a companion hits 80% of
+    its daily USD budget.
+- 28 unit tests across compiler, router, classifier, tools_readonly.
+  All green.
+
+### Notes
+
+- Phase 1 is non-streaming — companion messages arrive as a single
+  complete reply. Streaming deltas are spec'd for Phase 6.
+- Phase 1 exposes no trade/ladder tools. Proposals + confirmations land
+  in Phase 2 behind `HYDRA_COMPANION_PROPOSALS_ENABLED=1`.
+- No changes to LIVE/BACKTEST/COMPARE tabs or existing components.
+
+---
+
+## [2.10.3] — 2026-04-17
+
+Companion subsystem — **Phase 0: specification only.** No runtime code,
+no engine / brain / agent behaviour changes, no dashboard changes. The
+`hydra_companions/` package and spec documents land on disk but are
+inert until Phase 1 wires them up (gated by `HYDRA_COMPANION_ENABLED=1`).
+
+### Added
+
+- **Three hierarchical semantic soul JSONs**
+  (`hydra_companions/souls/{athena,apex,broski}.soul.json`) defining
+  distinct trading-companion personas: archetype, identity, voice,
+  values, trading philosophy, behavioral rules, reactions, teaching
+  style, mood model, sample utterances, boundary behaviors, safety
+  invariants, and cross-soul edges. Broski includes a dedicated
+  `mode_transition_rules` block (bro-vibes ↔ serious-mode flip).
+- **Model routing configuration**
+  (`hydra_companions/model_routing.json`): per-intent per-companion
+  selection across Grok fast-reasoning, Grok reasoning, Grok
+  multi-agent, and Claude Sonnet 4.6; rotation pools; fallback cascade;
+  per-companion daily USD budgets; hard safety caps (trades/day, risk %,
+  price-band, ladder rungs); heuristic-first intent classifier rules.
+- **Master specification** (`docs/COMPANION_SPEC.md`): vision,
+  architecture, WebSocket protocol (`type: "companion.*"` namespace),
+  tool surface (no direct execution tool — confirmation via
+  HMAC-tokened WS messages + 60 s TTL), execution pipeline, UI plan,
+  nine-phase rollout, multi-user seam plan, testing plan, kill switch.
+- `.gitignore` entry for `.hydra-companions/` runtime directory.
+
+### Rollout plan reference
+
+Phase 1 (chat, read-only) is the next planned increment and will land
+as v2.10.4 behind `HYDRA_COMPANION_ENABLED=1`. Minor-version bump
+(→ v2.11.0) is deferred until the companion subsystem is fully
+delivered through Phase 6 (memory + nudges).
+
+---
+
 ## [2.10.2] — 2026-04-16
 
 Dashboard UX patch — no engine / agent / backtest-server behaviour

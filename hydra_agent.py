@@ -1644,6 +1644,23 @@ class HydraAgent:
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
 
+        # ─── Companion subsystem (v2.10.3+) ────────────────────────────
+        # Strictly additive. Off unless HYDRA_COMPANION_ENABLED=1.
+        # Kill switch: HYDRA_COMPANION_DISABLED=1 wins over all.
+        # Any init failure leaves the live agent completely unaffected.
+        self.companion_coordinator = None
+        try:
+            from hydra_companions.config import is_enabled as _comp_enabled
+            if _comp_enabled():
+                from hydra_companions.coordinator import CompanionCoordinator
+                from hydra_companions.ws_handlers import mount_companion_routes
+                self.companion_coordinator = CompanionCoordinator(self)
+                mount_companion_routes(self.broadcaster, self.companion_coordinator)
+                print("  [COMPANION] subsystem mounted (Athena, Apex, Broski)")
+        except Exception as e:
+            print(f"  [COMPANION] init failed ({type(e).__name__}: {e}); disabled for this run")
+            self.companion_coordinator = None
+
         # Cross-pair regime coordinator
         self.coordinator = CrossPairCoordinator(pairs)
         self._swap_counter = 0  # Monotonic swap ID generator
@@ -4102,7 +4119,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.10.2",
+            "version": "2.10.11",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

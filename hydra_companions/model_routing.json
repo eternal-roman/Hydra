@@ -1,0 +1,212 @@
+{
+  "schema_version": "1.0",
+  "updated": "2026-04-17",
+  "comment": "Per-intent per-companion model routing. Deterministic. Retune without code changes. Every routing decision logs to .hydra-companions/routing.jsonl for auditing.",
+
+  "providers": {
+    "anthropic": {
+      "env_key": "ANTHROPIC_API_KEY",
+      "models": {
+        "claude-sonnet-4-6": {
+          "tier": "top",
+          "est_input_per_mtok_usd": 3.00,
+          "est_output_per_mtok_usd": 15.00,
+          "supports_tool_use": true,
+          "supports_streaming": true,
+          "prompt_cache": true
+        }
+      }
+    },
+    "xai": {
+      "env_key": "XAI_API_KEY",
+      "models": {
+        "grok-4-1-fast-reasoning": {
+          "tier": "fast",
+          "est_input_per_mtok_usd": 0.20,
+          "est_output_per_mtok_usd": 0.50,
+          "supports_tool_use": true,
+          "supports_streaming": true,
+          "use_for": "low-latency chat, banter, acks, one-liners"
+        },
+        "grok-4.20-0309-reasoning": {
+          "tier": "reasoning",
+          "est_input_per_mtok_usd": 1.00,
+          "est_output_per_mtok_usd": 3.00,
+          "supports_tool_use": true,
+          "supports_streaming": true,
+          "use_for": "trade proposals, ladders, teaching, market synthesis"
+        },
+        "grok-4.20-multi-agent-0309": {
+          "tier": "multi_agent",
+          "est_input_per_mtok_usd": 1.50,
+          "est_output_per_mtok_usd": 4.00,
+          "supports_tool_use": true,
+          "supports_streaming": true,
+          "use_for": "council mode — all three companions in one call"
+        }
+      }
+    }
+  },
+
+  "intents": {
+    "greeting": { "depth": "shallow", "tools": false, "default_max_tokens": 150 },
+    "small_talk": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
+    "ack_confirmation": { "depth": "shallow", "tools": false, "default_max_tokens": 80 },
+    "market_state_query": { "depth": "medium", "tools": true, "default_max_tokens": 400 },
+    "teaching_explanation": { "depth": "deep", "tools": true, "default_max_tokens": 800 },
+    "trade_proposal": { "depth": "deep", "tools": true, "default_max_tokens": 700 },
+    "ladder_proposal": { "depth": "deep", "tools": true, "default_max_tokens": 900 },
+    "post_trade_reaction": { "depth": "shallow", "tools": false, "default_max_tokens": 150 },
+    "banter_humor": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
+    "adherence_nudge": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
+    "idle_proactive_nudge": { "depth": "shallow", "tools": true, "default_max_tokens": 250 },
+    "council_multi_agent": { "depth": "deep", "tools": true, "default_max_tokens": 1200 },
+    "unknown": { "depth": "medium", "tools": false, "default_max_tokens": 300, "note": "fallback when classifier returns low confidence" }
+  },
+
+  "routing": {
+    "athena": {
+      "greeting": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6 },
+      "small_talk": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6 },
+      "ack_confirmation": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.4 },
+      "market_state_query": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.4 },
+      "teaching_explanation": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.5 },
+      "trade_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.2 },
+      "ladder_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.2 },
+      "post_trade_reaction": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.5 },
+      "banter_humor": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.7, "note": "athena rarely banters — low weight on this intent" },
+      "adherence_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.4 },
+      "idle_proactive_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.5 },
+      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.4 }
+    },
+    "apex": {
+      "greeting": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
+      "small_talk": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.4 },
+      "ack_confirmation": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.2 },
+      "market_state_query": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.3 },
+      "teaching_explanation": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.4 },
+      "trade_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.15 },
+      "ladder_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.15 },
+      "post_trade_reaction": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
+      "banter_humor": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6, "note": "dry only" },
+      "adherence_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
+      "idle_proactive_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
+      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.3 }
+    },
+    "broski": {
+      "greeting": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.8 },
+      "small_talk": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.8 },
+      "ack_confirmation": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6 },
+      "market_state_query": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.5 },
+      "teaching_explanation": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.6 },
+      "trade_proposal": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.3 },
+      "ladder_proposal": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.3 },
+      "post_trade_reaction": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.8 },
+      "banter_humor": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.85, "note": "highest creative temp — bro dialect + humor is his signature" },
+      "adherence_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6 },
+      "idle_proactive_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.7 },
+      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.7 },
+      "serious_mode_override": {
+        "applies_to_intents": ["trade_proposal", "ladder_proposal", "adherence_nudge", "teaching_explanation"],
+        "when": "soul.mode == serious",
+        "temperature_delta": -0.2,
+        "note": "when broski flips to serious mode, temperatures drop so output is calmer/tighter"
+      }
+    }
+  },
+
+  "rotation_pools": {
+    "comment": "Optional: rotate among models for an intent to prevent pattern fatigue. Weights sum to 1.0 per intent. Seeded per-day so a single conversation stays coherent.",
+    "broski.banter_humor": [
+      { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.75 },
+      { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.25 }
+    ],
+    "broski.idle_proactive_nudge": [
+      { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.8 },
+      { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.2 }
+    ]
+  },
+
+  "fallbacks": {
+    "comment": "If a provider errors (rate limit, 5xx, missing key), route to fallback. Classifier logs the degradation.",
+    "anthropic:claude-sonnet-4-6": ["xai:grok-4.20-0309-reasoning", "xai:grok-4-1-fast-reasoning"],
+    "xai:grok-4.20-0309-reasoning": ["xai:grok-4-1-fast-reasoning", "anthropic:claude-sonnet-4-6"],
+    "xai:grok-4-1-fast-reasoning": ["xai:grok-4.20-0309-reasoning"],
+    "xai:grok-4.20-multi-agent-0309": ["xai:grok-4.20-0309-reasoning"]
+  },
+
+  "budgets": {
+    "comment": "Per-companion daily USD cap, independent of brain budget. Hard-stop at 100% degrades to fast-tier only (no reasoning, no tool use, minimal context). Alert WS message at 80%.",
+    "athena": { "daily_usd": 2.00, "alert_at_pct": 80, "hard_stop_at_pct": 100 },
+    "apex":   { "daily_usd": 3.00, "alert_at_pct": 80, "hard_stop_at_pct": 100 },
+    "broski": { "daily_usd": 2.00, "alert_at_pct": 80, "hard_stop_at_pct": 100 },
+    "global_companion_daily_usd": 7.00,
+    "note": "Separate from brain's max_daily_cost. Shared $10/day disclosure threshold remains on the brain side."
+  },
+
+  "safety_caps": {
+    "comment": "Hard ceilings that every companion must respect, enforced in code not prompt. Enforced by hydra_companions/executor.py validator.",
+    "athena": {
+      "max_trades_per_day": 4,
+      "max_risk_per_trade_pct_equity": 1.0,
+      "max_concurrent_risk_pct_equity": 2.0,
+      "max_price_band_from_mid_pct": 3.0,
+      "max_ladder_rungs": 4,
+      "volatile_regime_policy": "blocked_or_half_size"
+    },
+    "apex": {
+      "max_trades_per_day": 6,
+      "max_risk_per_trade_pct_equity": 1.0,
+      "max_concurrent_risk_pct_equity": 3.0,
+      "max_price_band_from_mid_pct": 4.0,
+      "max_ladder_rungs": 4,
+      "volatile_regime_policy": "half_size"
+    },
+    "broski": {
+      "max_trades_per_day": 9,
+      "max_risk_per_trade_pct_equity": 1.5,
+      "max_concurrent_risk_pct_equity": 4.5,
+      "max_price_band_from_mid_pct": 6.0,
+      "max_ladder_rungs": 5,
+      "volatile_regime_policy": "half_size_allowed"
+    }
+  },
+
+  "context_limits": {
+    "comment": "Prompt context budget per call. Transcript trimmed to last N turns + distilled memory ≤ 4KB.",
+    "transcript_tail_turns": 20,
+    "distilled_memory_kb_max": 4,
+    "soul_prompt_kb_target": 6,
+    "tool_result_kb_cap": 8,
+    "tool_iterations_cap_per_turn": 5
+  },
+
+  "intent_classifier": {
+    "strategy": "heuristic_first_llm_fallback",
+    "heuristic_rules": [
+      { "intent": "greeting", "match": ["/\\b(hi|hello|hey|yo|sup|morning|good morning|evening)\\b/i", "length_le:25"] },
+      { "intent": "ack_confirmation", "match": ["/^(ok|okay|yes|yep|yeah|no|nope|thanks|ty|got it|sure|cool|sounds good|lfg|bet|fr)\\b/i", "length_le:40"] },
+      { "intent": "trade_proposal", "match": ["/\\b(buy|sell|enter|short|long|open|close)\\b.*\\b(sol|btc|eth)\\b/i"] },
+      { "intent": "ladder_proposal", "match": ["/\\b(ladder|scale in|scale out|rungs|dca)\\b/i"] },
+      { "intent": "teaching_explanation", "match": ["/\\b(explain|how does|what is|teach me|why does|help me understand)\\b/i"] },
+      { "intent": "market_state_query", "match": ["/\\b(what's (happening|going on)|how's|tape|regime|current state|show me|positions|balance)\\b/i"] },
+      { "intent": "banter_humor", "match": ["/\\b(lol|lmao|bruh|bro|fam|dude|haha|😂|💀)\\b/i"] }
+    ],
+    "llm_fallback_when": "heuristic_confidence_lt:0.7",
+    "llm_fallback_model": "xai:grok-4-1-fast-reasoning",
+    "llm_fallback_max_tokens": 30
+  },
+
+  "routing_mode": {
+    "comment": "Selected via HYDRA_COMPANION_ROUTING_MODE env var. Affects cost/quality tradeoffs.",
+    "conservative": { "description": "borderline intents upgrade to reasoning tier. more reliable, more expensive." },
+    "balanced": { "description": "rules as written above. default." },
+    "experimental": { "description": "borderline intents downgrade to fast tier. cheaper, higher variance." },
+    "default": "balanced"
+  },
+
+  "audit_log": {
+    "path": ".hydra-companions/routing.jsonl",
+    "fields": ["ts", "user_id", "companion_id", "intent", "intent_confidence", "classifier_method", "model_selected", "fallback_triggered", "tokens_in", "tokens_out", "cost_usd", "tool_calls", "mode", "serious_mode_active"]
+  }
+}
