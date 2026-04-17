@@ -1363,26 +1363,111 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
                        onView, onCompare, compareReport, loading, filters, onFilterChange,
                        compareInFlight }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
+  const expCount = experiments?.length || 0;
+  const hasEnoughForCompare = expCount >= 2;
+
+  // Derive the current step so the banner can highlight where the user is.
+  // 1 = need more backtests, 2 = browse/filter, 3 = select 2–8, 4 = click Compare
+  const currentStep = !hasEnoughForCompare ? 1
+                    : selectedIds.length < 2 ? 2
+                    : canCompare ? 3
+                    : 0;
+
+  const Step = ({ n, title, body, active, done }) => {
+    const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
+    return (
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
+                    padding: "8px 0",
+                    borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
+        <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
+                      background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
+                      border: `1px solid ${tone}`,
+                      color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
+                      display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {done ? "✓" : n}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
+                        color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
+                        marginBottom: 2 }}>
+            {title}
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                        lineHeight: 1.5 }}>
+            {body}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div>
-      {/* How-it-works banner — the COMPARE tab's workflow is otherwise implicit. */}
-      <div style={{ marginBottom: 12, padding: "12px 16px",
+      {/* How-it-works banner — spells out the COMPARE workflow as discrete,
+          left-justified steps so a first-time user knows what to do. */}
+      <div style={{ marginBottom: 12, padding: "14px 18px",
                     background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
-                    borderRadius: 8, fontFamily: mono, fontSize: 12, color: COLORS.text,
-                    lineHeight: 1.55 }}>
-        <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700,
-                      color: COLORS.purple, marginBottom: 6, letterSpacing: "0.02em" }}>
+                    borderRadius: 8 }}>
+        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700,
+                      color: COLORS.purple, marginBottom: 4, letterSpacing: "0.02em" }}>
           Compare Past Backtests
         </div>
-        <div style={{ color: COLORS.textDim }}>
-          Every run from the <span style={{ color: COLORS.blue }}>BACKTEST</span> tab is stored here.
-          {" "}<span style={{ color: COLORS.text }}>1.</span> Filter/browse the library below ·
-          {" "}<span style={{ color: COLORS.text }}>2.</span> Check 2–8 experiments ·
-          {" "}<span style={{ color: COLORS.text }}>3.</span> Click Compare to rank them on Return,
-          Sharpe, Max DD, and Profit Factor — with paired-bootstrap p-values showing which
-          sharpe differences are real signal vs. noise.
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                      lineHeight: 1.55, marginBottom: 10 }}>
+          Rank two or more completed backtests side-by-side on Return, Sharpe,
+          Max DD, and Profit Factor — and see which Sharpe differences are real
+          signal vs. noise via paired-bootstrap p-values.
         </div>
+
+        <Step
+          n={1}
+          active={currentStep === 1}
+          done={currentStep > 1}
+          title="Run some backtests first"
+          body={
+            hasEnoughForCompare ? (
+              <>
+                <span style={{ color: COLORS.accent }}>{expCount}</span>{" "}
+                experiment{expCount === 1 ? "" : "s"} available in the library below.
+              </>
+            ) : (
+              <>
+                You need at least 2 completed runs before you can compare.
+                Head to the <span style={{ color: COLORS.blue, fontWeight: 700 }}>BACKTEST</span> tab,
+                submit a run, wait for it to finish, then come back here.
+                Currently: <span style={{ color: COLORS.warn }}>{expCount}</span> in the library.
+              </>
+            )
+          }
+        />
+        <Step
+          n={2}
+          active={currentStep === 2}
+          done={currentStep > 2}
+          title="Filter and find the experiments you want"
+          body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
+        />
+        <Step
+          n={3}
+          active={currentStep === 3}
+          done={compareReport?.success}
+          title="Select 2–8 and click Compare"
+          body={
+            selectedIds.length === 0 ? (
+              "Tick the checkbox on each row you want to include. Maximum 8."
+            ) : selectedIds.length === 1 ? (
+              <>
+                <span style={{ color: COLORS.warn }}>1 selected</span> — pick at least one more.
+              </>
+            ) : (
+              <>
+                <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
+                {" "}selected · hit the <span style={{ color: COLORS.purple, fontWeight: 700 }}>Compare →</span>
+                {" "}button under the library to run the analysis.
+              </>
+            )
+          }
+        />
       </div>
 
       <ExperimentLibrary
