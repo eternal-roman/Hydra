@@ -1207,13 +1207,6 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const hasAdvancedFilters = !!(filters.triggered_by || filters.tag);
-  const hasActiveFilters = !!(filters.status || filters.triggered_by || filters.tag);
-  // Distinguish "store is empty" (no experiments at all) from "store has N
-  // but current filters narrowed them to zero" — each gets a different CTA.
-  const storeIsEmpty = (totalInStore || 0) === 0;
-  const filteredToEmpty = !storeIsEmpty && count === 0;
   // Map selected IDs back to their rows so we can chip-render them by name.
   const selectedRows = selectedIds
     .map((id) => experiments.find((e) => e.id === id))
@@ -1236,9 +1229,9 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             Experiment Library
           </div>
           <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
-            {hasActiveFilters && totalInStore != null && count !== totalInStore
-              ? <>{count} of {totalInStore} experiments</>
-              : <>{count} experiments</>}
+            {totalInStore != null && count !== totalInStore
+              ? <>{count} comparable · {totalInStore} total</>
+              : <>{count} comparable experiment{count === 1 ? "" : "s"}</>}
             {selCount > 0 && (
               <>
                 {" "}· <span style={{ color: COLORS.purple }}>{selCount}</span> selected
@@ -1298,97 +1291,6 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       </div>
 
-      {/* Filters — collapsed by default. Clutter for new users running a
-          handful of manual experiments; useful once the library grows and
-          the brain/tuner start auto-submitting. */}
-      <div style={{ marginBottom: 12 }}>
-        <button
-          onClick={() => setFiltersOpen(v => !v)}
-          style={{ background: "transparent", border: "none", padding: 0,
-                   fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                   cursor: "pointer", letterSpacing: "0.08em",
-                   textTransform: "uppercase", fontWeight: 600,
-                   display: "flex", alignItems: "center", gap: 6 }}
-          title="Show filters for narrowing a large library by run status, who submitted the run, or a specific tag."
-        >
-          <span style={{ fontSize: 10, transition: "transform 0.15s",
-                         display: "inline-block",
-                         transform: filtersOpen ? "rotate(90deg)" : "none" }}>▶</span>
-          Filters
-          {hasAdvancedFilters && (
-            <span style={{ color: COLORS.purple, fontSize: 10 }}>
-              ({[filters.status, filters.triggered_by, filters.tag]
-                  .filter(Boolean).length} active)
-            </span>
-          )}
-        </button>
-
-        {filtersOpen && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
-                        gap: 10, marginTop: 10 }}>
-            <div>
-              <FieldLabel
-                labelSize={11}
-                hintSize={11}
-                hint="Run state reported by the server."
-              >
-                Status
-              </FieldLabel>
-              <select
-                value={filters.status || ""}
-                onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
-                style={{ width: "100%", padding: "7px 10px", background: COLORS.bg, color: COLORS.text,
-                         border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
-                         fontSize: 12, fontFamily: mono, outline: "none" }}
-              >
-                <option value="">Any</option>
-                <option value="complete">complete</option>
-                <option value="running">running</option>
-                <option value="pending">pending</option>
-                <option value="failed">failed</option>
-                <option value="cancelled">cancelled</option>
-              </select>
-            </div>
-            <div>
-              <FieldLabel
-                labelSize={11}
-                hintSize={11}
-                hint="Who submitted: dashboard (you), brain:analyst / brain:strategist (AI), tuner (auto-probe)."
-              >
-                <span title="Every run is stamped with its submitter. 'dashboard' = you clicked Run Backtest. 'brain:analyst' or 'brain:strategist' = the AI brain auto-submitted an experiment. 'tuner' = the self-tuner is probing parameter values. Leave blank when you only have manual runs.">
-                  Triggered By ⓘ
-                </span>
-              </FieldLabel>
-              <StyledInput
-                value={filters.triggered_by || ""}
-                onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
-                placeholder="e.g. dashboard"
-                fontSize={12}
-                padding="7px 10px"
-              />
-            </div>
-            <div>
-              <FieldLabel
-                labelSize={11}
-                hintSize={11}
-                hint="Free-text tag match. e.g. preset:divergent, mc, wf."
-              >
-                <span title="Every run is stamped with tags when submitted — preset:NAME, caller:dashboard, mc (Monte Carlo enabled), wf (Walk-Forward enabled), and anything custom. Use this to find 'all runs with Monte Carlo' or 'all runs on the divergent preset'.">
-                  Tag Contains ⓘ
-                </span>
-              </FieldLabel>
-              <StyledInput
-                value={filters.tag || ""}
-                onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
-                placeholder="e.g. preset:divergent"
-                fontSize={12}
-                padding="7px 10px"
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* Selection chip bar — confirms which rows are selected by name, with a
           per-chip deselect. Gives the user an explicit visual that selections
           past 1 are registering. */}
@@ -1446,29 +1348,21 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             <div style={{ fontFamily: mono, fontSize: 13, color: COLORS.textDim }}>
               Loading…
             </div>
-          ) : filteredToEmpty ? (
+          ) : (totalInStore || 0) > 0 ? (
             <>
               <div style={{ fontSize: 28, opacity: 0.5 }}>🧪</div>
               <div style={{ fontFamily: heading, fontSize: 15, fontWeight: 700,
                             color: COLORS.text }}>
-                No experiments match your filters
+                No comparable experiments yet
               </div>
               <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                            lineHeight: 1.5, maxWidth: 420 }}>
+                            lineHeight: 1.5, maxWidth: 440 }}>
                 You have <span style={{ color: COLORS.purple }}>{totalInStore}</span> in
-                the library, but the current filters hide all of them.
+                the store, but none are in a comparable state yet (a run must
+                be <span style={{ color: COLORS.accent }}>complete</span> with
+                valid metrics). Wait for the current backtest to finish, or
+                re-run it from the BACKTEST tab if it failed.
               </div>
-              <button
-                onClick={() => onFilterChange({})}
-                style={{ padding: "8px 16px", fontSize: 12, fontFamily: mono,
-                         fontWeight: 700, letterSpacing: "0.1em",
-                         textTransform: "uppercase",
-                         background: `${COLORS.purple}20`, color: COLORS.purple,
-                         border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
-                         cursor: "pointer", outline: "none" }}
-              >
-                Clear Filters
-              </button>
             </>
           ) : (
             <>
@@ -2221,14 +2115,18 @@ export default function App() {
     if (activeTab === "COMPARE" && connected) fetchLibrary();
   }, [activeTab, connected, fetchLibrary]);
 
-  // Apply client-side filters on top of the server's list response.
-  // Server currently sends everything; filters stay cheap + interactive.
+  // Compare only works on experiments that are in a comparable state —
+  // the run must be "complete" AND have at least one non-null primary metric.
+  // Any other state (running, pending, failed, cancelled, or complete-but-
+  // missing-metrics) would either reject server-side or produce a nonsense
+  // row, so hide them from the library UI entirely.
   const filteredExperiments = (libExperiments || []).filter((e) => {
-    if (libFilters.status && e.status !== libFilters.status) return false;
-    if (libFilters.triggered_by
-        && !(e.triggered_by || "").includes(libFilters.triggered_by)) return false;
-    if (libFilters.tag && !(e.tags || []).some((t) => t.includes(libFilters.tag))) return false;
-    return true;
+    if (e.status !== "complete") return false;
+    const m = e.metrics;
+    if (!m) return false;
+    // At least one primary metric must be a number (null is the
+    // sanitiser's "non-finite" marker). If all are null the row is dead.
+    return m.total_return_pct != null || m.sharpe != null || m.max_drawdown_pct != null;
   });
 
   useEffect(() => {
