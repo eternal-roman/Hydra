@@ -1203,7 +1203,7 @@ const VERDICT_COLORS = {
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
                              onView, filters, onFilterChange, loading,
                              onCompare, canCompare, compareInFlight, onGoToBacktest,
-                             totalInStore }) {
+                             totalInStore, compact = false }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
@@ -1509,7 +1509,8 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      maxHeight: "min(420px, 38vh)", overflowY: "auto" }}>
+                      maxHeight: compact ? "min(260px, 24vh)" : "min(420px, 38vh)",
+                      overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
             const canSelect = selected || selCount < maxSelect;
@@ -1861,6 +1862,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         compareInFlight={compareInFlight}
         onGoToBacktest={onGoToBacktest}
         totalInStore={totalInStore}
+        compact={!!compareReport}
       />
 
       {/* Compare action row */}
@@ -1900,12 +1902,13 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         <CompareResults report={compareReport}
                         experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))} />
       ) : compareReport && !compareReport.success ? (
-        <div style={{ marginTop: 12, padding: 16, background: COLORS.panel,
-                      border: `1px solid ${COLORS.danger}40`, borderRadius: 8,
-                      color: COLORS.danger, fontFamily: mono, fontSize: 12 }}>
-          Compare failed: {compareReport.error}
-          {compareReport.missing_ids && (
-            <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 4 }}>
+        <div style={{ marginTop: 10, padding: "10px 14px", background: COLORS.panel,
+                      border: `1px solid ${COLORS.danger}40`, borderRadius: 6,
+                      color: COLORS.danger, fontFamily: mono, fontSize: 12,
+                      lineHeight: 1.4 }}>
+          <span style={{ fontWeight: 700 }}>Compare failed:</span> {compareReport.error}
+          {compareReport.missing_ids && compareReport.missing_ids.length > 0 && (
+            <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
               Missing: {compareReport.missing_ids.join(", ")}
             </div>
           )}
