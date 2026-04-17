@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.8] — 2026-04-17
+
+Companion **Phase 5** — distilled memory. Topic-bucketed per-companion
+facts loaded into the system prompt on every turn.
+
+### Added
+- `hydra_companions/memory.py` with remember / recall / forget /
+  compose_block. 4KB budget, LRU-by-timestamp eviction.
+- Per-companion isolation: Athena doesn't see what you told Broski.
+- WS routes: `companion.memory.{remember, recall, forget}`.
+- 8 new tests; 61 companion tests green.
+
+---
+
 ## [2.10.7] — 2026-04-17
 
 Companion **Phase 4** — LadderWatcher with invalidation cancel. 2 s
