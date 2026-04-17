@@ -71,39 +71,63 @@ const fmtInd = (v) => {
 
 // ─── Small Components ───
 
-// QuantumIcon — two nested orbit rings that fold in/out while a slower outer
-// group slowly rotates. Read "work is happening" without a spinner clichéd
-// look. Static (dimmed) when `active=false`. Keyframes live in index.css.
+// QuantumIcon — a static nucleus with three electron dots swirling around it
+// along three tilted elliptical orbits. Each orbit is drawn as a faint guide
+// ring (static); the electrons move via SVG <animateMotion> on that same
+// ellipse path, each with a different period + phase offset so they never
+// cluster. Nucleus breathes in scale via index.css keyframe. When `active`
+// is false the electrons freeze and the whole thing dims.
+//
+// Pinned to its parent via a constant viewBox + fixed size, so it always
+// occupies the same footprint in the AI Brain pill regardless of which
+// electron is currently at the far edge of its orbit.
 function QuantumIcon({ active = true, size = 14, color }) {
   const c = color || COLORS.blue;
   const dim = !active;
+  // Canonical horizontal ellipse centred at (12,12) with rx=9, ry=3.5 —
+  // a closed arc through (3,12) and (21,12). Tilt each orbit by wrapping
+  // in a rotated <g> so the same path reuses across all three.
+  const orbitPath = "M 3 12 A 9 3.5 0 1 1 21 12 A 9 3.5 0 1 1 3 12";
+  const orbits = [
+    { tilt:   0, dur: "2.8s", phase: "0s"    },
+    { tilt:  60, dur: "3.6s", phase: "-0.9s" },
+    { tilt: -60, dur: "3.2s", phase: "-1.8s" },
+  ];
   return (
     <svg width={size} height={size} viewBox="0 0 24 24"
          style={{ display: "inline-block", flexShrink: 0,
-                  opacity: dim ? 0.45 : 1,
-                  animation: dim ? "none" : "q-spin 6s linear infinite",
-                  transformOrigin: "12px 12px" }}
+                  opacity: dim ? 0.5 : 1 }}
          aria-hidden="true">
-        {/* Ring A — horizontal ellipse, folds first */}
-        <ellipse cx="12" cy="12" rx="10" ry="4"
-                 fill="none" stroke={c} strokeWidth="1.3"
-                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
-                          animation: dim ? "none" : "q-fold-a 2.4s ease-in-out infinite" }} />
-        {/* Ring B — 60° tilt, folds opposite phase */}
-        <ellipse cx="12" cy="12" rx="10" ry="4"
-                 fill="none" stroke={c} strokeWidth="1.3"
-                 transform="rotate(60 12 12)"
-                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
-                          animation: dim ? "none" : "q-fold-b 2.4s ease-in-out infinite" }} />
-        {/* Ring C — -60° tilt, offset delay for tri-phase feel */}
-        <ellipse cx="12" cy="12" rx="10" ry="4"
-                 fill="none" stroke={c} strokeWidth="1.3"
-                 transform="rotate(-60 12 12)"
-                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
-                          animation: dim ? "none" : "q-fold-a 2.4s ease-in-out -1.2s infinite" }} />
-        {/* Nucleus — subtle breath */}
-        <circle cx="12" cy="12" r="1.8" fill={c}
-                style={{ animation: dim ? "none" : "q-nucleus 2.4s ease-in-out infinite" }} />
+      {/* Guide rings — faint, static. Give the electrons an orbit the eye
+          can follow. */}
+      {orbits.map((o, i) => (
+        <ellipse key={`ring-${i}`}
+                 cx="12" cy="12" rx="9" ry="3.5"
+                 fill="none" stroke={c} strokeOpacity="0.25" strokeWidth="0.8"
+                 transform={`rotate(${o.tilt} 12 12)`} />
+      ))}
+      {/* Electrons — one per orbit, traveling its tilted ellipse. Each
+          <g> tilts the path frame; <animateMotion> drives the circle along
+          the canonical ellipse expressed in that tilted frame. */}
+      {orbits.map((o, i) => (
+        <g key={`e-${i}`} transform={`rotate(${o.tilt} 12 12)`}>
+          <circle r="1.4" fill={c}>
+            {!dim && (
+              <animateMotion
+                dur={o.dur} begin={o.phase} repeatCount="indefinite"
+                rotate="auto" path={orbitPath} />
+            )}
+            {/* When dim, freeze the electron at the leftmost point of its
+                orbit so the icon still reads as "three electrons on three
+                rings" even when no work is happening. */}
+            {dim && <set attributeName="transform" to="translate(-9,0)" />}
+          </circle>
+        </g>
+      ))}
+      {/* Nucleus — subtle breath via CSS keyframe. */}
+      <circle cx="12" cy="12" r="2" fill={c}
+              style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
+                       animation: dim ? "none" : "q-nucleus 2.4s ease-in-out infinite" }} />
     </svg>
   );
 }
