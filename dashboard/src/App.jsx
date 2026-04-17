@@ -191,6 +191,47 @@ const PRESET_OPTIONS = [
   { name: "regime_volatile",  label: "Regime: Volatile", desc: "Tuned for VOLATILE" },
 ];
 
+// Rigor gates — 7 code-enforced checks that must all pass before a param
+// tweak is auto-apply eligible. Backend keys (hydra_reviewer.py) ↔ plain-English
+// pill labels + tooltips shown in the dashboard.
+const RIGOR_GATES = [
+  {
+    key: "min_trades_50",
+    label: "Sample Size",
+    why: "Need ≥50 trades. Any metric built on fewer is statistical noise — you can't tell signal from randomness.",
+  },
+  {
+    key: "mc_ci_lower_positive",
+    label: "MC Confidence",
+    why: "Monte Carlo bootstrap: resamples the trade list thousands of times. The 95% CI lower bound on return must stay positive — profits survive re-ordering the trades.",
+  },
+  {
+    key: "wf_majority_improved",
+    label: "Walk-Forward",
+    why: "Slides train/test windows across the candle series. A majority of windows must improve vs. baseline — guards against curve-fitting to one specific period.",
+  },
+  {
+    key: "oos_gap_acceptable",
+    label: "OOS Gap",
+    why: "Out-of-sample performance must stay within tolerance of in-sample. A big gap means the params memorised the training data instead of learning a pattern.",
+  },
+  {
+    key: "improvement_above_2se",
+    label: "Signal vs. Noise",
+    why: "Improvement over baseline must exceed 2 standard errors — i.e., statistically meaningful, not just a lucky draw.",
+  },
+  {
+    key: "cross_pair_majority",
+    label: "Cross-Pair",
+    why: "The edge must hold across a majority of traded pairs. Catches flukes where one pair (e.g., SOL) carries the win while BTC and SOL/BTC regress.",
+  },
+  {
+    key: "regime_not_concentrated",
+    label: "Regime Spread",
+    why: "P&L must not be concentrated in one market regime. If all gains come from a single volatile week, the result is unlikely to repeat.",
+  },
+];
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
@@ -601,27 +642,67 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             )}
           </div>
 
-          {/* Rigor Gates */}
+          {/* Rigor Gates — color-coded pills driven by the latest review's
+              gates_passed dict. Grey = no result yet, green = passed, red = failed.
+              Hover a pill for the plain-English explanation. */}
           <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                         borderRadius: 8, padding: 16 }}>
             <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
+                          marginBottom: 10 }}>
               Rigor Gates
             </div>
-            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginBottom: 8 }}>
-              7 code-enforced gates
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
-                          rowGap: 4, columnGap: 10, fontFamily: mono, fontSize: 11,
-                          color: COLORS.text, lineHeight: 1.35 }}>
-              <span>min_trades_50</span>
-              <span>mc_ci_lower</span>
-              <span>wf_majority</span>
-              <span>oos_gap</span>
-              <span>improvement_2se</span>
-              <span>cross_pair_majority</span>
-              <span>regime_spread</span>
-            </div>
+            {(() => {
+              const gp = observerReview?.gates_passed;
+              const hasReview = gp && typeof gp === "object";
+              const summary = hasReview
+                ? (() => {
+                    const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
+                    const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
+                    return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
+                  })()
+                : "No review yet — hover a pill for what it checks.";
+              return (
+                <>
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                                marginBottom: 10 }}>
+                    {summary}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {RIGOR_GATES.map(g => {
+                      const state = !hasReview ? "neutral"
+                                  : gp[g.key] === true ? "pass"
+                                  : gp[g.key] === false ? "fail"
+                                  : "neutral";
+                      const bg = state === "pass" ? `${COLORS.accent}18`
+                               : state === "fail" ? `${COLORS.danger}18`
+                               : COLORS.bg;
+                      const border = state === "pass" ? COLORS.accent
+                                   : state === "fail" ? COLORS.danger
+                                   : COLORS.panelBorder;
+                      const fg = state === "pass" ? COLORS.accent
+                               : state === "fail" ? COLORS.danger
+                               : COLORS.textDim;
+                      const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
+                      return (
+                        <span
+                          key={g.key}
+                          title={`${g.label} (${g.key})\n\n${g.why}`}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 4,
+                                   padding: "4px 8px", borderRadius: 999,
+                                   background: bg, border: `1px solid ${border}`,
+                                   color: fg, fontFamily: mono, fontSize: 11,
+                                   fontWeight: 600, cursor: "help",
+                                   whiteSpace: "nowrap" }}
+                        >
+                          <span style={{ fontSize: 10 }}>{icon}</span>
+                          {g.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
 
@@ -800,22 +881,36 @@ function ObserverPairCard({ pair, state, equityHistory, expand = false }) {
 
 function GatesSummary({ review }) {
   if (!review || !review.gates_passed) return null;
-  const gates = review.gates_passed;
+  const gp = review.gates_passed;
+  // Prefer the canonical RIGOR_GATES ordering + labels; fall back to any
+  // keys present on the review that we don't recognise so nothing is hidden.
+  const known = new Set(RIGOR_GATES.map(g => g.key));
+  const extras = Object.keys(gp).filter(k => !known.has(k))
+    .map(k => ({ key: k, label: k, why: "(unrecognised gate — shown for completeness)" }));
+  const all = [...RIGOR_GATES, ...extras];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4,
                   fontFamily: mono, fontSize: 10 }}>
-      {Object.entries(gates).map(([name, passed]) => (
-        <div key={name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 10, height: 10, borderRadius: "50%",
-                         background: passed ? COLORS.accent : COLORS.danger,
-                         boxShadow: passed ? `0 0 4px ${COLORS.accent}80` : `0 0 4px ${COLORS.danger}80`,
-                         display: "inline-block" }} />
-          <span style={{ color: passed ? COLORS.text : COLORS.textDim,
-                         textDecoration: passed ? "none" : "line-through" }}>
-            {name}
-          </span>
-        </div>
-      ))}
+      {all.map(g => {
+        const passed = gp[g.key];
+        const present = g.key in gp;
+        return (
+          <div key={g.key} title={`${g.label} (${g.key})\n\n${g.why}`}
+               style={{ display: "flex", alignItems: "center", gap: 6, cursor: "help" }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%",
+                           background: !present ? COLORS.panelBorder
+                                    : passed ? COLORS.accent : COLORS.danger,
+                           boxShadow: !present ? "none"
+                                    : passed ? `0 0 4px ${COLORS.accent}80`
+                                    : `0 0 4px ${COLORS.danger}80`,
+                           display: "inline-block" }} />
+            <span style={{ color: passed ? COLORS.text : COLORS.textDim,
+                           textDecoration: present && !passed ? "line-through" : "none" }}>
+              {g.label}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
