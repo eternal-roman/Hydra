@@ -54,3 +54,6 @@ HYDRA_MEMORY.md
 # Backtest & experimentation artifacts (v2.10.0+; runtime, not tracked)
 .hydra-experiments/
 hydra_backtest_errors.log
+
+# Companion runtime artifacts (transcripts, memory, proposals, routing/cost logs)
+.hydra-companions/
