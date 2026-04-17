@@ -11,7 +11,6 @@ conservative behavior.
 from __future__ import annotations
 import hmac
 import hashlib
-import os
 import secrets
 import time
 from dataclasses import dataclass

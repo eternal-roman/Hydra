@@ -10,7 +10,6 @@ its hard_stop_pct the coordinator rejects new turns and broadcasts a
 cost_alert instead.
 """
 from __future__ import annotations
-import json
 import threading
 import time
 import traceback

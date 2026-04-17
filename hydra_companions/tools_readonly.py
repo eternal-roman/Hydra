@@ -10,7 +10,6 @@ loop in Phase 1 while still letting companions reference real data.
 Phase 2+ will expose these through the Anthropic tool-use API.
 """
 from __future__ import annotations
-import json
 from typing import Any
 
 
@@ -134,6 +133,11 @@ def compose_context_blob(agent, *, pair: str | None = None, max_bytes: int = 204
     return blob
 
 
+# Registry of read-only tools. Not consumed in Phase 1 (companions
+# currently reach live state via compose_context_blob injection rather
+# than the Anthropic tool-use API). Phase 7 wires this into the
+# tool-use loop so companions can explicitly fetch precisely the data
+# they need per turn. Kept here so the full surface stays in one place.
 TOOL_REGISTRY: dict[str, Any] = {
     "get_live_state": get_live_state,
     "get_pair_metrics": get_pair_metrics,
