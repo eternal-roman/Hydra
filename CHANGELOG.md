@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.3] — 2026-04-17
+
+Companion subsystem — **Phase 0: specification only.** No runtime code,
+no engine / brain / agent behaviour changes, no dashboard changes. The
+`hydra_companions/` package and spec documents land on disk but are
+inert until Phase 1 wires them up (gated by `HYDRA_COMPANION_ENABLED=1`).
+
+### Added
+
+- **Three hierarchical semantic soul JSONs**
+  (`hydra_companions/souls/{athena,apex,broski}.soul.json`) defining
+  distinct trading-companion personas: archetype, identity, voice,
+  values, trading philosophy, behavioral rules, reactions, teaching
+  style, mood model, sample utterances, boundary behaviors, safety
+  invariants, and cross-soul edges. Broski includes a dedicated
+  `mode_transition_rules` block (bro-vibes ↔ serious-mode flip).
+- **Model routing configuration**
+  (`hydra_companions/model_routing.json`): per-intent per-companion
+  selection across Grok fast-reasoning, Grok reasoning, Grok
+  multi-agent, and Claude Sonnet 4.6; rotation pools; fallback cascade;
+  per-companion daily USD budgets; hard safety caps (trades/day, risk %,
+  price-band, ladder rungs); heuristic-first intent classifier rules.
+- **Master specification** (`docs/COMPANION_SPEC.md`): vision,
+  architecture, WebSocket protocol (`type: "companion.*"` namespace),
+  tool surface (no direct execution tool — confirmation via
+  HMAC-tokened WS messages + 60 s TTL), execution pipeline, UI plan,
+  nine-phase rollout, multi-user seam plan, testing plan, kill switch.
+- `.gitignore` entry for `.hydra-companions/` runtime directory.
+
+### Rollout plan reference
+
+Phase 1 (chat, read-only) is the next planned increment and will land
+as v2.10.4 behind `HYDRA_COMPANION_ENABLED=1`. Minor-version bump
+(→ v2.11.0) is deferred until the companion subsystem is fully
+delivered through Phase 6 (memory + nudges).
+
+---
+
 ## [2.10.2] — 2026-04-16
 
 Dashboard UX patch — no engine / agent / backtest-server behaviour
