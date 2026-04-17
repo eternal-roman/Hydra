@@ -655,13 +655,21 @@ function CompanionDrawer({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  // Submit lock via ref so double-presses within the same React tick
+  // can't slip past the guard (state updates are async; refs are sync).
+  const submitLockRef = useRef(false);
   const submit = () => {
+    if (submitLockRef.current) return;
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!text) return;
+    submitLockRef.current = true;
     setSending(true);
     onSend(text);
     setDraft("");
-    setTimeout(() => setSending(false), 250);
+    setTimeout(() => {
+      submitLockRef.current = false;
+      setSending(false);
+    }, 350);
   };
 
   const onKey = (e) => {
@@ -2585,6 +2593,8 @@ export default function App() {
     : broskiUnread;
   const [companionCostAlerts, setCompanionCostAlerts] = useState({});
   const [companionVisible, setCompanionVisible] = useState(true);    // optimistic \u2014 orb shows immediately; hides on failed connect
+  // Track in-flight message timeouts so we can cancel them when a reply arrives.
+  const pendingTimeoutsRef = useRef({});  // { [msgId]: timeoutHandle }
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -2745,17 +2755,34 @@ export default function App() {
             case "companion.message.complete": {
               const cid = msg.companion_id;
               if (cid) {
+                // Cancel the pending 30s timeout for this msg (if any) so we
+                // don't append a "(no response in 30s)" note after the fact.
+                const originalMsgId = msg.message_id;
+                if (originalMsgId && pendingTimeoutsRef.current[originalMsgId]) {
+                  clearTimeout(pendingTimeoutsRef.current[originalMsgId]);
+                  delete pendingTimeoutsRef.current[originalMsgId];
+                }
                 getTypingSetter(cid)(false);
-                getMessageSetter(cid)((list) => [...list, {
-                  id: msg.message_id || `m-${Date.now()}-${Math.random()}`,
-                  role: "assistant",
-                  text: msg.text || "",
-                  display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
-                  error: msg.error,
-                  intent: msg.intent,
-                  model_used: msg.model_used,
-                  proactive: msg.proactive === true,
-                }].slice(-200));
+                // Use a unique assistant id that does NOT collide with the
+                // user echo id (previously we reused msg.message_id which
+                // came from the user's msgId, causing key collisions).
+                const assistantId = `a-${originalMsgId || Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                getMessageSetter(cid)((list) => {
+                  // Dedup: if this assistant id is already in the list,
+                  // don't add a second copy (guards against double-dispatch
+                  // from StrictMode effect re-runs or WS reconnect replays).
+                  if (list.some((m) => m.id === assistantId)) return list;
+                  return [...list, {
+                    id: assistantId,
+                    role: "assistant",
+                    text: msg.text || "",
+                    display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
+                    error: msg.error,
+                    intent: msg.intent,
+                    model_used: msg.model_used,
+                    proactive: msg.proactive === true,
+                  }].slice(-200);
+                });
                 if (!companionDrawerOpen || activeCompanion !== cid) {
                   getUnreadSetter(cid)(true);
                 }
@@ -2937,7 +2964,12 @@ export default function App() {
     }
 
     // Optimistic: add the user message immediately to the ACTIVE companion only.
-    getMessageSetter(cid)((list) => [...list, { id: msgId, role: "user", text }].slice(-200));
+    // Dedup by msgId so any duplicate invocation (stale-closure guard miss,
+    // double-click race, StrictMode effect re-run) can't double-commit.
+    getMessageSetter(cid)((list) => {
+      if (list.some((m) => m.id === msgId)) return list;
+      return [...list, { id: msgId, role: "user", text }].slice(-200);
+    });
     getTypingSetter(cid)(true);
     const ok = sendMessage({
       type: "companion.message",
@@ -2952,8 +2984,11 @@ export default function App() {
       }].slice(-200));
       return;
     }
-    // 30s timeout \u2014 helpful error if no reply arrives.
-    setTimeout(() => {
+    // 30s timeout \u2014 helpful error if no reply arrives. Cancellable so a
+    // successful message.complete kills the timer instead of spamming the
+    // "(no response in 30s)" note after the fact.
+    const handle = setTimeout(() => {
+      delete pendingTimeoutsRef.current[msgId];
       getMessageSetter(cid)((list) => {
         if (list.some((m) => m.id === `timeout-${msgId}`)) return list;
         return [...list, {
@@ -2963,6 +2998,7 @@ export default function App() {
       });
       getTypingSetter(cid)(false);
     }, 30000);
+    pendingTimeoutsRef.current[msgId] = handle;
   }, [sendMessage, activeCompanion, getMessageSetter, getTypingSetter]);
 
   const companionSwitch = useCallback((cid) => {
