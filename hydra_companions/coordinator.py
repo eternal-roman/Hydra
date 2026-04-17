@@ -94,7 +94,10 @@ class CompanionCoordinator:
                 self.nudge_scheduler.start()
                 print("  [COMPANION] nudge scheduler started")
         except Exception as e:
-            print(f"  [COMPANION] nudge scheduler init failed: {e}")
+            # Full traceback so misconfigurations surface loudly instead of
+            # silently disabling the feature.
+            print(f"  [COMPANION] nudge scheduler init failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
 
     # ----- public -----
 
@@ -313,6 +316,26 @@ class CompanionCoordinator:
         self._pending.pop(pid, None)
         return {"success": True}
 
+    def notify_fill(self, userref: int) -> bool:
+        """External hook for ExecutionStream \u2014 call when a userref-tagged
+        order fills so the ladder watcher can mark that rung filled (and
+        skip it on invalidation). Returns True if the userref matched an
+        active ladder rung, False otherwise.
+
+        Not yet invoked from the live ExecutionStream path; the bridge
+        lives at agent side and is a follow-up. Until then, invalidation
+        cancels all unfilled rungs, which is the safe default.
+        """
+        if self.ladder_watcher is None:
+            return False
+        with self.ladder_watcher._lock:
+            for active in self.ladder_watcher._active.values():
+                for i, rung in enumerate(active.rungs):
+                    if rung.get("userref") == userref:
+                        active.filled_idx.add(i)
+                        return True
+        return False
+
     def handle_nudge_mute(self, payload: dict) -> Optional[dict]:
         """Silence proactive nudges for a window (seconds). 0 = forever
         this session."""
@@ -431,6 +454,15 @@ class CompanionCoordinator:
             print(f"  [COMPANION] thread run done cid={cid} model={result.model_used} "
                   f"in={result.tokens_in} out={result.tokens_out} err={result.error!r} "
                   f"text={preview!r}")
+            # Clear typing FIRST so the UI never sees a
+            # message.complete-then-typing:thinking-then-idle race.
+            try:
+                self._broadcast("companion.typing", {
+                    "companion_id": cid, "user_id": uid, "state": "idle",
+                    "message_id": msg_id,
+                })
+            except Exception:
+                pass
             self._broadcast("companion.message.complete", {
                 "message_id": msg_id,
                 "companion_id": cid,
@@ -446,13 +478,8 @@ class CompanionCoordinator:
             print(f"  [COMPANION] broadcast message.complete sent cid={cid} msg_id={msg_id}")
         except Exception as e:
             traceback.print_exc()
-            self._broadcast("companion.message.complete", {
-                "message_id": msg_id, "companion_id": cid, "user_id": uid,
-                "text": f"(internal error: {type(e).__name__}: {e})",
-                "error": str(e),
-            })
-        finally:
-            # Explicit typing clear so the UI never gets stuck.
+            # On exception path we still want typing cleared AND a user-visible
+            # note, so we broadcast both in the right order here.
             try:
                 self._broadcast("companion.typing", {
                     "companion_id": cid, "user_id": uid, "state": "idle",
@@ -460,6 +487,12 @@ class CompanionCoordinator:
                 })
             except Exception:
                 pass
+            self._broadcast("companion.message.complete", {
+                "message_id": msg_id, "companion_id": cid, "user_id": uid,
+                "text": f"(internal error: {type(e).__name__}: {e})",
+                "error": str(e),
+            })
+        finally:
             self._busy.release()
 
     def _broadcast(self, msg_type: str, payload: dict) -> None:

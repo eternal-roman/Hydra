@@ -110,10 +110,18 @@ class LiveExecutor:
                           extra={"rung": i, "userref": userref,
                                  "kraken_result": _safe_trim(result)})
 
-        # Register ladder for the watcher (Phase 4 hooks here).
-        if hasattr(self.coordinator, "ladder_watcher"):
+        # Register ladder for the watcher so invalidation cancels remaining
+        # unfilled rungs. mark_fill() is the companion hook for an
+        # ExecutionStream integration: when a fill arrives for a specific
+        # userref, look it up here by matching against placed rung userrefs
+        # and call watcher.mark_fill(proposal_id, rung_idx). Until the
+        # execution-stream companion bridge lands, the watcher treats every
+        # rung as unfilled and cancels all remaining on invalidation \u2014
+        # which is conservative and safe.
+        watcher = getattr(self.coordinator, "ladder_watcher", None)
+        if watcher is not None:
             try:
-                self.coordinator.ladder_watcher.register(p, placed)
+                watcher.register(p, placed)
             except Exception:
                 pass
 

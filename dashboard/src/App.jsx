@@ -2835,6 +2835,26 @@ export default function App() {
               }
               return;
             }
+            case "companion.ladder.invalidation_triggered": {
+              const cid = msg.companion_id;
+              if (cid) {
+                // Flip the ladder card to "invalidated" status + drop a
+                // system note so the user sees what happened.
+                getMessageSetter(cid)((list) => {
+                  const updated = list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: "invalidated" }
+                    : m);
+                  const cancelled = (msg.cancelled_userrefs || []).filter((u) => u != null);
+                  return [...updated, {
+                    id: `inv-${msg.proposal_id}-${Date.now()}`,
+                    role: "system",
+                    text: `(ladder invalidated @ $${msg.current_price} \u2014 ` +
+                          `cancelled ${cancelled.length} unfilled rung${cancelled.length === 1 ? "" : "s"})`,
+                  }].slice(-200);
+                });
+              }
+              return;
+            }
             case "companion.system_note": {
               const cid = activeCompanion;
               getMessageSetter(cid)((list) => [...list, {
@@ -2955,10 +2975,33 @@ export default function App() {
           { id: msgId, role: "user", text },
           sysNote(
             "commands:\n" +
-            "  /clear        \u2014 clear this companion's transcript\n" +
-            "  /clear all    \u2014 clear all three transcripts\n" +
-            "  /help         \u2014 show this list"
+            "  /clear         \u2014 clear this companion's transcript\n" +
+            "  /clear all     \u2014 clear all three transcripts\n" +
+            "  /mute [secs]   \u2014 silence proactive nudges (default 1h)\n" +
+            "  /serious [on|off] \u2014 broski: toggle serious mode\n" +
+            "  /help          \u2014 show this list"
           ),
+        ].slice(-200));
+        return;
+      }
+
+      if (cmd === "mute") {
+        const secs = arg ? parseInt(arg, 10) : 3600;
+        const safe = Number.isFinite(secs) && secs > 0 ? secs : 3600;
+        sendMessage({ type: "companion.nudge.mute", seconds: safe });
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(`(proactive nudges muted for ${safe}s)`),
+        ].slice(-200));
+        return;
+      }
+
+      if (cmd === "serious") {
+        const on = arg !== "off";
+        sendMessage({ type: "companion.set_serious_mode", companion_id: cid, on });
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(on ? "(serious mode on)" : "(serious mode off)"),
         ].slice(-200));
         return;
       }
