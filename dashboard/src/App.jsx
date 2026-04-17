@@ -1221,7 +1221,8 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 16 }}>
+                  borderRadius: 8, padding: 16,
+                  display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                     marginBottom: 14 }}>
@@ -1509,8 +1510,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      maxHeight: compact ? "min(100px, 10vh)" : "min(320px, 28vh)",
-                      overflowY: "auto" }}>
+                      flex: 1, minHeight: 0, overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
             const canSelect = selected || selCount < maxSelect;
@@ -1779,7 +1779,13 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
   };
 
   return (
-    <div>
+    // Bound the whole CompareView to the viewport height (minus the top tab
+    // bar + page padding). With this, no element scrolls the window — the
+    // library's internal row list is the single flexible child and absorbs
+    // whatever vertical space remains. Kills the "vertical wobble" caused by
+    // multiple elements competing for page height.
+    <div style={{ display: "flex", flexDirection: "column",
+                   height: "calc(100vh - 120px)", minHeight: 0, gap: 0 }}>
       {/* How-it-works banner — spells out the COMPARE workflow as discrete,
           left-justified steps so a first-time user knows what to do.
           Stays visible even after running a comparison — the stepper doubles
