@@ -1926,16 +1926,54 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         <CompareResults report={compareReport}
                         experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))} />
       ) : compareReport && !compareReport.success ? (
-        <div style={{ marginTop: 10, padding: "10px 14px", background: COLORS.panel,
-                      border: `1px solid ${COLORS.danger}40`, borderRadius: 6,
-                      color: COLORS.danger, fontFamily: mono, fontSize: 12,
-                      lineHeight: 1.4 }}>
-          <span style={{ fontWeight: 700 }}>Compare failed:</span> {compareReport.error}
-          {compareReport.missing_ids && compareReport.missing_ids.length > 0 && (
-            <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 2 }}>
-              Missing: {compareReport.missing_ids.join(", ")}
+        <div style={{ marginTop: 10, padding: "12px 16px", background: COLORS.panel,
+                      border: `1px solid ${COLORS.warn}60`, borderRadius: 6,
+                      fontFamily: mono, fontSize: 12, lineHeight: 1.5,
+                      display: "flex", gap: 12, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 18, lineHeight: 1 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: COLORS.warn, fontWeight: 700, marginBottom: 4 }}>
+              Comparison couldn't be computed
             </div>
-          )}
+            <div style={{ color: COLORS.textDim }}>
+              {compareReport.missing_ids && compareReport.missing_ids.length > 0 ? (
+                <>
+                  One or more of the selected experiments are no longer in the
+                  store. Click <span style={{ color: COLORS.blue, fontWeight: 700 }}>Refresh</span>{" "}
+                  on the library header to resync, then re-select.
+                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
+                    Missing: {compareReport.missing_ids.join(", ")}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {compareReport.error || "Unknown error."}
+                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6,
+                                lineHeight: 1.5 }}>
+                    This almost always means one of the selected experiments
+                    is a <b>legacy run</b> from before the metrics-sanitiser fix
+                    — its on-disk metrics contain non-finite values that compare()
+                    can't rank. Try:
+                    <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                      <li>Pick a different pair of experiments, or</li>
+                      <li>Re-run one of them from the BACKTEST tab to refresh
+                          it with the fixed sanitiser.</li>
+                    </ul>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClearSelection}
+            style={{ background: "transparent", border: "none", color: COLORS.textDim,
+                     cursor: "pointer", fontFamily: mono, fontSize: 11,
+                     letterSpacing: "0.08em", textTransform: "uppercase",
+                     padding: "4px 8px" }}
+            title="Clear the current selection to pick a different set."
+          >
+            Reset
+          </button>
         </div>
       ) : null}
 

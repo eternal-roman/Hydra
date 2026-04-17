@@ -534,7 +534,23 @@ def mount_backtest_routes(
         if missing:
             return {"success": False, "error": "experiments missing", "missing_ids": missing}
         from dataclasses import asdict as _asdict
-        report = _compare_fn(experiments)
+        try:
+            report = _compare_fn(experiments)
+        except Exception as e:
+            # Compare() already has per-field None guards; this catches any
+            # unexpected shape (e.g. a corrupt experiment JSON from an older
+            # version) and returns a readable message instead of leaking a
+            # bare TypeError to the user.
+            import traceback as _tb
+            _tb.print_exc()
+            return {
+                "success": False,
+                "error": f"Comparison could not be computed: {e.__class__.__name__}. "
+                         f"One or more experiments have corrupt / legacy metrics "
+                         f"(likely from before the v2.10 sanitiser fix). Re-run "
+                         f"those experiments to refresh them, or pick a different "
+                         f"set.",
+            }
         return {
             "success": True,
             "experiments": report.experiments,

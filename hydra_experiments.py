@@ -946,22 +946,39 @@ def _paired_return_p_value(a: Experiment, b: Experiment, n_iter: int = 500, seed
 
 
 def _flatten_equity(result: BacktestResult) -> List[float]:
-    """Sum per-pair equity at each tick. Assumes all pairs share tick count."""
+    """Sum per-pair equity at each tick. Assumes all pairs share tick count.
+    Persisted equity curves can contain None for ticks where a non-finite
+    value was sanitised on save — treat those as 0.0 so downstream stats
+    stay numeric."""
     curves = list(result.equity_curve.values())
     if not curves:
         return []
     n = min(len(c) for c in curves)
-    return [sum(curves[p][i] for p in range(len(curves))) for i in range(n)]
+    out: List[float] = []
+    for i in range(n):
+        total = 0.0
+        for p in range(len(curves)):
+            v = curves[p][i]
+            if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
+                total += float(v)
+        out.append(total)
+    return out
 
 
 def _rets(equity: List[float]) -> List[float]:
     out: List[float] = []
     for i in range(1, len(equity)):
         prev = equity[i - 1]
-        if prev <= 0:
+        cur = equity[i]
+        # Defensive: None / non-numeric / non-finite values become a flat 0
+        # tick instead of propagating a TypeError up through the bootstrap.
+        if (prev is None or cur is None
+                or not isinstance(prev, (int, float)) or not isinstance(cur, (int, float))
+                or not math.isfinite(prev) or not math.isfinite(cur)
+                or prev <= 0):
             out.append(0.0)
         else:
-            out.append((equity[i] - prev) / prev)
+            out.append((cur - prev) / prev)
     return out
 
 
