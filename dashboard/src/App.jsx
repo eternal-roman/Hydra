@@ -300,10 +300,14 @@ const RIGOR_GATES = [
 // backend subsystem is disabled the orb never receives a `companion.hello`
 // and stays invisible.
 
+// Companion themes drawn from the existing Hydra palette so the drawer
+// visually belongs to the dashboard. Athena takes the warm amber
+// (patient, defensive), Apex the precise blue (professional), Broski
+// the volatile purple (matches the volatile-regime color \u2014 his element).
 const COMPANION_THEMES = {
-  athena: { primary: "#C9A227", accent: "#F6E7B7", glow: "#F4D35E", sigil: "\u26B2" },
-  apex:   { primary: "#0EA5A4", accent: "#22D3EE", glow: "#22D3EE", sigil: "\u25B2" },
-  broski: { primary: "#FF6B35", accent: "#FFD23F", glow: "#FF4757", sigil: "\u2736" },
+  athena: { primary: COLORS.warn,    accent: COLORS.warn,   glow: COLORS.warn,   sigil: "\u26B2" },
+  apex:   { primary: COLORS.blue,    accent: COLORS.blue,   glow: COLORS.blue,   sigil: "\u25B2" },
+  broski: { primary: COLORS.purple,  accent: COLORS.purple, glow: COLORS.purple, sigil: "\u2736" },
 };
 const COMPANION_ORDER = ["athena", "apex", "broski"];
 const COMPANION_NAMES = { athena: "Athena", apex: "Apex", broski: "Broski" };
@@ -326,13 +330,13 @@ function CompanionOrb({ theme, onClick, regime, hasUnread, visible }) {
         style={{
           position: "fixed", right: 24, bottom: 24, zIndex: 9000,
           width: 56, height: 56, borderRadius: "50%",
-          background: `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary} 55%, ${theme.primary}99)`,
+          background: `radial-gradient(circle at 35% 30%, ${theme.primary}, ${theme.primary}aa 55%, ${COLORS.panel})`,
           border: `2px solid ${theme.primary}`,
           cursor: "pointer", padding: 0,
           animation: `hc-breathe ${pulseDuration} ease-in-out infinite, hc-glow-pulse ${pulseDuration} ease-in-out infinite`,
           display: "flex", alignItems: "center", justifyContent: "center",
-          color: "#fff", fontSize: 22, fontFamily: heading, fontWeight: 700,
-          textShadow: `0 0 6px ${theme.glow}`,
+          color: COLORS.text, fontSize: 22, fontFamily: heading, fontWeight: 700,
+          textShadow: `0 0 8px ${theme.glow}`,
         }}>
         <span style={{ pointerEvents: "none" }}>{theme.sigil}</span>
         {hasUnread && (
@@ -347,30 +351,34 @@ function CompanionOrb({ theme, onClick, regime, hasUnread, visible }) {
   );
 }
 
-function CompanionSwitcher({ active, companions, onSwitch }) {
+function CompanionSwitcher({ active, onSwitch }) {
+  // The three IDs are well-known; always enabled. Metadata from the
+  // backend just refines the display name / mood; clicking works even
+  // before connect_ack lands.
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
       {COMPANION_ORDER.map((cid) => {
         const theme = COMPANION_THEMES[cid];
         const isActive = active === cid;
-        const exists = companions[cid];
         return (
           <button
             key={cid}
-            onClick={() => exists && onSwitch(cid)}
-            title={exists ? COMPANION_NAMES[cid] : "offline"}
-            disabled={!exists}
+            onClick={() => onSwitch(cid)}
+            title={COMPANION_NAMES[cid]}
             style={{
-              width: 32, height: 32, borderRadius: "50%",
+              width: 30, height: 30, borderRadius: "50%",
               background: isActive
-                ? `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary})`
-                : `${theme.primary}33`,
-              border: isActive ? `2px solid ${theme.glow}` : `1px solid ${theme.primary}66`,
-              color: isActive ? "#fff" : `${theme.primary}`,
-              fontFamily: heading, fontWeight: 700, fontSize: 14,
-              cursor: exists ? "pointer" : "not-allowed", opacity: exists ? 1 : 0.35,
+                ? `radial-gradient(circle at 35% 30%, ${theme.primary}, ${theme.primary}88)`
+                : "transparent",
+              border: isActive
+                ? `1px solid ${theme.glow}`
+                : `1px solid ${COLORS.panelBorder}`,
+              color: isActive ? COLORS.text : COLORS.textDim,
+              fontFamily: heading, fontWeight: 700, fontSize: 13,
+              cursor: "pointer",
               display: "flex", alignItems: "center", justifyContent: "center",
               transition: "all 180ms ease",
+              padding: 0,
             }}>
             {theme.sigil}
           </button>
@@ -398,12 +406,13 @@ function CompanionMessage({ m, theme, userTheme }) {
       <div style={{
         maxWidth: "85%",
         padding: "8px 12px",
-        borderRadius: 10,
-        borderLeft: isUser ? "none" : `3px solid ${theme.primary}`,
-        background: isUser ? `${userTheme}15` : `${theme.primary}10`,
+        borderRadius: 8,
+        borderLeft: isUser ? "none" : `2px solid ${theme.primary}`,
+        background: isUser ? `${COLORS.accent}12` : `${COLORS.panel}`,
+        border: isUser ? `1px solid ${COLORS.accent}33` : `1px solid ${COLORS.panelBorder}`,
         color: COLORS.text,
-        fontFamily: isUser ? mono : mono,
-        fontSize: 13, lineHeight: 1.45,
+        fontFamily: mono,
+        fontSize: 12, lineHeight: 1.5,
         whiteSpace: "pre-wrap", wordBreak: "break-word",
       }}>
         {m.text}
@@ -443,7 +452,7 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
   const ttlTotal = Math.max(1, (proposal.expires_at - proposal.created_at) || 60);
   const remaining = Math.max(0, proposal.expires_at - now);
   const pctLeft = Math.max(0, Math.min(1, remaining / ttlTotal));
-  const ttlColor = pctLeft > 0.5 ? theme.primary : pctLeft > 0.2 ? "#E5A84D" : "#E85C5C";
+  const ttlColor = pctLeft > 0.5 ? theme.primary : pctLeft > 0.2 ? COLORS.warn : COLORS.danger;
   const expired = remaining <= 0;
 
   const locked = !!status;  // once submitted/filled/rejected, disable buttons
@@ -459,7 +468,7 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
     onConfirm();
   };
 
-  const sideColor = proposal.side === "buy" ? "#4ADE80" : "#F87171";
+  const sideColor = proposal.side === "buy" ? COLORS.buy : COLORS.sell;
 
   return (
     <div style={{
@@ -477,7 +486,7 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
       <div style={{ padding: "10px 12px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
           <span style={{
-            background: sideColor, color: "#0B1221", fontWeight: 700,
+            background: sideColor, color: COLORS.bg, fontWeight: 700,
             padding: "2px 8px", borderRadius: 4, fontFamily: mono,
             fontSize: 10, letterSpacing: "0.08em",
           }}>{proposal.side.toUpperCase()}</span>
@@ -505,7 +514,7 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
         ) : (
           <div>
             <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 4, fontFamily: mono }}>
-              total {proposal.total_size} \u00b7 stop ${fmtPxShort(proposal.stop_loss)} \u00b7 invalidate ${fmtPxShort(proposal.invalidation_price)}
+              {`total ${proposal.total_size} \u00b7 stop $${fmtPxShort(proposal.stop_loss)} \u00b7 invalidate $${fmtPxShort(proposal.invalidation_price)}`}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "2px 8px",
                           fontSize: 10, fontFamily: mono }}>
@@ -529,11 +538,11 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
         {status && (
           <div style={{
             marginTop: 8, padding: "4px 8px", borderRadius: 4, display: "inline-block",
-            background: status === "filled" ? "#4ADE8022"
-                     : status === "failed" || status === "rejected" ? "#F8717122"
+            background: status === "filled" ? `${COLORS.accent}22`
+                     : status === "failed" || status === "rejected" ? `${COLORS.danger}22`
                      : `${theme.primary}22`,
-            color: status === "filled" ? "#4ADE80"
-                : status === "failed" || status === "rejected" ? "#F87171"
+            color: status === "filled" ? COLORS.accent
+                : status === "failed" || status === "rejected" ? COLORS.danger
                 : theme.primary,
             fontSize: 10, fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em",
             textTransform: "uppercase",
@@ -543,9 +552,9 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
         {!locked && !expired && (
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button onClick={handlePrimary} style={{
-              flex: 1, padding: "8px 12px", borderRadius: 5,
-              background: armed ? "#E85C5C" : theme.primary,
-              color: "#fff", border: "none", cursor: "pointer",
+              flex: 1, padding: "8px 12px", borderRadius: 4,
+              background: armed ? COLORS.danger : theme.primary,
+              color: COLORS.bg, border: "none", cursor: "pointer",
               fontFamily: mono, fontSize: 11, fontWeight: 700,
               letterSpacing: "0.08em", textTransform: "uppercase",
               transition: "background 160ms",
@@ -562,7 +571,7 @@ function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onSt
         )}
         {expired && !locked && (
           <div style={{ marginTop: 10, fontSize: 10, color: COLORS.textMuted, fontFamily: mono }}>
-            expired \u2014 ask again
+            {"expired \u2014 ask again"}
           </div>
         )}
       </div>
@@ -578,8 +587,9 @@ function CompanionTypingBubble({ theme, name }) {
         {name}
       </div>
       <div style={{
-        padding: "8px 14px", borderRadius: 10, borderLeft: `3px solid ${theme.primary}`,
-        background: `${theme.primary}10`, display: "inline-flex", gap: 4,
+        padding: "8px 14px", borderRadius: 8, borderLeft: `2px solid ${theme.primary}`,
+        background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+        display: "inline-flex", gap: 4,
       }}>
         <style>{`@keyframes hc-dot { 0%,80%,100% { opacity: 0.3; transform: translateY(0);} 40% { opacity: 1; transform: translateY(-3px);} }`}</style>
         {[0, 1, 2].map((i) => (
@@ -673,12 +683,12 @@ function CompanionDrawer({
             {comp?.mood || "calm"}{comp?.serious_mode ? " \u00b7 serious" : ""}
           </div>
         </div>
-        <CompanionSwitcher active={active} companions={companions} onSwitch={onSwitch} />
-        <button onClick={onClose} aria-label="Close drawer" style={{
+        <CompanionSwitcher active={active} onSwitch={onSwitch} />
+        <button onClick={onClose} aria-label="Close drawer" title="Close" style={{
           background: "transparent", border: `1px solid ${COLORS.panelBorder}`,
           color: COLORS.textMuted, cursor: "pointer", borderRadius: 4,
-          padding: "4px 10px", fontFamily: mono, fontSize: 11,
-        }}>\u2716</button>
+          padding: "4px 10px", fontFamily: mono, fontSize: 13, lineHeight: 1,
+        }}>{"\u00D7"}</button>
       </div>
 
       {alert && (
@@ -696,7 +706,8 @@ function CompanionDrawer({
       }}>
         {messages.length === 0 && !typing && (
           <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 20, textAlign: "center" }}>
-            say hi to {name.toLowerCase()} \u2014 or type <code style={{ color: theme.accent }}>/help</code>
+            {`say hi to ${name.toLowerCase()} \u2014 or type `}
+            <code style={{ color: theme.accent }}>/help</code>
           </div>
         )}
         {messages.map((m) => {
@@ -743,7 +754,7 @@ function CompanionDrawer({
         />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
           <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono }}>
-            \u21B5 send \u00b7 Shift+\u21B5 newline \u00b7 Esc close
+            {"\u21B5 send \u00b7 Shift+\u21B5 newline \u00b7 Esc close"}
           </div>
           <button
             onClick={submit}
@@ -2643,7 +2654,9 @@ export default function App() {
             case "companion.typing": {
               const cid = msg.companion_id;
               if (cid) {
-                setCompanionTyping((prev) => ({ ...prev, [cid]: msg.state === "thinking" }));
+                // Any state that isn't "thinking" clears the indicator.
+                const on = msg.state === "thinking";
+                setCompanionTyping((prev) => ({ ...prev, [cid]: on }));
               }
               return;
             }

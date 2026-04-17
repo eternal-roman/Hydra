@@ -16,6 +16,31 @@ import os
 from pathlib import Path
 
 
+# Defensive: if the parent agent hasn't loaded .env yet, do it here so
+# companions can reach ANTHROPIC_API_KEY / XAI_API_KEY on standalone
+# imports (tests, repl, etc.). Idempotent \u2014 won't overwrite
+# anything already in os.environ.
+def _load_env_once():
+    root = Path(__file__).resolve().parent.parent
+    env = root / ".env"
+    if not env.exists():
+        return
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+
+_load_env_once()
+
+
 ROOT = Path(__file__).resolve().parent
 SOULS_DIR = ROOT / "souls"
 ROUTING_CONFIG = ROOT / "model_routing.json"

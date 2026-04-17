@@ -361,9 +361,14 @@ class CompanionCoordinator:
     def _run_turn(self, comp: Companion, cid: str, uid: str, text: str, msg_id: str):
         acquired = self._busy.acquire(blocking=False)
         if not acquired:
-            self._broadcast("companion.system_note", {
-                "text": "busy \u2014 try again in a moment",
+            # Always clear typing and surface the note in-thread.
+            self._broadcast("companion.typing", {
+                "companion_id": cid, "user_id": uid, "state": "idle",
                 "message_id": msg_id,
+            })
+            self._broadcast("companion.message.complete", {
+                "message_id": msg_id, "companion_id": cid, "user_id": uid,
+                "text": "busy \u2014 try again in a moment",
             })
             return
         try:
@@ -389,10 +394,18 @@ class CompanionCoordinator:
             traceback.print_exc()
             self._broadcast("companion.message.complete", {
                 "message_id": msg_id, "companion_id": cid, "user_id": uid,
-                "text": f"(internal error: {type(e).__name__})",
+                "text": f"(internal error: {type(e).__name__}: {e})",
                 "error": str(e),
             })
         finally:
+            # Explicit typing clear so the UI never gets stuck.
+            try:
+                self._broadcast("companion.typing", {
+                    "companion_id": cid, "user_id": uid, "state": "idle",
+                    "message_id": msg_id,
+                })
+            except Exception:
+                pass
             self._busy.release()
 
     def _broadcast(self, msg_type: str, payload: dict) -> None:
