@@ -1201,7 +1201,7 @@ const VERDICT_COLORS = {
 };
 
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
-                             onView, filters, onFilterChange, loading,
+                             onView, loading,
                              onCompare, canCompare, compareInFlight, onGoToBacktest,
                              totalInStore, compact = false }) {
   const count = experiments?.length || 0;
@@ -1667,7 +1667,7 @@ function CompareResults({ report, experimentsById, onDismiss }) {
 }
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
-                       onView, onCompare, compareReport, loading, filters, onFilterChange,
+                       onView, onCompare, compareReport, loading,
                        compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
   // Step 1's "do you have any experiments" check is against the full store,
@@ -1800,8 +1800,6 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
           onClearSelection={onClearSelection}
           onRefresh={onRefresh}
           onView={onView}
-          filters={filters}
-          onFilterChange={onFilterChange}
           loading={loading}
           onCompare={onCompare}
           canCompare={canCompare}
@@ -1925,7 +1923,6 @@ export default function App() {
   const [observerClosed, setObserverClosed] = useState(false); // user dismissed → hide until a new run
   // Phase 10: experiment library + compare state
   const [libExperiments, setLibExperiments] = useState([]);    // full list from WS
-  const [libFilters, setLibFilters] = useState({});            // {status, triggered_by, tag}
   const [libLoading, setLibLoading] = useState(false);
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
@@ -2324,8 +2321,6 @@ export default function App() {
                   onCompare={runCompare}
                   compareReport={compareReport}
                   loading={libLoading}
-                  filters={libFilters}
-                  onFilterChange={setLibFilters}
                   compareInFlight={compareInFlight}
                   onGoToBacktest={() => setActiveTab("BACKTEST")}
                   totalInStore={libExperiments.length}
