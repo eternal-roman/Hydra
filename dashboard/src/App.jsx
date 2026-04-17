@@ -1513,8 +1513,14 @@ function CompareResults({ report, experimentsById }) {
   ];
 
   return (
+    // Bounded + internal scroll so a comparison with many experiments
+    // doesn't spill past the viewport. "flex: 0 1 auto" lets the library
+    // keep its space while this grows only as tall as needed (up to the
+    // maxHeight cap).
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 16, marginTop: 12 }}>
+                  borderRadius: 8, padding: 16, marginTop: 12,
+                  flex: "0 1 auto", minHeight: 0, maxHeight: "40vh",
+                  overflowY: "auto", overflowX: "hidden" }}>
       <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
                     marginBottom: 12 }}>
         Comparison
@@ -1541,9 +1547,12 @@ function CompareResults({ report, experimentsById }) {
             </tr>
           </thead>
           <tbody>
-            {report.rows.map((row) => (
+            {report.rows.map((row, idx) => (
               <tr key={row.experiment_id}
-                  style={{ borderBottom: `1px solid ${COLORS.bg}` }}>
+                  style={{ borderBottom: idx < report.rows.length - 1
+                             ? `1px solid ${COLORS.panelBorder}`
+                             : "none",
+                           background: idx % 2 === 1 ? `${COLORS.bg}50` : "transparent" }}>
                 <td style={{ padding: "10px 8px", minWidth: 160 }}>
                   <div style={{ color: COLORS.text, fontWeight: 600 }}>{row.name}</div>
                   <div style={{ color: COLORS.textMuted, fontSize: 11 }}>
