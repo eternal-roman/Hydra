@@ -13,6 +13,7 @@ from typing import Optional
 
 from hydra_companions.compiler import CompiledSoul
 from hydra_companions.intent_classifier import IntentClassifier, IntentResult
+from hydra_companions.memory import DistilledMemory
 from hydra_companions.providers import ProviderClient, ProviderResponse
 from hydra_companions.router import Router, RouteDecision
 from hydra_companions import tools_readonly
@@ -48,6 +49,8 @@ class Companion:
         self.serious_mode: bool = False  # broski-only, default off
         self._transcript_path = TRANSCRIPTS_DIR / f"{user_id}_{soul.id}.jsonl"
         self._load_transcript_tail()
+        # Phase 5: distilled memory (topic-bucketed facts)
+        self.memory = DistilledMemory(user_id=user_id, companion_id=soul.id)
 
     # ----- lifecycle -----
 
@@ -105,10 +108,14 @@ class Companion:
                 messages.append({"role": turn["role"], "content": turn["content"]})
         messages.append({"role": "user", "content": augmented})
 
+        # Phase 5: append distilled memory to the system prompt (per-turn).
+        memory_block = self.memory.compose_block()
+        system = self.soul.system_prompt + ("\n\n" + memory_block if memory_block else "")
+
         resp = self.provider.call(
             provider=decision.provider,
             model_id=decision.model_id,
-            system=self.soul.system_prompt,
+            system=system,
             messages=messages,
             max_tokens=decision.max_tokens,
             temperature=decision.temperature,
@@ -120,7 +127,7 @@ class Companion:
             if fb is not None:
                 resp2 = self.provider.call(
                     provider=fb.provider, model_id=fb.model_id,
-                    system=self.soul.system_prompt, messages=messages,
+                    system=system, messages=messages,
                     max_tokens=fb.max_tokens, temperature=fb.temperature,
                 )
                 if not resp2.error:

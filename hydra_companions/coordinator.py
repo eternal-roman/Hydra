@@ -294,6 +294,44 @@ class CompanionCoordinator:
         self._pending.pop(pid, None)
         return {"success": True}
 
+    # ----- Phase 5: memory API -----
+
+    def handle_remember(self, payload: dict) -> Optional[dict]:
+        cid = (payload.get("companion_id") or "apex").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        comp = self.get(cid, uid)
+        if comp is None:
+            return {"success": False, "error": f"unknown companion: {cid}"}
+        topic = payload.get("topic") or "general"
+        fact = payload.get("fact") or ""
+        if not fact.strip():
+            return {"success": False, "error": "fact required"}
+        comp.memory.remember(topic, fact)
+        return {"success": True, "companion_id": cid, "topic": topic.lower()}
+
+    def handle_recall(self, payload: dict) -> Optional[dict]:
+        cid = (payload.get("companion_id") or "apex").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        comp = self.get(cid, uid)
+        if comp is None:
+            return {"success": False, "error": f"unknown companion: {cid}"}
+        topic = payload.get("topic")
+        entries = comp.memory.recall(topic)
+        return {
+            "success": True, "companion_id": cid,
+            "entries": [{"ts": e.ts, "topic": e.topic, "fact": e.fact} for e in entries],
+        }
+
+    def handle_forget(self, payload: dict) -> Optional[dict]:
+        cid = (payload.get("companion_id") or "apex").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        comp = self.get(cid, uid)
+        if comp is None:
+            return {"success": False, "error": f"unknown companion: {cid}"}
+        topic = payload.get("topic")  # None = forget all
+        removed = comp.memory.forget(topic)
+        return {"success": True, "companion_id": cid, "removed": removed, "topic": topic}
+
     def handle_switch(self, payload: dict) -> Optional[dict]:
         """Return the new active companion's meta + history tail."""
         to = (payload.get("to_id") or payload.get("companion_id") or "apex").lower()
