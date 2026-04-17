@@ -312,17 +312,40 @@ const COMPANION_THEMES = {
 const COMPANION_ORDER = ["athena", "apex", "broski"];
 const COMPANION_NAMES = { athena: "Athena", apex: "Apex", broski: "Broski" };
 
-function CompanionOrb({ theme, onClick, regime, hasUnread, visible }) {
+// Per-soul rhythm + easing. Each companion breathes at their own pace
+// and shape — Athena is slow and deep (patient), Apex is steady and
+// precise (metronome), Broski is quick and slightly irregular (excited).
+// Regime acts as a subtle modulator on top: VOLATILE compresses the
+// cycle, RANGING stretches it, so the orb still tracks market state.
+const SOUL_RHYTHM = {
+  athena: { baseSeconds: 4.2, scaleMax: 1.045, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+  apex:   { baseSeconds: 2.9, scaleMax: 1.038, easing: "ease-in-out" },
+  broski: { baseSeconds: 2.1, scaleMax: 1.060, easing: "cubic-bezier(0.65, 0, 0.35, 1)" },
+};
+
+function CompanionOrb({ theme, onClick, regime, hasUnread, visible, soulId }) {
   if (!visible) return null;
-  const pulseDuration = regime === "VOLATILE" ? "1.8s"
-                     : regime === "RANGING"  ? "4.5s"
-                     : "3.2s";
+  const rhythm = SOUL_RHYTHM[soulId] || SOUL_RHYTHM.apex;
+  // Regime modulator: volatile compresses the cycle by ~25%, ranging
+  // stretches by ~25%. TREND_* leave it at the soul's base cadence.
+  const regimeMult = regime === "VOLATILE" ? 0.75 : regime === "RANGING" ? 1.25 : 1.0;
+  const pulseDuration = `${(rhythm.baseSeconds * regimeMult).toFixed(2)}s`;
+  // Base glow ring values bumped ~15% vs previous (16px/28px -> 18/32, plus
+  // a third outer halo layer for depth). Alpha nudged up too.
+  const restInset = `0 0 4px ${theme.primary}dd inset`;
+  const peakInset = `0 0 6px ${theme.primary}ff inset`;
+  const restGlow  = `0 0 18px ${theme.glow}80, 0 0 34px ${theme.glow}33`;
+  const peakGlow  = `0 0 32px ${theme.glow}c0, 0 0 56px ${theme.glow}55`;
+  // Broski gets an extra mid-cycle "catch" in the breathing curve so it
+  // feels a touch irregular. Apex and Athena are symmetric.
+  const breatheKeyframes = soulId === "broski"
+    ? `@keyframes hc-breathe-${soulId} { 0%,100% { transform: scale(1.00);} 42% { transform: scale(${rhythm.scaleMax});} 58% { transform: scale(${(1 + (rhythm.scaleMax - 1) * 0.85).toFixed(4)});} }`
+    : `@keyframes hc-breathe-${soulId} { 0%,100% { transform: scale(1.00);} 50% { transform: scale(${rhythm.scaleMax});} }`;
+  const glowKeyframes =
+    `@keyframes hc-glow-${soulId} { 0%,100% { box-shadow: ${restGlow}, ${restInset};} 50% { box-shadow: ${peakGlow}, ${peakInset};} }`;
   return (
     <>
-      <style>{`
-        @keyframes hc-breathe { 0%,100% { transform: scale(1.00);} 50% { transform: scale(1.04);} }
-        @keyframes hc-glow-pulse { 0%,100% { box-shadow: 0 0 16px ${theme.glow}66, 0 0 4px ${theme.primary}cc inset;} 50% { box-shadow: 0 0 28px ${theme.glow}aa, 0 0 6px ${theme.primary}ee inset;} }
-      `}</style>
+      <style>{breatheKeyframes}{glowKeyframes}</style>
       <button
         onClick={onClick}
         aria-label={`Open companion drawer`}
@@ -333,10 +356,10 @@ function CompanionOrb({ theme, onClick, regime, hasUnread, visible }) {
           background: `radial-gradient(circle at 35% 30%, ${theme.primary}, ${theme.primary}aa 55%, ${COLORS.panel})`,
           border: `2px solid ${theme.primary}`,
           cursor: "pointer", padding: 0,
-          animation: `hc-breathe ${pulseDuration} ease-in-out infinite, hc-glow-pulse ${pulseDuration} ease-in-out infinite`,
+          animation: `hc-breathe-${soulId} ${pulseDuration} ${rhythm.easing} infinite, hc-glow-${soulId} ${pulseDuration} ${rhythm.easing} infinite`,
           display: "flex", alignItems: "center", justifyContent: "center",
           color: COLORS.text, fontSize: 22, fontFamily: heading, fontWeight: 700,
-          textShadow: `0 0 8px ${theme.glow}`,
+          textShadow: `0 0 9px ${theme.glow}`,
         }}>
         <span style={{ pointerEvents: "none" }}>{theme.sigil}</span>
         {hasUnread && (
@@ -3576,6 +3599,7 @@ export default function App() {
         regime={state?.pairs ? (Object.values(state.pairs).map(p => p.regime).find(r => r === "VOLATILE") || "TREND") : "TREND"}
         hasUnread={companionUnread[activeCompanion]}
         visible={companionVisible && !companionDrawerOpen}
+        soulId={activeCompanion}
       />
       <CompanionDrawer
         open={companionDrawerOpen && companionVisible}
