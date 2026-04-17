@@ -1202,12 +1202,16 @@ const VERDICT_COLORS = {
 
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
                              onView, filters, onFilterChange, loading,
-                             onCompare, canCompare, compareInFlight }) {
+                             onCompare, canCompare, compareInFlight, onGoToBacktest }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
   const [filtersOpen, setFiltersOpen] = useState(false);
   const hasAdvancedFilters = !!(filters.triggered_by || filters.tag);
+  // Map selected IDs back to their rows so we can chip-render them by name.
+  const selectedRows = selectedIds
+    .map((id) => experiments.find((e) => e.id === id))
+    .filter(Boolean);
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
@@ -1371,6 +1375,48 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         )}
       </div>
 
+      {/* Selection chip bar — confirms which rows are selected by name, with a
+          per-chip deselect. Gives the user an explicit visual that selections
+          past 1 are registering. */}
+      {selCount > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6,
+                      padding: "8px 10px", marginBottom: 10,
+                      background: `${COLORS.purple}10`,
+                      border: `1px solid ${COLORS.purple}40`, borderRadius: 4 }}>
+          <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                         textTransform: "uppercase", letterSpacing: "0.08em",
+                         marginRight: 4 }}>
+            Selected ({selCount}/{maxSelect})
+          </span>
+          {selectedRows.map((e) => (
+            <span key={e.id}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6,
+                           padding: "3px 8px", borderRadius: 999,
+                           background: `${COLORS.purple}25`,
+                           border: `1px solid ${COLORS.purple}60`,
+                           color: COLORS.text, fontFamily: mono, fontSize: 11,
+                           fontWeight: 600 }}>
+              {e.name}
+              <button
+                onClick={() => onToggleSelect(e.id)}
+                title="Remove from selection"
+                style={{ background: "transparent", border: "none", padding: 0,
+                         color: COLORS.purple, cursor: "pointer",
+                         fontSize: 13, lineHeight: 1, fontFamily: mono }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          {selCount < 2 && (
+            <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.warn,
+                           marginLeft: 4 }}>
+              Tick at least one more row to enable Compare.
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Column legend — placed ABOVE the list so columns are labelled before you read them. */}
       {count > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
@@ -1390,9 +1436,43 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
 
       {/* List */}
       {count === 0 ? (
-        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                      padding: "40px 0", textAlign: "center" }}>
-          {loading ? "Loading…" : "No experiments yet. Submit a backtest from the BACKTEST tab, then return here."}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
+                      justifyContent: "center", gap: 14, padding: "48px 20px",
+                      textAlign: "center",
+                      background: COLORS.bg, border: `1px dashed ${COLORS.panelBorder}`,
+                      borderRadius: 6 }}>
+          {loading ? (
+            <div style={{ fontFamily: mono, fontSize: 13, color: COLORS.textDim }}>
+              Loading…
+            </div>
+          ) : (
+            <>
+              <div style={{ fontFamily: heading, fontSize: 16, fontWeight: 700,
+                            color: COLORS.text }}>
+                You don't have any experiments yet
+              </div>
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                            lineHeight: 1.5, maxWidth: 420 }}>
+                Compare needs at least two completed backtests. Head to the
+                BACKTEST tab, submit a run (or two), then come back here to
+                rank them side-by-side.
+              </div>
+              {onGoToBacktest && (
+                <button
+                  onClick={onGoToBacktest}
+                  style={{ padding: "10px 18px", fontSize: 13, fontFamily: mono,
+                           fontWeight: 700, letterSpacing: "0.1em",
+                           textTransform: "uppercase",
+                           background: COLORS.blue, color: "#0a0a0f",
+                           border: `1px solid ${COLORS.blue}`, borderRadius: 4,
+                           cursor: "pointer", outline: "none",
+                           boxShadow: `0 0 12px ${COLORS.blue}50` }}
+                >
+                  Go to Backtest Tab →
+                </button>
+              )}
+            </>
+          )}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
@@ -1620,7 +1700,7 @@ function CompareResults({ report, experimentsById }) {
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
                        onView, onCompare, compareReport, loading, filters, onFilterChange,
-                       compareInFlight }) {
+                       compareInFlight, onGoToBacktest }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
   const expCount = experiments?.length || 0;
   const hasEnoughForCompare = expCount >= 2;
@@ -1742,6 +1822,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         onCompare={onCompare}
         canCompare={canCompare}
         compareInFlight={compareInFlight}
+        onGoToBacktest={onGoToBacktest}
       />
 
       {/* Compare action row */}
@@ -2008,12 +2089,25 @@ export default function App() {
   }, [sendMessage]);
 
   const toggleSelectExperiment = useCallback((id) => {
+    if (!id) return;
     setCompareSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(0, 8)
     );
   }, []);
 
   const clearSelection = useCallback(() => setCompareSelected([]), []);
+
+  // Prune stale/ghost IDs from the selection whenever the library updates.
+  // Prevents a pre-selected experiment_id (from "Compare this run →") that
+  // hasn't landed in the server's list yet from occupying a slot silently.
+  useEffect(() => {
+    if (!Array.isArray(libExperiments) || libExperiments.length === 0) return;
+    const known = new Set(libExperiments.map((e) => e.id));
+    setCompareSelected((prev) => {
+      const kept = prev.filter((id) => known.has(id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [libExperiments]);
 
   // Debounce for compare and detail-fetch to prevent a trigger-happy user
   // from flooding the backend with duplicate requests before the ack lands.
@@ -2219,6 +2313,7 @@ export default function App() {
                   filters={libFilters}
                   onFilterChange={setLibFilters}
                   compareInFlight={compareInFlight}
+                  onGoToBacktest={() => setActiveTab("BACKTEST")}
                 />
               </div>
             )}
