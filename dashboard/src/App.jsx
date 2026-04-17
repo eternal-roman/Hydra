@@ -2309,7 +2309,7 @@ export default function App() {
                         color: aiBrain ? COLORS.blue : COLORS.textDim,
                         border: `1px solid ${aiBrain ? COLORS.blue : COLORS.panelBorder}`,
                         textTransform: "uppercase", letterSpacing: "0.1em" }}>
-            <QuantumIcon active={!!aiBrain}
+            <QuantumIcon active={!!aiBrain} size={18}
                          color={aiBrain ? COLORS.blue : COLORS.textDim} />
             {aiBrain ? "AI Brain" : "Engine Only"}
           </div>
