@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.7] — 2026-04-17
+
+Companion **Phase 4** — LadderWatcher with invalidation cancel. 2 s
+background poll monitors active ladders and cancels remaining unfilled
+rungs if price crosses invalidation in the wrong direction.
+
+### Added
+- `hydra_companions/ladder_watcher.py`: LadderWatcher daemon +
+  register/mark_fill/deregister.
+- LiveExecutor auto-registers ladders after placement.
+- `companion.ladder.invalidation_triggered` WS event for UI.
+- 7 new unit tests; 53 companion tests green.
+
+---
+
 ## [2.10.6] — 2026-04-17
 
 Companion **Phase 3** — live single-trade execution. Gated by
