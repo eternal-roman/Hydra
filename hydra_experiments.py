@@ -831,16 +831,32 @@ class ComparisonReport:
     pairwise_sharpe_p_values: Dict[Tuple[str, str], float] = field(default_factory=dict)
 
 
+def _finite_or_none(v: Any) -> Optional[float]:
+    """True if `v` is a real finite number. Handles None safely — persisted
+    experiments may round-trip non-finite floats back as None via
+    `_sanitize_json`."""
+    if v is None:
+        return None
+    try:
+        return v if math.isfinite(v) else None
+    except TypeError:
+        return None
+
+
 def _compare_metric_winner(rows: List[ComparisonRow], metric: str, higher_better: bool) -> str:
     """Return experiment_id with the best value for `metric`. Non-finite and
     zero-trade rows are eligible only if there are no alternatives."""
-    eligible = [r for r in rows if r.total_trades > 0 and math.isfinite(getattr(r, metric))]
+    eligible = [r for r in rows
+                if r.total_trades > 0 and _finite_or_none(getattr(r, metric)) is not None]
     pool = eligible if eligible else rows
-    best = pool[0]
-    for r in pool[1:]:
-        v = getattr(r, metric)
-        cur = getattr(best, metric)
-        if (higher_better and v > cur) or (not higher_better and v < cur):
+    # Pick the first row that has a comparable value so the seed isn't None.
+    best = next((r for r in pool if _finite_or_none(getattr(r, metric)) is not None), pool[0])
+    for r in pool:
+        v = _finite_or_none(getattr(r, metric))
+        cur = _finite_or_none(getattr(best, metric))
+        if v is None:
+            continue
+        if cur is None or (higher_better and v > cur) or (not higher_better and v < cur):
             best = r
     return best.experiment_id
 
@@ -866,13 +882,19 @@ def compare(experiments: List[Experiment]) -> ComparisonReport:
             ))
             continue
         m = e.result.metrics
+        # Persisted metrics can round-trip non-finite floats back as None
+        # (see _sanitize_json). Normalise every comparable field through
+        # _finite_or_none → 0.0 so ComparisonRow stays strictly numeric.
+        def _num(v):
+            f = _finite_or_none(v)
+            return f if f is not None else 0.0
         rows.append(ComparisonRow(
             experiment_id=e.id, name=e.name,
-            total_trades=m.total_trades,
-            total_return_pct=m.total_return_pct,
-            sharpe=m.sharpe,
-            max_drawdown_pct=m.max_drawdown_pct,
-            profit_factor=m.profit_factor if math.isfinite(m.profit_factor) else 0.0,
+            total_trades=m.total_trades or 0,
+            total_return_pct=_num(m.total_return_pct),
+            sharpe=_num(m.sharpe),
+            max_drawdown_pct=_num(m.max_drawdown_pct),
+            profit_factor=_num(m.profit_factor),
         ))
 
     winners = {

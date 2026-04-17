@@ -580,6 +580,15 @@ def _compact(exp: Experiment) -> Dict[str, Any]:
     """Minimal experiment summary for WS payloads."""
     m = exp.result.metrics if exp.result else None
     import math as _m
+    def _safe(v, digits=4):
+        """Round a field, but persisted experiments can round-trip non-finite
+        floats back as None — handle both here."""
+        if v is None:
+            return None
+        try:
+            return round(v, digits) if _m.isfinite(v) else None
+        except TypeError:
+            return None
     return {
         "id": exp.id,
         "name": exp.name,
@@ -590,10 +599,10 @@ def _compact(exp: Experiment) -> Dict[str, Any]:
         "tags": list(exp.tags),
         "metrics": ({
             "total_trades": m.total_trades,
-            "total_return_pct": round(m.total_return_pct, 4),
-            "sharpe": round(m.sharpe, 4),
-            "max_drawdown_pct": round(m.max_drawdown_pct, 4),
-            "profit_factor": round(m.profit_factor, 4) if _m.isfinite(m.profit_factor) else None,
+            "total_return_pct": _safe(m.total_return_pct),
+            "sharpe": _safe(m.sharpe),
+            "max_drawdown_pct": _safe(m.max_drawdown_pct),
+            "profit_factor": _safe(m.profit_factor),
         } if m else None),
     }
 

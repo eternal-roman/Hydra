@@ -1509,7 +1509,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      maxHeight: 420, overflowY: "auto" }}>
+                      maxHeight: "min(420px, 38vh)", overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
             const canSelect = selected || selCount < maxSelect;
