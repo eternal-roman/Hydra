@@ -416,6 +416,159 @@ function CompanionMessage({ m, theme, userTheme }) {
   );
 }
 
+// ─── Proposal cards (Phase 2+) ───
+function fmtPxShort(p) {
+  if (p == null) return "—";
+  return Number(p) < 100 ? Number(p).toFixed(4) : Number(p).toFixed(2);
+}
+
+function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onStatusReset }) {
+  // kind: "trade" | "ladder"
+  // status: null | "armed" | "submitting" | "filled" | "rejected" | "failed" | "expired"
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  const [armed, setArmed] = useState(false);
+  const armRef = useRef(null);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 250);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 5000);
+    armRef.current = t;
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  const ttlTotal = Math.max(1, (proposal.expires_at - proposal.created_at) || 60);
+  const remaining = Math.max(0, proposal.expires_at - now);
+  const pctLeft = Math.max(0, Math.min(1, remaining / ttlTotal));
+  const ttlColor = pctLeft > 0.5 ? theme.primary : pctLeft > 0.2 ? "#E5A84D" : "#E85C5C";
+  const expired = remaining <= 0;
+
+  const locked = !!status;  // once submitted/filled/rejected, disable buttons
+
+  const handlePrimary = () => {
+    if (locked || expired) return;
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    clearTimeout(armRef.current);
+    setArmed(false);
+    onConfirm();
+  };
+
+  const sideColor = proposal.side === "buy" ? "#4ADE80" : "#F87171";
+
+  return (
+    <div style={{
+      margin: "8px 0", border: `1px solid ${theme.primary}66`,
+      borderRadius: 10, overflow: "hidden",
+      background: `${theme.primary}10`,
+      opacity: expired && !status ? 0.55 : 1,
+      transition: "opacity 240ms",
+    }}>
+      {/* TTL bar */}
+      <div style={{ height: 3, background: `${theme.primary}22` }}>
+        <div style={{ height: "100%", width: `${pctLeft * 100}%`, background: ttlColor,
+                      transition: "width 250ms linear" }} />
+      </div>
+      <div style={{ padding: "10px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <span style={{
+            background: sideColor, color: "#0B1221", fontWeight: 700,
+            padding: "2px 8px", borderRadius: 4, fontFamily: mono,
+            fontSize: 10, letterSpacing: "0.08em",
+          }}>{proposal.side.toUpperCase()}</span>
+          <span style={{ color: COLORS.text, fontFamily: mono, fontSize: 12, fontWeight: 700 }}>
+            {proposal.pair}
+          </span>
+          <span style={{ color: COLORS.textMuted, fontFamily: mono, fontSize: 10, marginLeft: "auto" }}>
+            {kind === "ladder" ? `${proposal.rungs.length} rungs` : "1R"}
+          </span>
+        </div>
+
+        {kind === "trade" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px",
+                        fontSize: 11, fontFamily: mono, color: COLORS.text }}>
+            <div><span style={{ color: COLORS.textMuted }}>Size:</span> {proposal.size}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Limit:</span> ${fmtPxShort(proposal.limit_price)}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Stop:</span> ${fmtPxShort(proposal.stop_loss)}</div>
+            <div><span style={{ color: COLORS.textMuted }}>Cost:</span> ${fmtPxShort(proposal.estimated_cost)}</div>
+            <div style={{ gridColumn: "1 / span 2" }}>
+              <span style={{ color: COLORS.textMuted }}>Risk:</span>{" "}
+              ${Number(proposal.risk_usd || 0).toFixed(2)}
+              {proposal.risk_pct_equity ? ` (${Number(proposal.risk_pct_equity).toFixed(2)}% equity)` : ""}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginBottom: 4, fontFamily: mono }}>
+              total {proposal.total_size} \u00b7 stop ${fmtPxShort(proposal.stop_loss)} \u00b7 invalidate ${fmtPxShort(proposal.invalidation_price)}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "2px 8px",
+                          fontSize: 10, fontFamily: mono }}>
+              {proposal.rungs.flatMap((r, i) => [
+                <span key={`l-${i}`} style={{ color: COLORS.textMuted }}>R{i + 1}</span>,
+                <span key={`p-${i}`} style={{ color: COLORS.text }}>${fmtPxShort(r.limit_price)}</span>,
+                <span key={`w-${i}`} style={{ color: COLORS.textDim }}>{Math.round(r.pct_of_total * 100)}%</span>,
+              ])}
+            </div>
+          </div>
+        )}
+
+        {proposal.rationale && (
+          <div style={{ marginTop: 8, fontSize: 11, fontStyle: "italic",
+                        color: theme.accent, lineHeight: 1.35,
+                        borderLeft: `2px solid ${theme.primary}44`, paddingLeft: 8 }}>
+            "{proposal.rationale}"
+          </div>
+        )}
+
+        {status && (
+          <div style={{
+            marginTop: 8, padding: "4px 8px", borderRadius: 4, display: "inline-block",
+            background: status === "filled" ? "#4ADE8022"
+                     : status === "failed" || status === "rejected" ? "#F8717122"
+                     : `${theme.primary}22`,
+            color: status === "filled" ? "#4ADE80"
+                : status === "failed" || status === "rejected" ? "#F87171"
+                : theme.primary,
+            fontSize: 10, fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}>{status}</div>
+        )}
+
+        {!locked && !expired && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={handlePrimary} style={{
+              flex: 1, padding: "8px 12px", borderRadius: 5,
+              background: armed ? "#E85C5C" : theme.primary,
+              color: "#fff", border: "none", cursor: "pointer",
+              fontFamily: mono, fontSize: 11, fontWeight: 700,
+              letterSpacing: "0.08em", textTransform: "uppercase",
+              transition: "background 160ms",
+            }}>
+              {armed ? "\u25B6 send (5s)" : "arm"}
+            </button>
+            <button onClick={onReject} style={{
+              padding: "8px 12px", borderRadius: 5,
+              background: "transparent", color: COLORS.textMuted,
+              border: `1px solid ${COLORS.panelBorder}`, cursor: "pointer",
+              fontFamily: mono, fontSize: 11,
+            }}>reject</button>
+          </div>
+        )}
+        {expired && !locked && (
+          <div style={{ marginTop: 10, fontSize: 10, color: COLORS.textMuted, fontFamily: mono }}>
+            expired \u2014 ask again
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CompanionTypingBubble({ theme, name }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", margin: "6px 0" }}>
@@ -441,7 +594,7 @@ function CompanionTypingBubble({ theme, name }) {
 
 function CompanionDrawer({
   open, onClose, active, onSwitch, companions, messages, typing,
-  onSend, connected, drawerWidth, onResize, costAlerts,
+  onSend, onProposalConfirm, onProposalReject, connected, drawerWidth, onResize, costAlerts,
 }) {
   const theme = COMPANION_THEMES[active] || COMPANION_THEMES.apex;
   const [draft, setDraft] = useState("");
@@ -545,9 +698,23 @@ function CompanionDrawer({
             say hi to {name.toLowerCase()} \u2014 or type <code style={{ color: theme.accent }}>/help</code>
           </div>
         )}
-        {messages.map((m) => (
-          <CompanionMessage key={m.id} m={m} theme={theme} userTheme={COLORS.accent} />
-        ))}
+        {messages.map((m) => {
+          if (m.role === "proposal") {
+            return (
+              <ProposalCard
+                key={m.id}
+                proposal={m.proposal}
+                kind={m.kind || "trade"}
+                theme={theme}
+                status={m.status}
+                onConfirm={() => onProposalConfirm(m)}
+                onReject={() => onProposalReject(m)}
+                onStatusReset={() => {}}
+              />
+            );
+          }
+          return <CompanionMessage key={m.id} m={m} theme={theme} userTheme={COLORS.accent} />;
+        })}
         {typing && <CompanionTypingBubble theme={theme} name={name} />}
       </div>
 
@@ -2506,6 +2673,62 @@ export default function App() {
               }
               return;
             }
+            case "companion.trade.proposal":
+            case "companion.ladder.proposal": {
+              const cid = msg.companion_id;
+              const kind = msg.type === "companion.ladder.proposal" ? "ladder" : "trade";
+              if (cid) {
+                const proposalEntry = {
+                  id: msg.proposal_id,
+                  role: "proposal",
+                  kind,
+                  proposal: msg.card,
+                  token: msg.confirmation_token,
+                  nonce: msg.nonce,
+                  ttl: msg.ttl_expires_at,
+                  status: null,
+                };
+                setCompanionMessages((prev) => {
+                  const list = prev[cid] || [];
+                  return { ...prev, [cid]: [...list, proposalEntry].slice(-200) };
+                });
+                if (!companionDrawerOpen || activeCompanion !== cid) {
+                  setCompanionUnread((prev) => ({ ...prev, [cid]: true }));
+                }
+              }
+              return;
+            }
+            case "companion.trade.executed":
+            case "companion.ladder.executed": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionMessages((prev) => {
+                  const list = prev[cid] || [];
+                  return {
+                    ...prev,
+                    [cid]: list.map((m) => m.id === msg.proposal_id
+                      ? { ...m, status: msg.status || "filled" }
+                      : m),
+                  };
+                });
+              }
+              return;
+            }
+            case "companion.trade.failed": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionMessages((prev) => {
+                  const list = prev[cid] || [];
+                  return {
+                    ...prev,
+                    [cid]: list.map((m) => m.id === msg.proposal_id
+                      ? { ...m, status: "failed" }
+                      : m),
+                  };
+                });
+              }
+              return;
+            }
             case "companion.system_note": {
               // Could surface as a toast; for now append to active companion's thread as a muted note.
               const cid = activeCompanion;
@@ -2572,6 +2795,37 @@ export default function App() {
   // ─── Companion send/switch + connect kickoff ───
   const companionConnect = useCallback(() => {
     sendMessage({ type: "companion.connect", companion_id: activeCompanion });
+  }, [sendMessage, activeCompanion]);
+
+  const companionProposalConfirm = useCallback((m) => {
+    const type = m.kind === "ladder" ? "companion.ladder.confirm" : "companion.trade.confirm";
+    sendMessage({
+      type,
+      proposal_id: m.id,
+      confirmation_token: m.token,
+      nonce: m.nonce,
+      ttl_expires_at: m.ttl,
+    });
+    // Optimistic: mark submitting so buttons hide
+    setCompanionMessages((prev) => {
+      const list = prev[activeCompanion] || [];
+      return {
+        ...prev,
+        [activeCompanion]: list.map((x) => x.id === m.id ? { ...x, status: "submitting" } : x),
+      };
+    });
+  }, [sendMessage, activeCompanion]);
+
+  const companionProposalReject = useCallback((m) => {
+    const type = m.kind === "ladder" ? "companion.ladder.reject" : "companion.trade.reject";
+    sendMessage({ type, proposal_id: m.id });
+    setCompanionMessages((prev) => {
+      const list = prev[activeCompanion] || [];
+      return {
+        ...prev,
+        [activeCompanion]: list.map((x) => x.id === m.id ? { ...x, status: "rejected" } : x),
+      };
+    });
   }, [sendMessage, activeCompanion]);
 
   const companionSend = useCallback((text) => {
@@ -3281,6 +3535,8 @@ export default function App() {
         messages={companionMessages[activeCompanion] || []}
         typing={companionTyping[activeCompanion]}
         onSend={companionSend}
+        onProposalConfirm={companionProposalConfirm}
+        onProposalReject={companionProposalReject}
         connected={connected}
         drawerWidth={companionDrawerWidth}
         onResize={setCompanionDrawerWidth}

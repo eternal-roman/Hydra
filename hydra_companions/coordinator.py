@@ -23,10 +23,17 @@ from hydra_companions.compiler import load_all_souls
 from hydra_companions.companion import Companion
 from hydra_companions.config import (
     COMPANION_IDS, DEFAULT_USER_ID, ensure_runtime_dirs,
+    proposals_enabled, live_execution_enabled,
+)
+from hydra_companions.executor import (
+    LadderProposal, LadderRung, MockExecutor, ProposalValidator,
+    TradeProposal, new_ladder_id, new_proposal_id,
 )
 from hydra_companions.intent_classifier import IntentClassifier
 from hydra_companions.providers import ProviderClient
 from hydra_companions.router import Router
+from hydra_companions.tokens import TokenBroker
+import time
 
 
 MAX_WORKERS = 3
@@ -58,6 +65,19 @@ class CompanionCoordinator:
 
         # Bounded thread pool so one flood of messages can't spawn unbounded threads
         self._busy = threading.BoundedSemaphore(MAX_WORKERS)
+
+        # ─── Phase 2+: proposals ───
+        self.tokens = TokenBroker(ttl_seconds=60.0)
+        self.validator = ProposalValidator(agent=agent, router=self.router)
+        # MockExecutor is the default. Phase 3 swaps LiveExecutor in when
+        # live_execution_enabled() is true.
+        self.executor = MockExecutor(broadcaster=agent.broadcaster)
+        self._live_executor = None  # set by _maybe_install_live_executor()
+        # Pending proposals awaiting confirm (keyed by proposal_id).
+        self._pending: dict[str, tuple[str, object]] = {}   # id -> (kind, proposal)
+        # Daily trade-count per companion (for Phase 3 caps; tracked now for observability).
+        self._daily_trades: dict[tuple[str, str], int] = defaultdict(int)
+        self._maybe_install_live_executor()
 
     # ----- public -----
 
@@ -111,6 +131,151 @@ class CompanionCoordinator:
             target=self._run_turn, args=(comp, cid, uid, text, msg_id), daemon=True,
         )
         t.start()
+
+    # ----- Phase 2+: proposal flow -----
+
+    def _maybe_install_live_executor(self):
+        if not live_execution_enabled():
+            return
+        try:
+            from hydra_companions.live_executor import LiveExecutor
+            self._live_executor = LiveExecutor(agent=self.agent, coordinator=self)
+            self.executor = self._live_executor
+            print("  [COMPANION] live executor installed")
+        except Exception as e:
+            print(f"  [COMPANION] live executor install failed: {e}; staying on MockExecutor")
+
+    def handle_propose_trade(self, payload: dict) -> Optional[dict]:
+        if not proposals_enabled():
+            return {"success": False, "error": "proposals disabled (set HYDRA_COMPANION_PROPOSALS_ENABLED=1)"}
+        cid = (payload.get("companion_id") or "apex").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        try:
+            pair = str(payload["pair"])
+            side = str(payload["side"]).lower()
+            size = float(payload["size"])
+            limit_price = float(payload["limit_price"])
+            stop_loss = float(payload["stop_loss"])
+        except (KeyError, TypeError, ValueError) as e:
+            return {"success": False, "error": f"bad payload: {e}"}
+        rationale = str(payload.get("rationale") or "")
+        pid = new_proposal_id()
+        now = time.time()
+        bundle = self.tokens.mint(pid)
+        proposal = TradeProposal(
+            proposal_id=pid, companion_id=cid, user_id=uid,
+            pair=pair, side=side, size=size, limit_price=limit_price,
+            stop_loss=stop_loss, rationale=rationale,
+            created_at=now, expires_at=bundle.expires_at,
+            risk_usd=abs(limit_price - stop_loss) * size,
+            estimated_cost=size * limit_price,
+        )
+        # Compute risk_pct_equity now so the card can show it
+        eq = self.validator._current_equity_usd()
+        if eq > 0:
+            proposal = TradeProposal(**{**proposal.to_dict(),
+                                        "risk_pct_equity": (proposal.risk_usd / eq) * 100})
+        vr = self.validator.validate_trade(proposal)
+        if not vr.ok:
+            return {"success": False, "error": vr.reason, "proposal_id": pid}
+        self._pending[pid] = ("trade", proposal)
+        self._broadcast("companion.trade.proposal", {
+            "proposal_id": pid, "companion_id": cid, "user_id": uid,
+            "card": proposal.to_dict(),
+            "confirmation_token": bundle.token,
+            "nonce": bundle.nonce,
+            "ttl_expires_at": bundle.expires_at,
+        })
+        return {"success": True, "proposal_id": pid}
+
+    def handle_propose_ladder(self, payload: dict) -> Optional[dict]:
+        if not proposals_enabled():
+            return {"success": False, "error": "proposals disabled"}
+        cid = (payload.get("companion_id") or "apex").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        try:
+            pair = str(payload["pair"])
+            side = str(payload["side"]).lower()
+            total_size = float(payload["total_size"])
+            stop_loss = float(payload["stop_loss"])
+            invalidation_price = float(payload.get("invalidation_price") or stop_loss)
+            rungs_raw = payload["rungs"]
+            rungs = tuple(LadderRung(
+                pct_of_total=float(r["pct_of_total"]),
+                limit_price=float(r["limit_price"]),
+                offset_atr=float(r.get("offset_atr") or 0.0),
+            ) for r in rungs_raw)
+        except (KeyError, TypeError, ValueError) as e:
+            return {"success": False, "error": f"bad payload: {e}"}
+        rationale = str(payload.get("rationale") or "")
+        lid = new_ladder_id()
+        now = time.time()
+        bundle = self.tokens.mint(lid)
+        proposal = LadderProposal(
+            proposal_id=lid, companion_id=cid, user_id=uid,
+            pair=pair, side=side, total_size=total_size, rungs=rungs,
+            stop_loss=stop_loss, invalidation_price=invalidation_price,
+            rationale=rationale, created_at=now, expires_at=bundle.expires_at,
+            risk_usd=abs((rungs[0].limit_price if rungs else 0) - stop_loss) * total_size,
+        )
+        eq = self.validator._current_equity_usd()
+        if eq > 0:
+            proposal = LadderProposal(**{**proposal.to_dict(), "rungs": tuple(rungs),
+                                         "risk_pct_equity": (proposal.risk_usd / eq) * 100})
+        vr = self.validator.validate_ladder(proposal)
+        if not vr.ok:
+            return {"success": False, "error": vr.reason, "proposal_id": lid}
+        self._pending[lid] = ("ladder", proposal)
+        self._broadcast("companion.ladder.proposal", {
+            "proposal_id": lid, "companion_id": cid, "user_id": uid,
+            "card": proposal.to_dict(),
+            "confirmation_token": bundle.token,
+            "nonce": bundle.nonce,
+            "ttl_expires_at": bundle.expires_at,
+        })
+        return {"success": True, "proposal_id": lid}
+
+    def handle_confirm(self, payload: dict) -> Optional[dict]:
+        pid = payload.get("proposal_id")
+        token = payload.get("confirmation_token")
+        nonce = payload.get("nonce")
+        expires_at = payload.get("ttl_expires_at") or 0
+        if not pid or pid not in self._pending:
+            return {"success": False, "error": "unknown or expired proposal"}
+        if not self.tokens.verify(proposal_id=pid, token=token,
+                                  nonce=nonce, expires_at=expires_at):
+            self._pending.pop(pid, None)
+            return {"success": False, "error": "bad/expired token"}
+        kind, proposal = self._pending.pop(pid)
+        # Re-validate at confirm time (regime could have moved).
+        if kind == "trade":
+            vr = self.validator.validate_trade(proposal)
+        else:
+            vr = self.validator.validate_ladder(proposal)
+        if not vr.ok:
+            self._broadcast("companion.trade.failed", {
+                "proposal_id": pid, "companion_id": proposal.companion_id,
+                "reason": vr.reason,
+            })
+            return {"success": False, "error": vr.reason}
+        try:
+            if kind == "trade":
+                self.executor.execute_trade(proposal)
+            else:
+                self.executor.execute_ladder(proposal)
+            self._daily_trades[(proposal.user_id, proposal.companion_id)] += 1
+            return {"success": True, "proposal_id": pid}
+        except Exception as e:
+            self._broadcast("companion.trade.failed", {
+                "proposal_id": pid, "companion_id": proposal.companion_id,
+                "reason": f"{type(e).__name__}: {e}",
+            })
+            return {"success": False, "error": str(e)}
+
+    def handle_reject(self, payload: dict) -> Optional[dict]:
+        pid = payload.get("proposal_id")
+        self._pending.pop(pid, None)
+        return {"success": True}
 
     def handle_switch(self, payload: dict) -> Optional[dict]:
         """Return the new active companion's meta + history tail."""

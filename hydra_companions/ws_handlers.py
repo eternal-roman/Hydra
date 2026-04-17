@@ -23,3 +23,11 @@ def mount_companion_routes(broadcaster, coordinator) -> None:
     broadcaster.register_handler("companion.connect", on_connect)
     broadcaster.register_handler("companion.message", on_message)
     broadcaster.register_handler("companion.switch", on_switch)
+
+    # Phase 2+: proposals
+    broadcaster.register_handler("companion.propose.trade", lambda p: coordinator.handle_propose_trade(p))
+    broadcaster.register_handler("companion.propose.ladder", lambda p: coordinator.handle_propose_ladder(p))
+    broadcaster.register_handler("companion.trade.confirm", lambda p: coordinator.handle_confirm(p))
+    broadcaster.register_handler("companion.trade.reject", lambda p: coordinator.handle_reject(p))
+    broadcaster.register_handler("companion.ladder.confirm", lambda p: coordinator.handle_confirm(p))
+    broadcaster.register_handler("companion.ladder.reject", lambda p: coordinator.handle_reject(p))
