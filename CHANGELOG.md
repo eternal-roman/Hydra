@@ -6,6 +6,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.4] — 2026-04-17
+
+Companion subsystem — **Phase 1: read-only chat** (Athena / Apex /
+Broski). Fully functional chat experience behind
+`HYDRA_COMPANION_ENABLED=1`. Default OFF; with the flag unset the
+subsystem is entirely inert and v2.10.3 behaviour is preserved.
+
+### Added
+
+- `hydra_companions/` runtime package: deterministic soul compiler,
+  per-intent per-companion model router, heuristic intent classifier,
+  unified xAI+Anthropic provider shim, 6 read-only tools (live state,
+  pair metrics, positions, balance, recent trades, brain outputs),
+  Companion class (transcript + journal), CompanionCoordinator (thread
+  pool, daily USD budget tracking with 80% alert + 100% hard stop,
+  UTC-midnight rollover), WS route registration.
+- Agent integration: single env-gated init block in `HydraAgent.__init__`
+  with try/except isolation — any init failure leaves the live agent
+  completely unaffected.
+- Dashboard companion UI (all inline-styled, in `App.jsx`):
+  - **CompanionOrb** — 56×56 breathing orb, pulses in sync with market
+    regime (fast on VOLATILE, slow on RANGING); unread dot when a
+    message lands with the drawer closed; per-companion color themes.
+  - **CompanionDrawer** — 380px right-side slide-in with spring easing;
+    glassmorphism over the dashboard; Esc closes; persists open-state
+    and width in localStorage.
+  - **CompanionSwitcher** — 3-sigil strip in drawer header; one-click
+    voice swap; per-companion transcripts kept isolated.
+  - **MessageList** — message bubbles with companion-colored gutters;
+    staggered typing indicator while the turn is in flight; auto-scroll
+    to bottom on new messages.
+  - **Composer** — multiline input, Enter sends, Shift+Enter newline,
+    Esc closes, disabled while disconnected.
+  - Cost-alert banner inside the drawer when a companion hits 80% of
+    its daily USD budget.
+- 28 unit tests across compiler, router, classifier, tools_readonly.
+  All green.
+
+### Notes
+
+- Phase 1 is non-streaming — companion messages arrive as a single
+  complete reply. Streaming deltas are spec'd for Phase 6.
+- Phase 1 exposes no trade/ladder tools. Proposals + confirmations land
+  in Phase 2 behind `HYDRA_COMPANION_PROPOSALS_ENABLED=1`.
+- No changes to LIVE/BACKTEST/COMPARE tabs or existing components.
+
+---
+
 ## [2.10.3] — 2026-04-17
 
 Companion subsystem — **Phase 0: specification only.** No runtime code,
