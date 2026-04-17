@@ -1433,11 +1433,15 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
 
       {/* List */}
       {count === 0 ? (
+        // Flex-fill + overflow-hidden so the dashed-border dark panel always
+        // has symmetric breathing room inside the library panel, never
+        // clipped at the bottom regardless of available vertical space.
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
-                      justifyContent: "center", gap: 14, padding: "48px 20px",
+                      justifyContent: "center", gap: 14, padding: "32px 20px",
                       textAlign: "center",
                       background: COLORS.bg, border: `1px dashed ${COLORS.panelBorder}`,
-                      borderRadius: 6 }}>
+                      borderRadius: 6,
+                      flex: 1, minHeight: 0, overflow: "hidden" }}>
           {loading ? (
             <div style={{ fontFamily: mono, fontSize: 13, color: COLORS.textDim }}>
               Loading…
