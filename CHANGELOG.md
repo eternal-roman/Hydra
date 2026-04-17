@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.5] — 2026-04-17
+
+Companion **Phase 2** — proposals + TradeCard/LadderCard UI with
+mock execution. Gated by `HYDRA_COMPANION_PROPOSALS_ENABLED=1` on
+top of Phase 1's `HYDRA_COMPANION_ENABLED=1`.
+
+### Added
+- HMAC-SHA256 proposal tokens with 60 s TTL + nonce.
+- TradeProposal / LadderProposal dataclasses + hard-coded validator
+  (stop-first, price-band, risk cap, Kraken ordermin/costmin,
+  system-status gate). Re-validated at confirm time.
+- MockExecutor: journals to `.hydra-companions/proposals.jsonl` and
+  broadcasts `companion.trade.executed` so the UI renders the full
+  lifecycle without touching real orders.
+- Six new WS routes: `companion.propose.{trade,ladder}` +
+  `companion.{trade,ladder}.{confirm,reject}`.
+- **ProposalCard** (dashboard): inline-rendered in MessageList, no
+  modal. TTL bar, two-step Arm \u2192 Send with 5 s auto-disarm, status
+  pill transitions on submit/fill/reject/fail. Ladder variant shows
+  the rung table. 12 new unit tests; 40 companion tests green.
+
+---
+
 ## [2.10.4] — 2026-04-17
 
 Companion subsystem — **Phase 1: read-only chat** (Athena / Apex /
