@@ -1431,23 +1431,6 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       )}
 
-      {/* Column legend — placed ABOVE the list so columns are labelled before you read them. */}
-      {count > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
-                      gap: 6, marginBottom: 6, padding: "0 10px",
-                      fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                      textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600 }}>
-          <span />
-          <span>Name / ID</span>
-          <span style={{ textAlign: "right" }}>Status</span>
-          <span style={{ textAlign: "right" }}>Trades</span>
-          <span style={{ textAlign: "right" }}>Return</span>
-          <span style={{ textAlign: "right" }}>Sharpe</span>
-          <span style={{ textAlign: "right" }}>Max DD</span>
-          <span />
-        </div>
-      )}
-
       {/* List */}
       {count === 0 ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
@@ -1515,7 +1498,30 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      flex: 1, minHeight: 0, overflowY: "auto" }}>
+                      flex: 1, minHeight: 0, overflowY: "auto",
+                      scrollbarGutter: "stable" }}>
+          {/* Column legend — placed INSIDE the scroll container as a sticky
+              header so its horizontal bounds match the rows (same scrollbar
+              gutter, same effective width). Eliminates the "black inner
+              panel offset" where legend and rows drifted by the scrollbar
+              width. */}
+          <div style={{ display: "grid",
+                        gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
+                        gap: 6, padding: "0 10px 6px",
+                        fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                        textTransform: "uppercase", letterSpacing: "0.08em",
+                        fontWeight: 600,
+                        position: "sticky", top: 0, zIndex: 1,
+                        background: COLORS.panel }}>
+            <span />
+            <span>Name / ID</span>
+            <span style={{ textAlign: "right" }}>Status</span>
+            <span style={{ textAlign: "right" }}>Trades</span>
+            <span style={{ textAlign: "right" }}>Return</span>
+            <span style={{ textAlign: "right" }}>Sharpe</span>
+            <span style={{ textAlign: "right" }}>Max DD</span>
+            <span />
+          </div>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
             const canSelect = selected || selCount < maxSelect;
