@@ -258,6 +258,17 @@ class CompanionCoordinator:
                 "reason": vr.reason,
             })
             return {"success": False, "error": vr.reason}
+        # Daily cap check — enforcing when live execution is on.
+        if live_execution_enabled():
+            cap = self.router.safety_cap(proposal.companion_id, "max_trades_per_day", 0)
+            if cap > 0:
+                count = self._daily_trades.get((proposal.user_id, proposal.companion_id), 0)
+                if count >= cap:
+                    self._broadcast("companion.trade.failed", {
+                        "proposal_id": pid, "companion_id": proposal.companion_id,
+                        "reason": f"daily cap hit ({count}/{cap})",
+                    })
+                    return {"success": False, "error": f"daily cap hit ({count}/{cap})"}
         try:
             if kind == "trade":
                 self.executor.execute_trade(proposal)
