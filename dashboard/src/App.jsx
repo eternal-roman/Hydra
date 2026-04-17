@@ -301,7 +301,10 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
     { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
   ];
   return (
-    <div style={{ display: "flex", gap: 4, padding: "8px 0" }}>
+    // Gap: 10 puts visible air between each tab so the row breathes.
+    // minHeight: 38 + flex centers content to match the AI Brain pill's
+    // icon-bearing height exactly.
+    <div style={{ display: "flex", gap: 10, padding: "8px 0" }}>
       {tabs.map(t => {
         const active = activeTab === t.key;
         return (
@@ -309,9 +312,11 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
             key={t.key}
             onClick={() => onChange(t.key)}
             style={{
-              // Match the AI Brain pill's footprint so the header reads as a
-              // single row of equally-sized controls.
-              padding: "7px 14px",
+              padding: "0 18px",
+              minHeight: 38,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
               fontSize: 12,
               fontWeight: 700,
               fontFamily: mono,
@@ -2310,9 +2315,9 @@ export default function App() {
           <div title={aiBrain
                 ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
                 : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
-               style={{ padding: "7px 14px", borderRadius: 4, fontSize: 12, fontWeight: 700,
-                        fontFamily: mono,
-                        display: "flex", alignItems: "center", gap: 8,
+               style={{ padding: "0 14px", minHeight: 38, borderRadius: 4,
+                        fontSize: 12, fontWeight: 700, fontFamily: mono,
+                        display: "inline-flex", alignItems: "center", gap: 8,
                         background: aiBrain ? `${COLORS.blue}18` : "transparent",
                         color: aiBrain ? COLORS.blue : COLORS.textDim,
                         border: `1px solid ${aiBrain ? `${COLORS.blue}60` : COLORS.panelBorder}`,
