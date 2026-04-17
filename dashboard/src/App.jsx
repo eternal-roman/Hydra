@@ -71,6 +71,43 @@ const fmtInd = (v) => {
 
 // ─── Small Components ───
 
+// QuantumIcon — two nested orbit rings that fold in/out while a slower outer
+// group slowly rotates. Read "work is happening" without a spinner clichéd
+// look. Static (dimmed) when `active=false`. Keyframes live in index.css.
+function QuantumIcon({ active = true, size = 14, color }) {
+  const c = color || COLORS.blue;
+  const dim = !active;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24"
+         style={{ display: "inline-block", flexShrink: 0,
+                  opacity: dim ? 0.45 : 1,
+                  animation: dim ? "none" : "q-spin 6s linear infinite",
+                  transformOrigin: "12px 12px" }}
+         aria-hidden="true">
+        {/* Ring A — horizontal ellipse, folds first */}
+        <ellipse cx="12" cy="12" rx="10" ry="4"
+                 fill="none" stroke={c} strokeWidth="1.3"
+                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
+                          animation: dim ? "none" : "q-fold-a 2.4s ease-in-out infinite" }} />
+        {/* Ring B — 60° tilt, folds opposite phase */}
+        <ellipse cx="12" cy="12" rx="10" ry="4"
+                 fill="none" stroke={c} strokeWidth="1.3"
+                 transform="rotate(60 12 12)"
+                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
+                          animation: dim ? "none" : "q-fold-b 2.4s ease-in-out infinite" }} />
+        {/* Ring C — -60° tilt, offset delay for tri-phase feel */}
+        <ellipse cx="12" cy="12" rx="10" ry="4"
+                 fill="none" stroke={c} strokeWidth="1.3"
+                 transform="rotate(-60 12 12)"
+                 style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
+                          animation: dim ? "none" : "q-fold-a 2.4s ease-in-out -1.2s infinite" }} />
+        {/* Nucleus — subtle breath */}
+        <circle cx="12" cy="12" r="1.8" fill={c}
+                style={{ animation: dim ? "none" : "q-nucleus 2.4s ease-in-out infinite" }} />
+    </svg>
+  );
+}
+
 function StatCard({ label, value, unit, color = COLORS.text }) {
   return (
     <div style={{ padding: "12px 16px", background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, flex: "1 1 0" }}>
@@ -2241,8 +2278,16 @@ export default function App() {
           <div title={aiBrain
                 ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
                 : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
-               style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.panelBorder}60`, color: aiBrain ? COLORS.blue : COLORS.textDim, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.panelBorder}`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
-            {aiBrain ? "🧠 AI Brain" : "Engine Only"}
+               style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                        fontFamily: mono,
+                        display: "flex", alignItems: "center", gap: 8,
+                        background: aiBrain ? `${COLORS.blue}20` : `${COLORS.panelBorder}60`,
+                        color: aiBrain ? COLORS.blue : COLORS.textDim,
+                        border: `1px solid ${aiBrain ? COLORS.blue : COLORS.panelBorder}`,
+                        textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            <QuantumIcon active={!!aiBrain}
+                         color={aiBrain ? COLORS.blue : COLORS.textDim} />
+            {aiBrain ? "AI Brain" : "Engine Only"}
           </div>
           <ConnectionStatus connected={connected} tick={tick} />
           {elapsed > 0 && (

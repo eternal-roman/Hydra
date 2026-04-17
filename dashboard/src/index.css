@@ -19,3 +19,23 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* Quantum-flow icon — orbit rings "fold" in/out by flexing their rx while the
+   whole group slowly rotates, giving the impression of a system being worked.
+   Staggered animation-delays on the rings keep them out of phase. */
+@keyframes q-fold-a {
+  0%, 100% { transform: scaleX(1);    opacity: 0.95; }
+  50%      { transform: scaleX(0.15); opacity: 0.55; }
+}
+@keyframes q-fold-b {
+  0%, 100% { transform: scaleX(0.15); opacity: 0.55; }
+  50%      { transform: scaleX(1);    opacity: 0.95; }
+}
+@keyframes q-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes q-nucleus {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
