@@ -78,6 +78,12 @@ class CompanionCoordinator:
         # Daily trade-count per companion (for Phase 3 caps; tracked now for observability).
         self._daily_trades: dict[tuple[str, str], int] = defaultdict(int)
         self._maybe_install_live_executor()
+        # ─── Phase 4: ladder invalidation watcher ───
+        try:
+            from hydra_companions.ladder_watcher import LadderWatcher
+            self.ladder_watcher = LadderWatcher(agent=agent, broadcaster=agent.broadcaster)
+        except Exception:
+            self.ladder_watcher = None
 
     # ----- public -----
 
