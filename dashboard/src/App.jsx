@@ -99,11 +99,12 @@ function QuantumIcon({ active = true, size = 14, color }) {
                   opacity: dim ? 0.5 : 1 }}
          aria-hidden="true">
       {/* Guide rings — faint, static. Give the electrons an orbit the eye
-          can follow. */}
+          can follow. Slightly bolder (0.35 opacity, 1px stroke) so the atom
+          structure reads cleanly against the AI Brain pill's blue-tinted bg. */}
       {orbits.map((o, i) => (
         <ellipse key={`ring-${i}`}
                  cx="12" cy="12" rx="9" ry="3.5"
-                 fill="none" stroke={c} strokeOpacity="0.25" strokeWidth="0.8"
+                 fill="none" stroke={c} strokeOpacity="0.35" strokeWidth="1"
                  transform={`rotate(${o.tilt} 12 12)`} />
       ))}
       {/* Electrons — one per orbit, traveling its tilted ellipse. Each
@@ -111,7 +112,7 @@ function QuantumIcon({ active = true, size = 14, color }) {
           the canonical ellipse expressed in that tilted frame. */}
       {orbits.map((o, i) => (
         <g key={`e-${i}`} transform={`rotate(${o.tilt} 12 12)`}>
-          <circle r="1.4" fill={c}>
+          <circle r="1.7" fill={c}>
             {!dim && (
               <animateMotion
                 dur={o.dur} begin={o.phase} repeatCount="indefinite"
@@ -125,7 +126,7 @@ function QuantumIcon({ active = true, size = 14, color }) {
         </g>
       ))}
       {/* Nucleus — subtle breath via CSS keyframe. */}
-      <circle cx="12" cy="12" r="2" fill={c}
+      <circle cx="12" cy="12" r="2.4" fill={c}
               style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
                        animation: dim ? "none" : "q-nucleus 2.4s ease-in-out infinite" }} />
     </svg>
@@ -308,11 +309,13 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
             key={t.key}
             onClick={() => onChange(t.key)}
             style={{
-              padding: "6px 14px",
-              fontSize: 11,
+              // Match the AI Brain pill's footprint so the header reads as a
+              // single row of equally-sized controls.
+              padding: "7px 14px",
+              fontSize: 12,
               fontWeight: 700,
               fontFamily: mono,
-              letterSpacing: "0.12em",
+              letterSpacing: "0.1em",
               textTransform: "uppercase",
               background: active ? `${t.color}18` : "transparent",
               color: active ? t.color : COLORS.textDim,
@@ -2299,18 +2302,23 @@ export default function App() {
           {/* Mode pill — indicates whether the AI brain is attached on top of
               the engine. Prior copy was "AI LIVE" / "LIVE TRADING" which
               collided with the LIVE tab and the connection indicator. */}
+          {/* Pill dimensions (padding + fontSize + letterSpacing) match the
+              TabSwitcher buttons so the whole header reads as one consistent
+              row of controls. QuantumIcon uses COLORS.text (near-white) when
+              the brain is active so it pops cleanly against the blue-tinted
+              pill background instead of blending with the blue border/text. */}
           <div title={aiBrain
                 ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
                 : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
-               style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+               style={{ padding: "7px 14px", borderRadius: 4, fontSize: 12, fontWeight: 700,
                         fontFamily: mono,
                         display: "flex", alignItems: "center", gap: 8,
-                        background: aiBrain ? `${COLORS.blue}20` : `${COLORS.panelBorder}60`,
+                        background: aiBrain ? `${COLORS.blue}18` : "transparent",
                         color: aiBrain ? COLORS.blue : COLORS.textDim,
-                        border: `1px solid ${aiBrain ? COLORS.blue : COLORS.panelBorder}`,
+                        border: `1px solid ${aiBrain ? `${COLORS.blue}60` : COLORS.panelBorder}`,
                         textTransform: "uppercase", letterSpacing: "0.1em" }}>
             <QuantumIcon active={!!aiBrain} size={22}
-                         color={aiBrain ? COLORS.blue : COLORS.textDim} />
+                         color={aiBrain ? COLORS.text : COLORS.textDim} />
             {aiBrain ? "AI Brain" : "Engine Only"}
           </div>
           <ConnectionStatus connected={connected} tick={tick} />
