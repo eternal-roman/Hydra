@@ -382,6 +382,7 @@ function CompanionSwitcher({ active, companions, onSwitch }) {
 
 function CompanionMessage({ m, theme, userTheme }) {
   const isUser = m.role === "user";
+  const isProactive = m.proactive === true;
   return (
     <div style={{
       display: "flex", flexDirection: "column",
@@ -391,7 +392,7 @@ function CompanionMessage({ m, theme, userTheme }) {
       {!isUser && m.display_name && (
         <div style={{ fontSize: 9, color: theme.accent, fontFamily: mono,
                       letterSpacing: "0.08em", marginBottom: 2, marginLeft: 12, textTransform: "uppercase" }}>
-          {m.display_name}
+          {m.display_name}{isProactive ? " \u00b7 unprompted" : ""}
         </div>
       )}
       <div style={{
@@ -2657,6 +2658,7 @@ export default function App() {
                     error: msg.error,
                     intent: msg.intent,
                     model_used: msg.model_used,
+                    proactive: msg.proactive === true,
                   }];
                   return { ...prev, [cid]: next.slice(-200) };
                 });

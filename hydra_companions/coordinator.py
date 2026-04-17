@@ -85,6 +85,18 @@ class CompanionCoordinator:
         except Exception:
             self.ladder_watcher = None
 
+        # ─── Phase 6: proactive nudge scheduler ───
+        self.nudge_scheduler = None
+        try:
+            from hydra_companions.config import nudges_enabled
+            if nudges_enabled():
+                from hydra_companions.nudge_scheduler import NudgeScheduler
+                self.nudge_scheduler = NudgeScheduler(coordinator=self, agent=agent)
+                self.nudge_scheduler.start()
+                print("  [COMPANION] nudge scheduler started")
+        except Exception as e:
+            print(f"  [COMPANION] nudge scheduler init failed: {e}")
+
     # ----- public -----
 
     def get(self, companion_id: str, user_id: str = DEFAULT_USER_ID) -> Optional[Companion]:
@@ -118,6 +130,8 @@ class CompanionCoordinator:
         msg_id = payload.get("message_id") or str(uuid.uuid4())
         if not text:
             return
+        if self.nudge_scheduler is not None:
+            self.nudge_scheduler.record_user_activity()
         comp = self.get(cid, uid)
         if comp is None:
             self._broadcast("companion.system_note", {
