@@ -1889,38 +1889,10 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         compact={!!compareReport}
       />
 
-      {/* Compare action row */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                    marginTop: 12, padding: "12px 16px",
-                    background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                    borderRadius: 8 }}>
-        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
-          {selectedIds.length === 0 ? (
-            "Check 2–8 experiments above to enable compare."
-          ) : selectedIds.length === 1 ? (
-            <>1 selected — <span style={{ color: COLORS.warn }}>need at least 2 to compare</span></>
-          ) : (
-            <>
-              <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
-              {" "}selected · ready to compare
-            </>
-          )}
-        </div>
-        <button
-          onClick={onCompare}
-          disabled={!canCompare}
-          style={{ padding: "10px 20px", fontSize: 13, fontWeight: 700, fontFamily: mono,
-                   textTransform: "uppercase", letterSpacing: "0.1em",
-                   background: canCompare ? COLORS.purple : COLORS.panelBorder,
-                   color: canCompare ? "#0a0a0f" : COLORS.textMuted,
-                   border: `1px solid ${canCompare ? COLORS.purple : COLORS.panelBorder}`,
-                   borderRadius: 4, cursor: canCompare ? "pointer" : "not-allowed",
-                   outline: "none",
-                   boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
-        >
-          {compareInFlight ? "Comparing…" : "Compare →"}
-        </button>
-      </div>
+      {/* Compare action row removed — the inline Compare button in the
+          library header + the selection chip bar + the guided stepper Step 3
+          already cover both the action and the "N selected · ready" status,
+          so the separate action-row panel was just eating vertical room. */}
 
       {compareReport && compareReport.success ? (
         <CompareResults report={compareReport}
