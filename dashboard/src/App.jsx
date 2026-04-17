@@ -1220,9 +1220,14 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
     .filter(Boolean);
 
   return (
+    // `overflow: hidden` clips the internal row list to the panel's rounded
+    // border-radius so rows never visually escape past the panel edge, even
+    // under rapid viewport resize. The row list still scrolls internally
+    // via its own overflowY: auto.
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                   borderRadius: 8, padding: 16,
-                  display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
+                  display: "flex", flexDirection: "column",
+                  minHeight: 0, flex: 1, overflow: "hidden" }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                     marginBottom: 14 }}>
@@ -1785,7 +1790,8 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
     // whatever vertical space remains. Kills the "vertical wobble" caused by
     // multiple elements competing for page height.
     <div style={{ display: "flex", flexDirection: "column",
-                   height: "calc(100vh - 120px)", minHeight: 0, gap: 0 }}>
+                   height: "calc(100vh - 160px)", minHeight: 0, gap: 0,
+                   overflow: "hidden" }}>
       {/* How-it-works banner — spells out the COMPARE workflow as discrete,
           left-justified steps so a first-time user knows what to do.
           Stays visible even after running a comparison — the stepper doubles
