@@ -712,6 +712,76 @@ def scenario_Hp6_ordermin_sell_regression(h: Harness):
     scenario_E6_ordermin_partial_sell_forces_full_close(h)
 
 
+def scenario_Hp7_sol_btc_info_only_no_placement(h: Harness):
+    """v2.11.0: SOL/BTC with tradable=False must never reach the placement
+    path, regardless of signal strength. This scenario reproduces the
+    journal failure observed on 2026-04-17 (three consecutive
+    PLACEMENT_FAILED:insufficient_BTC_balance entries on SOL/BTC) and
+    asserts the fix: engine.execute_signal returns None, no _place_order
+    call occurs, no journal entry is written.
+
+    Harness cost: zero exchange-facing calls — the assertion is that
+    `harness_execute` short-circuits at the engine layer."""
+    agent = h.new_agent(pairs=["SOL/BTC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "SOL/BTC", base_price=0.001160)
+    engine = agent.engines["SOL/BTC"]
+
+    # Simulate the v2.11.0 real-holding gate: no BTC in the account.
+    # In production, _set_engine_balances / _refresh_tradable_flags would
+    # set this; we set it directly so the scenario is hermetic.
+    engine.tradable = False
+    engine.balance = 0.0
+
+    count_before = len(agent.order_journal)
+    report = harness_execute(agent, "SOL/BTC", "BUY", 0.85,
+                             "Hp7 phantom-BTC regression — oversold SOL/BTC")
+
+    assert report["outcome"] == "engine_rejected", (
+        f"Hp7: tradable=False engine must reject BUY at engine layer; "
+        f"got {report['outcome']!r}"
+    )
+    assert report["trade"] is None
+    assert len(agent.order_journal) == count_before, (
+        "Hp7: no journal entry should be written for an info-only engine — "
+        "the PLACEMENT_FAILED loop from 2026-04-17 is gone"
+    )
+
+
+def scenario_Hp8_tradable_reactivates_on_btc_arrival(h: Harness):
+    """v2.11.0: when BTC arrives mid-session (e.g. after a BTC/USDC fill),
+    _refresh_tradable_flags must re-enable the SOL/BTC engine with a
+    clean equity baseline. Exercises the False→True transition that lets
+    the operator organically grow into SOL/BTC trading without restarting."""
+    agent = h.new_agent(pairs=["SOL/BTC"], paper=False, initial_balance=200.0)
+    h.seed_candles(agent, "SOL/BTC", base_price=0.001160)
+    engine = agent.engines["SOL/BTC"]
+
+    # Start info-only — no BTC.
+    engine.tradable = False
+    engine.balance = 0.0
+    engine.peak_equity = 0.0
+    agent._cached_balance = {"USDC": 200.0}
+
+    # NullBalanceStream-equivalent: we'll fall through to _cached_balance.
+    class _NullStream:
+        healthy = False
+        def latest_balances(self):
+            return {}
+    agent.balance_stream = _NullStream()
+
+    # BTC arrives.
+    agent._cached_balance = {"USDC": 130.0, "XXBT": 0.0010}
+    agent._refresh_tradable_flags()
+
+    assert engine.tradable is True, "Hp8: engine must flip to tradable once BTC is held"
+    assert abs(engine.balance - 0.0010) < 1e-12, (
+        f"Hp8: engine balance must equal real BTC holding; got {engine.balance}"
+    )
+    # Clean equity baseline — drawdown counter reset.
+    assert engine.max_drawdown == 0.0
+    assert engine.equity_history == []
+
+
 # ═════════════════════════════════════════════════════════════════
 # Category W — WS execution stream lifecycle transitions
 # ═════════════════════════════════════════════════════════════════
@@ -1128,6 +1198,8 @@ ALL_SCENARIOS: list[Scenario] = [
     Scenario("Hp4", "88797ca: break-even counts as loss", "H_prime", MOCK, scenario_Hp4_break_even_counts_as_loss),
     Scenario("Hp5", "9e652d5: txid-as-list regression", "H_prime", MOCK, scenario_Hp5_txid_as_list_regression),
     Scenario("Hp6", "35a134d: ordermin on sell regression", "H_prime", MOCK, scenario_Hp6_ordermin_sell_regression),
+    Scenario("Hp7", "v2.11.0: SOL/BTC info-only blocks phantom placement", "H_prime", MOCK, scenario_Hp7_sol_btc_info_only_no_placement),
+    Scenario("Hp8", "v2.11.0: tradable re-activates on BTC arrival", "H_prime", MOCK, scenario_Hp8_tradable_reactivates_on_btc_arrival),
 
     # Category W — WS execution stream lifecycle
     Scenario("W1", "WS full fill -> FILLED", "W", MOCK, scenario_W1_ws_full_fill),

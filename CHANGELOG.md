@@ -6,6 +6,121 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.11.0] — 2026-04-17
+
+SOL/BTC phantom-balance fix — thesis-driven confluence architecture.
+
+### Context
+
+On 2026-04-17 the live journal accumulated three `PLACEMENT_FAILED`
+entries on SOL/BTC with `terminal_reason: insufficient_BTC_balance`.
+The account holds zero BTC; only USDC. The SOL/BTC engine had been
+sizing BUYs against a USD-derived "phantom" BTC balance produced by
+`_set_engine_balances` splitting the USDC pool 1/N across pairs and
+converting the SOL/BTC slice to BTC at the current price. Every
+oversold RSI tick re-attempted the same doomed trade — the preflight
+rejection rolled back engine state, so nothing learned from the failure.
+
+### Thesis (user-authored, formally verified)
+
+SOL/BTC is a rotation / relative-value pair. A BUY is economically
+actionable only for a BTC holder (rotate BTC → SOL at a favorable
+ratio); a SELL only for a SOL holder who wants BTC. For a USDC-only
+portfolio, bridging (USDC → BTC → SOL) is strictly dominated by
+direct SOL/USDC because a SOL/BTC signal is satisfied by either SOL
+weakness OR BTC strength, and bridging a BTC leg under "BTC strength"
+buys at the indicator-confirmed local high. SOL/BTC retains value as
+a **confluence signal** — when SOL/BTC and SOL/USDC agree and the two
+pairs are co-moving, that's stronger evidence than either alone.
+
+### Added
+
+- **`HydraEngine.tradable: bool`** (hydra_engine.py) — new attribute
+  gating the execution path. When `False`, `_maybe_execute` and
+  `execute_signal` short-circuit to `None`; the drawdown circuit
+  breaker is suppressed; signal generation still runs normally so
+  other pairs can consume the signal. Preserved across
+  snapshot/restore (defaults to `True` on pre-2.11.0 snapshots for
+  backward compatibility). Pure-Python, zero dependency change.
+- **`CrossPairCoordinator` Rule 4 — BUY/SELL signal confluence**
+  (hydra_engine.py): when SOL/BTC and SOL/USDC emit the same
+  non-HOLD action AND their log-return correlation over the last
+  60 candles exceeds `CO_MOVE_THRESHOLD` (0.5), boost SOL/USDC
+  confidence by a covariance-weighted bonus capped at `+0.10`. SELL
+  confluence is further gated on holding a SOL position (symmetric
+  with Rule 3). Emits an `ADJUST` override with a
+  `confluence_source` field carrying
+  `{source_pair, rho, bonus, other_conf, window}` for traceability.
+- **Covariance helpers** (hydra_engine.py): `_log_returns`,
+  `pair_correlation`, `confluence_bonus` as static methods on
+  `CrossPairCoordinator`. Stdlib-only (honors the no-numpy engine
+  invariant). Safe on insufficient data or zero-variance series —
+  returns `0.0` rather than raising.
+- **`HydraAgent._refresh_tradable_flags`** (hydra_agent.py): called
+  once per live tick before signal generation. Reads the latest
+  `BalanceStream.latest_balances()` snapshot and flips each non-USD
+  pair's `tradable` flag based on whether we hold enough of the
+  quote currency to clear `PositionSizer.MIN_COST[quote]`.
+  Transitions are logged exactly once. On `False → True`
+  (e.g. a BTC/USDC BUY just filled), the engine's balance and
+  equity baselines are re-seeded from the real holding so the
+  circuit breaker starts clean. Cheap: one dict lookup per pair.
+- **Journal `confluence_source` field** (hydra_agent.py
+  `_build_journal_entry`): persists Rule 4 metadata at the top of
+  the `decision` block so downstream analytics and the dashboard
+  can surface co-movement provenance without unwrapping the
+  override dict.
+- **Dashboard `INFO-ONLY` badge + `ρ` confluence chip**
+  (dashboard/src/App.jsx): the pair header renders a warn-colored
+  `INFO-ONLY` chip when `state.tradable === false`, and the signal
+  panel renders an accent-colored `ρ=0.xx ↑ +0.yyy` chip on trades
+  that received a Rule 4 boost.
+
+### Changed
+
+- **`HydraAgent._set_engine_balances`** (hydra_agent.py) now uses the
+  real exchange balance of the quote currency for non-USD-quoted
+  pairs instead of a USD-derived conversion. Pairs whose quote
+  balance is below the exchange `costmin` are marked
+  `tradable=False`. USDC-quoted pairs continue to receive a 1/N
+  slice of the tradable USDC pool. Engines with existing positions
+  still compute `initial_balance = cash + position_value` so P&L
+  resets cleanly.
+- **Placement preflight log** (hydra_agent.py `_place_order`): when
+  the real-balance check fires on a `tradable=True` non-USD pair —
+  a case that should be unreachable after this release — the log
+  line is now `[TRADE] Unexpected insufficient {quote} balance on
+  tradable=True engine {pair} — likely BalanceStream race or
+  regression` so regressions surface immediately.
+- **Dashboard broadcast state** (hydra_agent.py
+  `_build_dashboard_state`) attaches a `tradable: bool` to each
+  per-pair state entry.
+
+### Invariants preserved
+
+- Backtest replay engines default to `tradable=True`; the drift
+  regression (`tests/test_backtest_drift.py`, invariant I7) stays
+  green without modification.
+- `PositionSizer` is unchanged — its existing `balance < costmin →
+  return 0.0` behavior naturally composes with `balance = 0` on
+  informational-only engines.
+- No changes to `_execute_coordinated_swap` or Rules 1–3 of the
+  coordinator. Rule 4 is strictly additive and skips when Rule 3
+  produces an override for the same pair.
+- Rate limiting, limit post-only, single-file dashboard, pure-Python
+  engine, one-engine-per-pair: all unchanged.
+
+### Tests
+
+New: `TestTradableFlag` (tests/test_engine.py), `TestRule4Confluence`
+(tests/test_cross_pair.py), `tests/test_covariance.py`,
+`test_sol_btc_info_only_when_no_btc` (tests/test_balance.py), plus
+the corresponding live-harness scenario in
+`tests/live_harness/scenarios.py`. Full regression suite remains
+green.
+
+---
+
 ## [2.10.11] — 2026-04-17
 
 Companion subsystem — end-of-day release-readiness audit + bug pass.
