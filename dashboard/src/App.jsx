@@ -2895,24 +2895,10 @@ export default function App() {
       const [cmd, ...rest] = trimmed.slice(1).split(/\s+/);
       const arg = rest.join(" ").trim();
 
-      // Echo the user command immediately
-      setCompanionMessages((prev) => {
-        const list = prev[cid] || [];
-        return { ...prev, [cid]: [...list, { id: msgId, role: "user", text }].slice(-200) };
+      const sysNote = (note) => ({
+        id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        role: "system", text: note,
       });
-
-      const addSystem = (targetCid, note) => {
-        setCompanionMessages((prev) => {
-          const list = prev[targetCid] || [];
-          return {
-            ...prev,
-            [targetCid]: [...list, {
-              id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              role: "system", text: note,
-            }].slice(-200),
-          };
-        });
-      };
 
       if (cmd === "clear") {
         const scope = arg === "all" ? "all" : "one";
@@ -2920,23 +2906,38 @@ export default function App() {
           type: "companion.transcript.clear",
           companion_id: cid, scope,
         });
+        // Single atomic update \u2014 no echo preserved, just the system note.
         if (scope === "all") {
-          setCompanionMessages({ athena: [], apex: [], broski: [] });
-          addSystem(cid, "(all three transcripts cleared)");
+          setCompanionMessages({
+            athena: [sysNote("(all three transcripts cleared)")],
+            apex:   [],
+            broski: [],
+          });
         } else {
-          setCompanionMessages((prev) => ({ ...prev, [cid]: [] }));
-          addSystem(cid, "(transcript cleared)");
+          setCompanionMessages((prev) => ({
+            ...prev,
+            [cid]: [sysNote("(transcript cleared)")],
+          }));
         }
         return;
       }
 
       if (cmd === "help") {
-        addSystem(cid,
-          "commands:\n" +
-          "  /clear        \u2014 clear this companion's transcript\n" +
-          "  /clear all    \u2014 clear all three transcripts\n" +
-          "  /help         \u2014 show this list"
-        );
+        setCompanionMessages((prev) => {
+          const list = prev[cid] || [];
+          return {
+            ...prev,
+            [cid]: [...list,
+              { id: msgId, role: "user", text },
+              sysNote(
+                "commands:\n" +
+                "  /clear        \u2014 clear this companion's transcript\n" +
+                "  /clear all    \u2014 clear all three transcripts\n" +
+                "  /help         \u2014 show this list"
+              ),
+            ].slice(-200),
+          };
+        });
         return;
       }
 
