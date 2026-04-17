@@ -138,10 +138,16 @@ class Companion:
             temperature=decision.temperature,
         )
 
-        # Fallback on error
+        # Fallback cascade on error — walk the whole fallback chain until
+        # one provider responds without error, or all candidates exhausted.
         if resp.error:
-            fb = self.router.fallback(decision)
-            if fb is not None:
+            tried = [f"{decision.provider}:{decision.model_id}"]
+            current = decision
+            for _ in range(4):  # hard cap so we never loop forever
+                fb = self.router.fallback(current, already_tried=tried)
+                if fb is None:
+                    break
+                tried.append(f"{fb.provider}:{fb.model_id}")
                 resp2 = self.provider.call(
                     provider=fb.provider, model_id=fb.model_id,
                     system=system, messages=messages,
@@ -150,6 +156,8 @@ class Companion:
                 if not resp2.error:
                     resp = resp2
                     decision = fb
+                    break
+                current = fb
 
         self._log_routing(intent_result, decision, resp)
         self._log_cost(resp)

@@ -118,12 +118,15 @@ class ProposalValidator:
         return getattr(self.agent, "kraken_cli", None)
 
     def _system_healthy(self) -> ValidationResult:
-        snap = getattr(self.agent.broadcaster, "latest_state", {}) or {}
-        status = snap.get("kraken_status")
+        # Kraken status is an agent-level attribute, not in the broadcaster
+        # snapshot. Walk the agent directly.
+        status = getattr(self.agent, "_last_kraken_status", None)
         if status in ("maintenance", "cancel_only"):
             return ValidationResult.bad(f"kraken status: {status}")
-        for pair, pdata in (snap.get("pairs") or {}).items():
-            if (pdata or {}).get("halted"):
+        # Engine halts (circuit breaker) live on the engine instances.
+        engines = getattr(self.agent, "engines", {}) or {}
+        for pair, engine in engines.items():
+            if getattr(engine, "halted", False):
                 return ValidationResult.bad(f"{pair}: engine halted")
         return ValidationResult.good()
 

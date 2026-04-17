@@ -33,7 +33,6 @@ from hydra_companions.intent_classifier import IntentClassifier
 from hydra_companions.providers import ProviderClient
 from hydra_companions.router import Router
 from hydra_companions.tokens import TokenBroker
-import time
 
 
 MAX_WORKERS = 3
@@ -279,11 +278,14 @@ class CompanionCoordinator:
                 "reason": vr.reason,
             })
             return {"success": False, "error": vr.reason}
-        # Daily cap check — enforcing when live execution is on.
+        # Daily cap check — enforcing when live execution is on. Reading
+        # through the lock + rollover so the counter resets at UTC midnight.
         if live_execution_enabled():
             cap = self.router.safety_cap(proposal.companion_id, "max_trades_per_day", 0)
             if cap > 0:
-                count = self._daily_trades.get((proposal.user_id, proposal.companion_id), 0)
+                with self._cost_lock:
+                    self._maybe_rollover()
+                    count = self._daily_trades.get((proposal.user_id, proposal.companion_id), 0)
                 if count >= cap:
                     self._broadcast("companion.trade.failed", {
                         "proposal_id": pid, "companion_id": proposal.companion_id,
@@ -295,7 +297,9 @@ class CompanionCoordinator:
                 self.executor.execute_trade(proposal)
             else:
                 self.executor.execute_ladder(proposal)
-            self._daily_trades[(proposal.user_id, proposal.companion_id)] += 1
+            with self._cost_lock:
+                self._maybe_rollover()
+                self._daily_trades[(proposal.user_id, proposal.companion_id)] += 1
             return {"success": True, "proposal_id": pid}
         except Exception as e:
             self._broadcast("companion.trade.failed", {
@@ -472,6 +476,7 @@ class CompanionCoordinator:
         if today != self._day_key:
             self._daily_costs.clear()
             self._alert_fired.clear()
+            self._daily_trades.clear()  # trade-count rollover happens here too
             self._day_key = today
 
 

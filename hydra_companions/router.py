@@ -69,21 +69,29 @@ class Router:
             intent=intent, companion_id=companion_id,
         )
 
-    def fallback(self, decision: RouteDecision) -> Optional[RouteDecision]:
-        """Return the next provider/model to try after a failure, or None if exhausted."""
+    def fallback(self, decision: RouteDecision,
+                 already_tried: Optional[list] = None) -> Optional[RouteDecision]:
+        """Return the next provider/model to try after a failure.
+
+        `already_tried` is a list of "provider:model_id" strings the caller
+        has already attempted. Returns None if the chain is exhausted.
+        Callers should pass the running attempt list so we walk past
+        candidates that also failed.
+        """
+        already = set(already_tried or [])
+        already.add(f"{decision.provider}:{decision.model_id}")
         full_id = f"{decision.provider}:{decision.model_id}"
         chain = self._fallbacks.get(full_id, [])
-        if not chain:
-            return None
-        # Take the first entry we haven't already tried. For simplicity,
-        # the caller tracks attempts; here we return the first candidate
-        # and callers rotate if needed.
-        provider, model = _split_model_id(chain[0])
-        return RouteDecision(
-            provider=provider, model_id=model,
-            max_tokens=decision.max_tokens, temperature=decision.temperature,
-            intent=decision.intent, companion_id=decision.companion_id,
-        )
+        for candidate in chain:
+            if candidate in already:
+                continue
+            provider, model = _split_model_id(candidate)
+            return RouteDecision(
+                provider=provider, model_id=model,
+                max_tokens=decision.max_tokens, temperature=decision.temperature,
+                intent=decision.intent, companion_id=decision.companion_id,
+            )
+        return None
 
     def safety_cap(self, companion_id: str, key: str, default=None):
         return self._caps.get(companion_id, {}).get(key, default)

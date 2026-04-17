@@ -48,6 +48,31 @@ def test_fallback_chain_returns_other_provider():
     assert (fb.provider, fb.model_id) != (primary.provider, primary.model_id)
 
 
+def test_fallback_cascade_walks_past_tried_candidates():
+    """If the first fallback was already attempted, return the next one."""
+    r = Router()
+    primary = r.pick("athena", "teaching_explanation")  # anthropic:claude-sonnet-4-6
+    fb1 = r.fallback(primary)
+    # Simulate fb1 also failed; ask for the next one.
+    tried = [f"{primary.provider}:{primary.model_id}",
+             f"{fb1.provider}:{fb1.model_id}"]
+    fb2 = r.fallback(fb1, already_tried=tried)
+    # For anthropic's chain (xai fast-reasoning, xai reasoning), fb2 should differ from fb1.
+    if fb2 is not None:
+        assert (fb2.provider, fb2.model_id) != (fb1.provider, fb1.model_id)
+
+
+def test_fallback_cascade_returns_none_when_exhausted():
+    r = Router()
+    primary = r.pick("athena", "teaching_explanation")
+    # Try the whole chain + primary
+    tried = [f"{primary.provider}:{primary.model_id}"]
+    chain = r._fallbacks.get(f"{primary.provider}:{primary.model_id}", [])
+    for candidate in chain:
+        tried.append(candidate)
+    assert r.fallback(primary, already_tried=tried) is None
+
+
 def test_safety_cap_lookup():
     r = Router()
     assert r.safety_cap("athena", "max_trades_per_day") == 4
