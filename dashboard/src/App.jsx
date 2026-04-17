@@ -1502,7 +1502,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
   );
 }
 
-function CompareResults({ report, experimentsById }) {
+function CompareResults({ report, experimentsById, onDismiss }) {
   if (!report || !Array.isArray(report.rows) || report.rows.length === 0) return null;
   const winners = report.winner_per_metric || {};
   const metrics = [
@@ -1513,17 +1513,31 @@ function CompareResults({ report, experimentsById }) {
   ];
 
   return (
-    // Bounded + internal scroll so a comparison with many experiments
-    // doesn't spill past the viewport. "flex: 0 1 auto" lets the library
-    // keep its space while this grows only as tall as needed (up to the
-    // maxHeight cap).
+    // With the library hidden while results are displayed, this panel fills
+    // remaining vertical space (flex: 1 + minHeight: 0) and scrolls its own
+    // contents if the comparison is tall.
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                   borderRadius: 8, padding: 16, marginTop: 12,
-                  flex: "0 1 auto", minHeight: 0, maxHeight: "40vh",
+                  flex: 1, minHeight: 0,
                   overflowY: "auto", overflowX: "hidden" }}>
-      <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
                     marginBottom: 12 }}>
-        Comparison
+        <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
+          Comparison
+        </div>
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            title="Dismiss these results and return to the experiment library to pick a different set."
+            style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
+                     letterSpacing: "0.1em", textTransform: "uppercase",
+                     background: "transparent", color: COLORS.textDim,
+                     border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
+                     cursor: "pointer", outline: "none" }}
+          >
+            ← Change Selection
+          </button>
+        )}
       </div>
 
       {/* Ranked table */}
@@ -1654,7 +1668,7 @@ function CompareResults({ report, experimentsById }) {
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
                        onView, onCompare, compareReport, loading, filters, onFilterChange,
-                       compareInFlight, onGoToBacktest, totalInStore }) {
+                       compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
   // Step 1's "do you have any experiments" check is against the full store,
   // not the filtered subset, so active filters don't mask a populated library.
@@ -1774,23 +1788,29 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         />
       </div>
 
-      <ExperimentLibrary
-        experiments={experiments}
-        selectedIds={selectedIds}
-        onToggleSelect={onToggleSelect}
-        onClearSelection={onClearSelection}
-        onRefresh={onRefresh}
-        onView={onView}
-        filters={filters}
-        onFilterChange={onFilterChange}
-        loading={loading}
-        onCompare={onCompare}
-        canCompare={canCompare}
-        compareInFlight={compareInFlight}
-        onGoToBacktest={onGoToBacktest}
-        totalInStore={totalInStore}
-        compact={!!compareReport}
-      />
+      {/* Hide the library when a successful comparison is on screen —
+          the results panel is the focus; user can hit Change Selection to
+          bring the library back. Failed reports keep the library visible
+          so the user can adjust their selection without losing the grid. */}
+      {!(compareReport && compareReport.success) && (
+        <ExperimentLibrary
+          experiments={experiments}
+          selectedIds={selectedIds}
+          onToggleSelect={onToggleSelect}
+          onClearSelection={onClearSelection}
+          onRefresh={onRefresh}
+          onView={onView}
+          filters={filters}
+          onFilterChange={onFilterChange}
+          loading={loading}
+          onCompare={onCompare}
+          canCompare={canCompare}
+          compareInFlight={compareInFlight}
+          onGoToBacktest={onGoToBacktest}
+          totalInStore={totalInStore}
+          compact={!!compareReport}
+        />
+      )}
 
       {/* Compare action row removed — the inline Compare button in the
           library header + the selection chip bar + the guided stepper Step 3
@@ -1799,7 +1819,8 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 
       {compareReport && compareReport.success ? (
         <CompareResults report={compareReport}
-                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))} />
+                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))}
+                        onDismiss={onDismissReport} />
       ) : compareReport && !compareReport.success ? (
         <div style={{ marginTop: 10, padding: "12px 16px", background: COLORS.panel,
                       border: `1px solid ${COLORS.warn}60`, borderRadius: 6,
@@ -2308,6 +2329,13 @@ export default function App() {
                   compareInFlight={compareInFlight}
                   onGoToBacktest={() => setActiveTab("BACKTEST")}
                   totalInStore={libExperiments.length}
+                  onDismissReport={() => {
+                    // "Change Selection" path: clear the last result so the
+                    // library reappears and the user can pick a different
+                    // set. Selection itself is kept — likely the user wants
+                    // to swap one row, not start from scratch.
+                    setCompareReport(null);
+                  }}
                 />
               </div>
             )}
