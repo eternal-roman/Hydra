@@ -83,6 +83,20 @@ class Companion:
         if len(self.transcript) > TRANSCRIPT_TAIL_TURNS * 3:
             self.transcript = self.transcript[-TRANSCRIPT_TAIL_TURNS * 2:]
 
+    def clear_transcript(self) -> int:
+        """Clear this companion's conversation. Returns # messages removed.
+
+        Distilled memory (topic-bucketed facts) is NOT touched \u2014 use
+        /forget or the memory WS route for that."""
+        count = len(self.transcript)
+        self.transcript = []
+        try:
+            if self._transcript_path.exists():
+                self._transcript_path.unlink()
+        except Exception:
+            pass
+        return count
+
     # ----- turn execution -----
 
     def respond(self, user_text: str) -> TurnResult:

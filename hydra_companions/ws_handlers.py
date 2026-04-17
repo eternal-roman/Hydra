@@ -36,3 +36,6 @@ def mount_companion_routes(broadcaster, coordinator) -> None:
     broadcaster.register_handler("companion.memory.remember", lambda p: coordinator.handle_remember(p))
     broadcaster.register_handler("companion.memory.recall", lambda p: coordinator.handle_recall(p))
     broadcaster.register_handler("companion.memory.forget", lambda p: coordinator.handle_forget(p))
+
+    # Transcript management
+    broadcaster.register_handler("companion.transcript.clear", lambda p: coordinator.handle_clear_transcript(p))

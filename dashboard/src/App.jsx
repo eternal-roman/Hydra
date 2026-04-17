@@ -2888,6 +2888,61 @@ export default function App() {
   const companionSend = useCallback((text) => {
     const msgId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const cid = activeCompanion;
+
+    // ─── Slash-command interception (no LLM call) ───
+    const trimmed = text.trim();
+    if (trimmed.startsWith("/")) {
+      const [cmd, ...rest] = trimmed.slice(1).split(/\s+/);
+      const arg = rest.join(" ").trim();
+
+      // Echo the user command immediately
+      setCompanionMessages((prev) => {
+        const list = prev[cid] || [];
+        return { ...prev, [cid]: [...list, { id: msgId, role: "user", text }].slice(-200) };
+      });
+
+      const addSystem = (targetCid, note) => {
+        setCompanionMessages((prev) => {
+          const list = prev[targetCid] || [];
+          return {
+            ...prev,
+            [targetCid]: [...list, {
+              id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              role: "system", text: note,
+            }].slice(-200),
+          };
+        });
+      };
+
+      if (cmd === "clear") {
+        const scope = arg === "all" ? "all" : "one";
+        sendMessage({
+          type: "companion.transcript.clear",
+          companion_id: cid, scope,
+        });
+        if (scope === "all") {
+          setCompanionMessages({ athena: [], apex: [], broski: [] });
+          addSystem(cid, "(all three transcripts cleared)");
+        } else {
+          setCompanionMessages((prev) => ({ ...prev, [cid]: [] }));
+          addSystem(cid, "(transcript cleared)");
+        }
+        return;
+      }
+
+      if (cmd === "help") {
+        addSystem(cid,
+          "commands:\n" +
+          "  /clear        \u2014 clear this companion's transcript\n" +
+          "  /clear all    \u2014 clear all three transcripts\n" +
+          "  /help         \u2014 show this list"
+        );
+        return;
+      }
+
+      // Unknown slash command \u2014 fall through and let the companion see it
+    }
+
     // Optimistic: add the user message immediately
     setCompanionMessages((prev) => {
       const list = prev[cid] || [];

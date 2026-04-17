@@ -309,6 +309,24 @@ class CompanionCoordinator:
         self._pending.pop(pid, None)
         return {"success": True}
 
+    def handle_clear_transcript(self, payload: dict) -> Optional[dict]:
+        """Clear one companion's transcript, or all three with scope=all."""
+        scope = (payload.get("scope") or "one").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        if scope == "all":
+            totals = {}
+            for (u, sid), comp in list(self._companions.items()):
+                if u != uid:
+                    continue
+                totals[sid] = comp.clear_transcript()
+            return {"success": True, "scope": "all", "removed": totals}
+        cid = (payload.get("companion_id") or "apex").lower()
+        comp = self.get(cid, uid)
+        if comp is None:
+            return {"success": False, "error": f"unknown companion: {cid}"}
+        removed = comp.clear_transcript()
+        return {"success": True, "scope": "one", "companion_id": cid, "removed": removed}
+
     # ----- Phase 5: memory API -----
 
     def handle_remember(self, payload: dict) -> Optional[dict]:
