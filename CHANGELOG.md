@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.9] — 2026-04-17
+
+Companion **Phase 6** — proactive nudges + mood visuals. Completes the
+Phase 1\u20136 core delivery arc.
+
+### Added
+- `hydra_companions/nudge_scheduler.py`: daemon that watches
+  live-state transitions and pushes unprompted in-character messages.
+  600 s floor between nudges; suppressed after 90 s of user activity;
+  `/mute` slash command via WS.
+- Dashboard: proactive messages render with a "\u00b7 unprompted" marker
+  next to the companion name. Orb pulse continues to track regime
+  (established in P1).
+- 5 new tests; 66 unique companion tests green.
+
+### Notes
+
+v2.11.0 will cut on merge of the full companion branch (Phases 1\u20136)
+to main as the minor-version delivery of the subsystem.
+
+---
+
 ## [2.10.8] — 2026-04-17
 
 Companion **Phase 5** — distilled memory. Topic-bucketed per-companion
