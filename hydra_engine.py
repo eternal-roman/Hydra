@@ -511,23 +511,40 @@ class SignalGenerator:
                 indicators=indicators,
             )
 
-        # SELL: RSI overbought always triggers; MACD requires meaningful fade
-        # that is worsening or a fresh crossover below zero.
+        # SELL: symmetric with BUY — require ALL of {RSI meaningful, MACD
+        # fading past noise, price below BB mid, fading-or-fresh}. Previously
+        # SELL used OR of just {rsi > upper+5, macd_fading}, letting a single
+        # indicator noise flip us out of trending winners. Fix 5 makes entry
+        # and exit structurally symmetric — "losing entries is just as bad as
+        # losing exits" per the capital-discipline mandate.
+        #
+        # Emergency override at rsi > rsi_upper + 15: a truly extreme
+        # overbought reading is still enough on its own (e.g., RSI > 85 on
+        # default 70 threshold) — this preserves the "panic exit" capability
+        # without letting moderate overbought (75-85) alone trigger.
         macd_fading = (hist < -noise_floor and (hist < prev or prev >= 0))
-        overbought_threshold = rsi_upper + 5
-        rsi_overbought = rsi > overbought_threshold
-        if rsi_overbought or macd_fading:
+        symmetric_sell = (
+            rsi_lower < rsi < rsi_upper
+            and hist < -noise_floor
+            and price < bb["middle"]
+            and (hist < prev or prev >= 0)
+        )
+        extreme_overbought = rsi > rsi_upper + 15
+        if symmetric_sell or extreme_overbought:
             rsi_strength = max(0.0, rsi - rsi_upper) / (100.0 - rsi_upper) if rsi_upper < 100 else 0.0
             macd_strength = min(1.0, abs(hist) / ctx["atr"]) if hist < 0 and ctx["atr"] > 0 else 0.0
             primary = max(rsi_strength, macd_strength)
             vol = SignalGenerator._vol_bonus(ctx)
             conf = min(0.90, BASE + primary * 0.35 + vol)
+            if extreme_overbought and not symmetric_sell:
+                reason = f"Momentum fading: RSI {rsi:.1f} > {rsi_upper + 15:.0f} extreme overbought"
+            else:
+                reason = (f"Momentum fading: MACD hist {hist:.2f} < 0, "
+                          f"price {_fmt_price(price)} < BB mid {_fmt_price(bb['middle'])}, RSI {rsi:.1f}")
             return Signal(
                 action=SignalAction.SELL,
                 confidence=conf,
-                reason=f"Momentum fading: RSI {rsi:.1f}" +
-                       (f" > {overbought_threshold:.0f} overbought" if rsi_overbought
-                        else f", MACD crossed negative"),
+                reason=reason,
                 strategy=Strategy.MOMENTUM,
                 indicators=indicators,
             )
@@ -1191,18 +1208,21 @@ class HydraEngine:
 
         elif (signal.action == SignalAction.SELL and self.position.size > 0
               and signal.confidence >= self.sizer.min_confidence):
-            sell_pct = 1.0 if signal.confidence > 0.7 else 0.5
-            sell_amount = self.position.size * sell_pct
-            # Enforce Kraken ordermin: if the position itself is below ordermin,
-            # we can't sell at all. If a partial sell would be below ordermin or
-            # would leave dust below ordermin, force a full close instead.
+            # Fix 6: full-close on any SELL signal that passes min_confidence.
+            # Previously a binary 50/50 split at conf=0.7 left partial positions
+            # that were awkward to re-close — the 50% branch even fell through
+            # to "force full close" when the half-sell would land below
+            # ordermin or leave dust, proving the surrounding code found the
+            # binary split inconvenient.
+            # Symmetry principle: Kelly governs ENTRY size (continuous). If we
+            # decided to exit, we exit fully. Spot-only: "half-exit" doesn't
+            # reduce risk proportionally, it just delays the exit until the
+            # next signal at potentially worse prices.
             base_asset = self.asset.split("/")[0] if "/" in self.asset else self.asset
             min_size = self.sizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
             if self.position.size < min_size:
                 return None  # Entire position is below ordermin — unsellable
-            remaining = self.position.size - sell_amount
-            if sell_amount < min_size or (0 < remaining < min_size):
-                sell_amount = self.position.size  # Force full close
+            sell_amount = self.position.size  # Full close
             revenue = sell_amount * current_price
             profit = (current_price - self.position.avg_entry) * sell_amount
             # Capture params before position state is cleared
@@ -1362,6 +1382,152 @@ class HydraEngine:
         self.max_drawdown = snap["max_drawdown"]
         self.gross_profit = snap["gross_profit"]
         self.gross_loss = snap["gross_loss"]
+
+    def reconcile_partial_fill(
+        self,
+        side: str,
+        placed_amount: float,
+        vol_exec: float,
+        limit_price: float,
+        pre_trade_snapshot: Optional[Dict[str, Any]] = None,
+        reason: str = "partial_fill_reconcile",
+        strategy: str = "MOMENTUM",
+        confidence: float = 0.0,
+    ) -> None:
+        """Correct engine state after a PARTIALLY_FILLED execution event.
+
+        At execute_signal time, the engine optimistically committed the full
+        `placed_amount` to position/balance. The exchange actually filled only
+        `vol_exec`. This method reverses the un-filled portion.
+
+        When `pre_trade_snapshot` is available (always the case for current-
+        session fills), the safest path is: restore to the snapshot, then
+        replay only the filled portion through the same state-mutation logic
+        as _maybe_execute. This guarantees the end state is indistinguishable
+        from a world in which execute_signal had been called with the real
+        fill amount.
+
+        When `pre_trade_snapshot` is None (resume-path: previous session's
+        snapshot wasn't persisted), we fall back to arithmetic reversal and
+        log a loud warning — accuracy here depends on the caller passing the
+        pre-commit state or accepting drift.
+
+        Args:
+            side: "BUY" or "SELL"
+            placed_amount: What execute_signal was told to commit
+            vol_exec: What actually filled on the exchange
+            limit_price: The limit price of the placed order
+            pre_trade_snapshot: Snapshot from snapshot_position() taken before
+                execute_signal was called. Preferred path.
+            reason / strategy / confidence: carried into the replayed Trade
+                for audit trail.
+        """
+        if placed_amount <= 0:
+            return
+        if vol_exec < 0:
+            vol_exec = 0.0
+        # Full fill — nothing to reconcile
+        if vol_exec >= placed_amount * 0.999999:  # float-safe
+            return
+
+        if pre_trade_snapshot is not None:
+            self.restore_position(pre_trade_snapshot)
+            if vol_exec <= 0:
+                return  # fully unfilled — restore was sufficient
+            try:
+                sig_strategy = Strategy(strategy)
+            except ValueError:
+                sig_strategy = Strategy.MOMENTUM
+            if side.upper() == "BUY":
+                self._apply_buy_fill(vol_exec, limit_price, reason, sig_strategy, confidence)
+            elif side.upper() == "SELL":
+                self._apply_sell_fill(vol_exec, limit_price, reason, sig_strategy, confidence)
+            return
+
+        # Fallback: no snapshot available (resume-path). Arithmetic reversal
+        # of the unfilled delta. Cannot recover exact avg_entry weighting if
+        # the original trade was an average-in — we accept that drift and log.
+        unfilled = placed_amount - vol_exec
+        if side.upper() == "BUY":
+            # BUY over-committed: refund unfilled quote, remove unfilled base
+            self.balance += unfilled * limit_price
+            self.position.size = max(0.0, self.position.size - unfilled)
+            if self.position.size == 0.0:
+                self.position.avg_entry = 0.0
+        elif side.upper() == "SELL":
+            # SELL over-committed: remove unfilled quote we optimistically
+            # took in, add unfilled base back to position
+            self.balance -= unfilled * limit_price
+            self.position.size += unfilled
+
+    def _apply_buy_fill(
+        self, amount: float, price: float, reason: str,
+        strategy: Strategy, confidence: float,
+    ) -> None:
+        """Mirror of the BUY state-mutation in _maybe_execute, but with an
+        exogenous `amount` (no sizer). Used only by reconcile_partial_fill
+        after restore_position. Mutates position / balance / trades."""
+        cost = amount * price
+        if self.position.size > 0:
+            total_size = self.position.size + amount
+            self.position.avg_entry = (
+                self.position.avg_entry * self.position.size + price * amount
+            ) / total_size
+            self.position.size = total_size
+            self.position.params_at_entry = self.snapshot_params()
+        else:
+            self.position.size = amount
+            self.position.avg_entry = price
+            self.position.params_at_entry = self.snapshot_params()
+        self.balance -= cost
+        self.trades.append(Trade(
+            action="BUY", asset=self.asset, price=price, amount=amount,
+            value=cost, reason=reason, confidence=confidence,
+            strategy=strategy.value,
+        ))
+
+    def _apply_sell_fill(
+        self, amount: float, price: float, reason: str,
+        strategy: Strategy, confidence: float,
+    ) -> None:
+        """Mirror of the SELL state-mutation in _maybe_execute, but with an
+        exogenous `amount`. Bypasses ordermin / dust checks (the exchange
+        already accepted and filled this amount)."""
+        if amount <= 0 or self.position.size <= 0:
+            return
+        amount = min(amount, self.position.size)  # never oversell
+        revenue = amount * price
+        profit = (price - self.position.avg_entry) * amount
+        entry_params = self.position.params_at_entry
+        base_asset = self.asset.split("/")[0] if "/" in self.asset else self.asset
+        min_size = self.sizer.MIN_ORDER_SIZE.get(base_asset, 0.02)
+        self.balance += revenue
+        self.position.size -= amount
+        self.position.realized_pnl += profit
+        total_profit = profit
+        position_closed = False
+        dust_threshold = min_size * 0.1 if min_size > 0 else 0.00001
+        if self.position.size < dust_threshold:
+            self.position.size = 0.0
+            self.position.avg_entry = 0.0
+            position_closed = True
+            total_profit = self.position.realized_pnl
+            self.total_trades += 1
+            if total_profit > 0:
+                self.win_count += 1
+                self.gross_profit += total_profit
+            else:
+                self.loss_count += 1
+                self.gross_loss += abs(total_profit)
+            self.position.params_at_entry = None
+            self.position.realized_pnl = 0.0
+        self.trades.append(Trade(
+            action="SELL", asset=self.asset, price=price, amount=amount,
+            value=revenue, reason=reason, confidence=confidence,
+            strategy=strategy.value,
+            profit=total_profit if position_closed else profit,
+            params_at_entry=entry_params if position_closed else None,
+        ))
 
     def snapshot_runtime(self) -> Dict[str, Any]:
         """Serialize full engine runtime state for session persistence.

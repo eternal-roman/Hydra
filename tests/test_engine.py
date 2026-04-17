@@ -680,10 +680,12 @@ class TestSnapshotAndRollback:
         assert engine.loss_count == 4
         assert len(engine.trades) == 1  # trimmed back to snapshot length
 
-    def test_win_loss_counted_on_full_close_only(self):
-        """Win/loss only incremented when position fully closes, not on partials."""
+    def test_sell_above_min_confidence_full_closes(self):
+        """Fix 6: any SELL >= min_confidence full-closes the position. The
+        previous 50/50 split at conf=0.7 asymmetrically under-exited mid-
+        confidence signals — spot-only, half-exit doesn't reduce risk
+        proportionally."""
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
-        # Manually set position (entry at 90, current price higher = profitable)
         engine.position.size = 10.0
         engine.position.avg_entry = 90.0
         engine.position.params_at_entry = engine.snapshot_params()
@@ -694,12 +696,14 @@ class TestSnapshotAndRollback:
                 "volume": 100, "timestamp": float(i),
             })
 
-        # Partial sell (conf < 0.7 → sell 50%)
-        trade = engine.execute_signal("SELL", 0.66, "test partial", "MOMENTUM")
+        # Mid-confidence SELL (0.66 > min_confidence=0.65) — used to do 50%,
+        # now full-closes. Win/loss is counted because the position is closed.
+        trade = engine.execute_signal("SELL", 0.66, "test full-close", "MOMENTUM")
         assert trade is not None, "Expected trade to be generated"
-        assert engine.win_count == 0, "Partial sell should not count as win"
-        assert engine.loss_count == 0, "Partial sell should not count as loss"
-        assert engine.position.realized_pnl > 0, "Partial should accumulate realized_pnl"
+        assert engine.position.size == 0.0, "Expected full close at mid confidence"
+        # 10 units @ avg 90 sold @ 100 = +100 profit → win
+        assert engine.win_count == 1, "Full close with profit counts as win"
+        assert engine.loss_count == 0
 
     def test_winning_round_trip_counted_correctly(self):
         """Full round trip (BUY → SELL close) with profit counts as WIN."""
@@ -842,7 +846,12 @@ class TestSnapshotAndRollback:
         assert engine.balance == 9525.0
 
     def test_realized_pnl_accumulates_across_partials(self):
-        """Multiple partial sells accumulate realized_pnl; final close uses total."""
+        """Multiple partial sells accumulate realized_pnl; final close uses
+        total. Under Fix 6, signal-driven SELL always full-closes, so partial
+        sells now happen via reconcile_partial_fill when the exchange only
+        fills part of an optimistic full-close commitment. This test drives
+        that equivalent path to verify the accumulation invariant still
+        holds."""
         engine = HydraEngine(initial_balance=10000, asset="SOL/USDC")
         for i in range(60):
             engine.ingest_candle({
@@ -854,19 +863,27 @@ class TestSnapshotAndRollback:
         engine.position.params_at_entry = engine.snapshot_params()
         engine.balance = 9100.0
 
-        # Partial sell 1 (conf 0.66 → 50%)
-        t1 = engine.execute_signal("SELL", 0.66, "partial 1", "MOMENTUM")
+        # Signal #1: full-close optimistically committed (conf > min)
+        snap1 = engine.snapshot_position()
+        t1 = engine.execute_signal("SELL", 0.66, "sell signal 1", "MOMENTUM")
         assert t1 is not None
-        assert engine.position.size > 0, "Should still have position after partial"
+        # Engine believes position is zero (optimistic full close); but only
+        # half of the order actually filled on the exchange — reconcile to
+        # reflect reality (5 units sold, 5 units still held).
+        engine.reconcile_partial_fill(
+            side="SELL", placed_amount=10.0, vol_exec=5.0, limit_price=100.0,
+            pre_trade_snapshot=snap1,
+        )
+        assert engine.position.size == 5.0, "5 units remain after partial fill"
         pnl_after_partial = engine.position.realized_pnl
-        assert pnl_after_partial > 0, "Partial sell was profitable"
+        assert pnl_after_partial > 0, "Partial fill realized profit"
 
-        # Close remaining (this might need dust guard depending on size)
-        t2 = engine.execute_signal("SELL", 0.75, "close", "MOMENTUM")
+        # Signal #2: full-close the remaining 5 units (this time fills fully)
+        t2 = engine.execute_signal("SELL", 0.75, "close remainder", "MOMENTUM")
         assert t2 is not None, "Expected closing SELL trade to be generated"
-        assert engine.position.size == 0, "Position should be fully closed"
+        assert engine.position.size == 0, "Position fully closed"
         assert engine.win_count == 1
-        assert t2.profit > pnl_after_partial, "Close profit should be accumulated"
+        assert t2.profit > pnl_after_partial, "Close profit includes accumulated partial"
 
 
 class TestCompetitionMode:

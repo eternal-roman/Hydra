@@ -696,7 +696,21 @@ class HydraBrain:
             )
         else:
             text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 350)
-        return self._parse_json(text), tok_in, tok_out
+        parsed = self._parse_json(text)
+        # Defensive clamp: the RISK_MANAGER_PROMPT documents size_multiplier in
+        # [0.0, 1.5] but a model hallucination can return out-of-range or
+        # non-numeric values. Downstream Kelly sizing multiplies balance by this
+        # directly, so an unclamped 2.5 would oversize by 67%.
+        if isinstance(parsed, dict) and "size_multiplier" in parsed:
+            raw = parsed["size_multiplier"]
+            try:
+                clamped = max(0.0, min(1.5, float(raw)))
+            except (TypeError, ValueError):
+                clamped = 1.0
+            if clamped != raw:
+                print(f"  [BRAIN] size_multiplier clamped: {raw!r} -> {clamped}")
+            parsed["size_multiplier"] = clamped
+        return parsed, tok_in, tok_out
 
     def _run_strategist(self, state: Dict, analyst: Dict, risk: Dict) -> tuple:
         """Strategic Advisor (Grok 4 Reasoning). Only called on contested decisions."""

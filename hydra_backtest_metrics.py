@@ -263,10 +263,19 @@ def _block_bootstrap_sample(
     block_len: int,
     rng: random.Random,
 ) -> List[float]:
-    """Non-overlapping block resample preserving local temporal structure.
+    """Non-overlapping, NON-CIRCULAR block resample preserving local
+    temporal structure.
 
-    For each block draw, sample a start index uniformly; emit block_len
-    consecutive profits. Repeat until length ≥ len(profits), then truncate.
+    For each block draw, sample a start index uniformly from the set of
+    valid starts (0..n-block_len) so every block fits without wrapping.
+    Emit block_len consecutive profits; repeat until length ≥ n; truncate.
+
+    Fix 4: previously used `(start + j) % n` circular indexing, which
+    joined tail-of-sequence to head-of-sequence inside a block. For small
+    trade counts (n ≤ ~50) this was effectively IID and yielded CIs that
+    were too narrow — rigor gate `mc_ci_lower_positive` passed marginal
+    strategies. Non-circular blocks preserve the intended autocorrelation
+    structure of the original sequence.
     """
     n = len(profits)
     if n == 0:
@@ -274,11 +283,11 @@ def _block_bootstrap_sample(
     if block_len <= 0 or block_len >= n:
         # Degenerate: fall back to iid bootstrap so the call still produces a sample
         return [profits[rng.randint(0, n - 1)] for _ in range(n)]
+    max_start = n - block_len  # inclusive upper bound — no wrap needed
     sample: List[float] = []
     while len(sample) < n:
-        start = rng.randint(0, n - 1)
-        for j in range(block_len):
-            sample.append(profits[(start + j) % n])
+        start = rng.randint(0, max_start)
+        sample.extend(profits[start:start + block_len])
     return sample[:n]
 
 

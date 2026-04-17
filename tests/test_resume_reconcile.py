@@ -401,6 +401,144 @@ class TestReconcileStalePlaced:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Userref counter persistence (Fix 2 — restart collision prevention)
+# ═══════════════════════════════════════════════════════════════
+
+class TestUserrefPersistence:
+    """Fix 2: _userref_counter must never re-issue a value still in the
+    journal/exchange after a restart. The current-time seed in __init__ is
+    only a floor; _reseed_userref_from_history raises it above anything
+    historically used, and _save_snapshot persists it so --resume inherits.
+    """
+
+    def _bare_agent(self, journal=None):
+        """Construct a minimal agent with only the fields we need for the
+        userref helpers. Bypasses the full __init__."""
+        agent = object.__new__(HydraAgent)
+        agent.order_journal = journal if journal is not None else []
+        agent._userref_counter = 100  # low baseline
+        return agent
+
+    def test_journal_max_userref_scans_entries(self):
+        journal = [
+            {"order_ref": {"order_userref": 500, "order_id": "A"}},
+            {"order_ref": {"order_userref": 1200, "order_id": "B"}},
+            {"order_ref": {"order_userref": 800, "order_id": "C"}},
+            # Non-int and malformed entries should be ignored, not raise
+            {"order_ref": {"order_userref": None}},
+            {"order_ref": None},
+            {},
+            "not a dict",
+        ]
+        agent = self._bare_agent(journal)
+        assert agent._journal_max_userref() == 1200
+
+    def test_journal_max_userref_empty(self):
+        agent = self._bare_agent([])
+        assert agent._journal_max_userref() == 0
+
+    def test_reseed_raises_counter_above_journal_max(self):
+        journal = [{"order_ref": {"order_userref": 99999, "order_id": "A"}}]
+        agent = self._bare_agent(journal)
+        agent._userref_counter = 50000  # below journal_max
+        agent._reseed_userref_from_history()
+        # Must be > 99999 + safety gap
+        assert agent._userref_counter >= 99999 + HydraAgent._USERREF_SAFETY_GAP
+
+    def test_reseed_does_not_lower_counter(self):
+        journal = [{"order_ref": {"order_userref": 100, "order_id": "A"}}]
+        agent = self._bare_agent(journal)
+        agent._userref_counter = 500_000  # already far above
+        agent._reseed_userref_from_history()
+        # Must not decrease
+        assert agent._userref_counter == 500_000
+
+    def test_reseed_noop_on_empty_journal(self):
+        agent = self._bare_agent([])
+        agent._userref_counter = 42
+        agent._reseed_userref_from_history()
+        assert agent._userref_counter == 42
+
+    def test_next_userref_monotonic(self):
+        agent = self._bare_agent([])
+        agent._userref_counter = 100
+        a = agent._next_userref()
+        b = agent._next_userref()
+        c = agent._next_userref()
+        assert a < b < c
+        assert b == a + 1
+        assert c == a + 2
+
+    def test_next_userref_wrap_consults_journal(self):
+        # Near the int32 ceiling; wrap should reseed above journal_max, not
+        # blindly reset to a time-seed that could collide with old entries.
+        journal = [{"order_ref": {"order_userref": 1_000_000, "order_id": "A"}}]
+        agent = self._bare_agent(journal)
+        agent._userref_counter = 0x7FFFFFFF  # next += 1 triggers wrap
+        new = agent._next_userref()
+        # Reseed should be at least max(time_seed, 1_000_000 + safety_gap)
+        assert new >= 1_000_000 + HydraAgent._USERREF_SAFETY_GAP
+        assert new <= 0x7FFFFFFF
+
+    def test_snapshot_round_trip_persists_counter(self):
+        """_save_snapshot writes userref_counter; _load_snapshot reads it and
+        raises (never lowers) _userref_counter."""
+        import json as _json
+        import tempfile
+        from hydra_agent import CrossPairCoordinator
+
+        # Build a reasonably complete agent for the save/load path.
+        agent = object.__new__(HydraAgent)
+        agent.mode = "competition"
+        agent.paper = True
+        agent.pairs = ["SOL/USDC"]
+        agent._competition_start_balance = 100.0
+        agent.engines = {}
+        agent.coordinator = CrossPairCoordinator(["SOL/USDC"])
+        agent.order_journal = []
+        agent._userref_counter = 777_777
+
+        with tempfile.TemporaryDirectory() as tmp:
+            agent._snapshot_dir = tmp
+            agent._save_snapshot()
+
+            # Verify the file actually persisted it
+            snap_path = agent._snapshot_path()
+            with open(snap_path) as f:
+                on_disk = _json.load(f)
+            assert on_disk["userref_counter"] == 777_777
+
+            # Fresh agent, low initial counter, loads from disk.
+            agent2 = object.__new__(HydraAgent)
+            agent2.mode = "competition"
+            agent2.paper = True
+            agent2.pairs = ["SOL/USDC"]
+            agent2._competition_start_balance = None
+            agent2.engines = {}
+            agent2.coordinator = CrossPairCoordinator(["SOL/USDC"])
+            agent2.order_journal = []
+            agent2._snapshot_dir = tmp
+            agent2._userref_counter = 100  # below persisted
+            agent2._load_snapshot()
+            assert agent2._userref_counter >= 777_777
+
+            # And if the in-memory floor was already higher, load must NOT
+            # lower it.
+            agent3 = object.__new__(HydraAgent)
+            agent3.mode = "competition"
+            agent3.paper = True
+            agent3.pairs = ["SOL/USDC"]
+            agent3._competition_start_balance = None
+            agent3.engines = {}
+            agent3.coordinator = CrossPairCoordinator(["SOL/USDC"])
+            agent3.order_journal = []
+            agent3._snapshot_dir = tmp
+            agent3._userref_counter = 2_000_000  # already higher
+            agent3._load_snapshot()
+            assert agent3._userref_counter == 2_000_000
+
+
+# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -410,7 +548,7 @@ def run_tests():
     failed = 0
     errors = []
 
-    test_classes = [TestReconcileStalePlaced]
+    test_classes = [TestReconcileStalePlaced, TestUserrefPersistence]
 
     for cls in test_classes:
         instance = cls()

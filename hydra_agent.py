@@ -1554,6 +1554,11 @@ class HydraAgent:
         # Monotonic client tag seeded from wall-clock to avoid collisions
         # across restarts; flows into Kraken as --userref and comes back on
         # the WS executions stream as order_userref for correlation.
+        #
+        # This initial time-seed is a floor — after snapshot load and journal
+        # merge, _reseed_userref_from_history() raises it above anything we've
+        # used in the past. Without that, a restart within the same second as
+        # a killed session could collide with still-open orders' userrefs.
         self._userref_counter = int(time.time()) & 0x7FFFFFFF
 
         # Sizing config based on mode
@@ -1693,6 +1698,11 @@ class HydraAgent:
         # full depth (bounded by ORDER_JOURNAL_CAP).
         self._merge_order_journal()
 
+        # Reseed _userref_counter above anything we've used historically.
+        # Must run AFTER both _load_snapshot (may carry a persisted counter)
+        # AND _merge_order_journal (gives us the historical high-water mark).
+        self._reseed_userref_from_history()
+
         # Graceful shutdown
         sig.signal(sig.SIGINT, self._handle_shutdown)
         sig.signal(sig.SIGTERM, self._handle_shutdown)
@@ -1751,6 +1761,9 @@ class HydraAgent:
             "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
             "coordinator_regime_history": self.coordinator.regime_history,
             "order_journal": self.order_journal[-200:],
+            # Persist the userref counter so a restart never re-issues a
+            # userref already in-flight on the exchange from this session.
+            "userref_counter": self._userref_counter,
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -1806,6 +1819,12 @@ class HydraAgent:
             self._normalize_journal_pairs(self.order_journal)
             if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
+            # Carry the persisted userref floor into _userref_counter. The
+            # _reseed_userref_from_history() call in __init__ will raise it
+            # further if the journal reveals higher values.
+            persisted_uref = snapshot.get("userref_counter")
+            if isinstance(persisted_uref, int) and 0 < persisted_uref < (1 << 31):
+                self._userref_counter = max(self._userref_counter, persisted_uref)
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
@@ -2793,13 +2812,54 @@ class HydraAgent:
 
     # ─── Order placement (writes the journal, registers with the stream) ───
 
+    # Safety gap: when reseeding from journal history, jump this far ahead
+    # so we're not sharing the immediate neighborhood with any recent entry.
+    _USERREF_SAFETY_GAP = 1000
+
+    def _journal_max_userref(self) -> int:
+        """Scan self.order_journal for the highest integer userref seen.
+        Returns 0 if none found."""
+        hi = 0
+        for entry in self.order_journal:
+            if not isinstance(entry, dict):
+                continue
+            ref = entry.get("order_ref") or {}
+            if not isinstance(ref, dict):
+                continue
+            uref = ref.get("order_userref")
+            if isinstance(uref, int) and 0 < uref < (1 << 31) and uref > hi:
+                hi = uref
+        return hi
+
+    def _reseed_userref_from_history(self) -> None:
+        """Raise _userref_counter above anything historically used.
+
+        Called once in __init__ after snapshot load + journal merge. Protects
+        against restart-collision: if the previous session left open orders
+        with userrefs near the current time (the default seed), a fresh seed
+        could re-issue the same userref and route WS fills to the wrong
+        journal entry via _userref_to_order_id.
+        """
+        journal_max = self._journal_max_userref()
+        if journal_max > 0:
+            new_floor = min(journal_max + self._USERREF_SAFETY_GAP, 0x7FFFFFFF)
+            if new_floor > self._userref_counter:
+                self._userref_counter = new_floor
+
     def _next_userref(self) -> int:
         """Monotonic client tag used for --userref on placement so WS
         executions can correlate back to the local journal entry."""
         self._userref_counter += 1
-        # Kraken userref is int32. Wrap defensively.
+        # Kraken userref is int32. Wrap defensively — re-consult history so
+        # the wrap-reseed can't land back on a still-open order's userref.
         if self._userref_counter > 0x7FFFFFFF:
-            self._userref_counter = int(time.time()) & 0x7FFFFFFF
+            time_seed = int(time.time()) & 0x7FFFFFFF
+            journal_max = self._journal_max_userref()
+            self._userref_counter = max(time_seed, journal_max + self._USERREF_SAFETY_GAP)
+            if self._userref_counter > 0x7FFFFFFF:
+                # Extreme degenerate case: journal has values near 2^31. Fall
+                # back to time_seed alone, accepting the micro-collision risk.
+                self._userref_counter = time_seed
         return self._userref_counter
 
     def _build_journal_entry(self, pair: str, trade: dict, state: dict) -> Dict[str, Any]:
@@ -3163,11 +3223,34 @@ class HydraAgent:
                     print(f"  [HYDRA] {pair} {side} {txid}: {state} "
                           f"(vol={vol_exec:.8f}, reconciled on resume)")
 
-                    # Engine rollback is not possible for previous-session
-                    # entries (pre_trade_snapshot not persisted). If the order
-                    # was CANCELLED_UNFILLED, the engine's position may be
-                    # over-committed from the snapshot restore. Log loudly.
-                    if state in ("CANCELLED_UNFILLED", "REJECTED"):
+                    # Previous-session fills have no pre_trade_snapshot (not
+                    # persisted). We use the arithmetic fallback in
+                    # reconcile_partial_fill for PARTIALLY_FILLED, accepting
+                    # minor avg_entry drift if the original trade was an
+                    # average-in. For fully unfilled, log — operator verifies.
+                    if state == "PARTIALLY_FILLED":
+                        engine = self.engines.get(pair)
+                        placed = float(entry.get("intent", {}).get("amount", 0) or 0)
+                        limit_px = avg_price if avg_price else float(
+                            entry.get("intent", {}).get("limit_price", 0) or 0
+                        )
+                        if engine and placed > 0 and limit_px > 0:
+                            try:
+                                engine.reconcile_partial_fill(
+                                    side=side,
+                                    placed_amount=placed,
+                                    vol_exec=vol_exec,
+                                    limit_price=limit_px,
+                                    pre_trade_snapshot=None,
+                                    reason=f"PARTIALLY_FILLED reconciled on resume ({txid})",
+                                )
+                                print(f"  [HYDRA] {pair} {side} engine adjusted "
+                                      f"(arithmetic fallback; avg_entry may drift "
+                                      f"slightly if original was an average-in)")
+                            except Exception as e:
+                                print(f"  [WARN] {pair} {side} partial-fill reconcile "
+                                      f"failed ({e}); engine over-committed")
+                    elif state in ("CANCELLED_UNFILLED", "REJECTED"):
                         print(f"  [WARN] {pair} {side} was never filled — engine position may be "
                               f"stale from snapshot. Operator should verify.")
                     reconciled += 1
@@ -3261,16 +3344,35 @@ class HydraAgent:
             return
         if state_name == "PARTIALLY_FILLED":
             # Engine was optimistically committed to the full placed_amount;
-            # actual fill was only vol_exec. HydraEngine does not yet
-            # expose a partial-adjust primitive, so v1 leaves the engine
-            # over-committed (erring toward not re-placing on top) and the
-            # journal carries the true vol_exec for correct P&L. Logged
-            # loudly so the operator sees any divergence. Follow-up:
-            # HydraEngine.adjust_position(target_size) for exact handling.
+            # actual fill was only vol_exec. reconcile_partial_fill restores
+            # to the pre-trade snapshot and replays only the vol_exec portion,
+            # leaving engine state indistinguishable from a world in which
+            # execute_signal had been called with the real fill amount.
             ratio = (vol_exec / placed_amount) if placed_amount > 0 else 0.0
-            print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
-                  f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
-                  f"engine over-committed; journal has correct vol_exec")
+            limit_price = float(event.get("avg_fill_price") or 0.0)
+            if limit_price <= 0 and engine is not None and engine.prices:
+                # Fallback when Kraken didn't report an avg_fill_price
+                limit_price = engine.prices[-1]
+            if engine is not None:
+                try:
+                    engine.reconcile_partial_fill(
+                        side=side or "",
+                        placed_amount=float(placed_amount),
+                        vol_exec=float(vol_exec),
+                        limit_price=limit_price,
+                        pre_trade_snapshot=pre_snap,
+                        reason=f"PARTIALLY_FILLED: {event.get('terminal_reason') or ''}",
+                    )
+                    print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                          f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
+                          f"engine reconciled to actual fill")
+                except Exception as e:
+                    print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                          f"reconcile failed ({e}); engine may be over-committed")
+            else:
+                print(f"  [EXEC] {pair} {side} PARTIALLY_FILLED: "
+                      f"filled {vol_exec:.8f}/{placed_amount:.8f} ({ratio:.1%}) — "
+                      f"no engine_ref; journal carries truth but engine is stale")
             return
 
     def _run_tuner_update(self):
@@ -4000,7 +4102,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.10.0",
+            "version": "2.10.1",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
