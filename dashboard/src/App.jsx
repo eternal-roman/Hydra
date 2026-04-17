@@ -381,7 +381,8 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
                                 completedCount = 0, reviewedCount = 0,
                                 observerProgress = null, observerResult = null,
                                 observerReview = null, observerEquity = null,
-                                observerTotalTicks = 0, onObserverClose = null }) {
+                                observerTotalTicks = 0, onObserverClose = null,
+                                onCompareThisRun = null }) {
   const [preset, setPreset] = useState("default");
   const [hypothesis, setHypothesis] = useState("");
   const [pairs, setPairs] = useState("SOL/USDC");
@@ -634,7 +635,7 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
               running: observerProgress
                 ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
                 : "Executing. Live data streams into the Observer chart below.",
-              complete: "Finished — Last Result shows metrics, Rigor Gates reflect which checks passed, and the equity curve is in the Observer.",
+              complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
               rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
             };
 
@@ -682,6 +683,28 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
                        title={`Full experiment id: ${expId}`}>
                     id: {expId.slice(0, 12)}…
                   </div>
+                )}
+
+                {/* Complete-state CTA: surface the connection to COMPARE.
+                    The just-finished experiment is already in the library;
+                    this jumps tabs, refreshes, and pre-selects it. */}
+                {runState === "complete" && expId && onCompareThisRun && (
+                  <button
+                    onClick={() => onCompareThisRun(expId)}
+                    title="Jump to the Compare tab with this experiment already selected — pick one more to see them ranked side-by-side."
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      gap: 6, width: "100%", padding: "8px 12px",
+                      marginBottom: completedCount > 0 ? 10 : 0,
+                      fontSize: 12, fontWeight: 700, fontFamily: mono,
+                      textTransform: "uppercase", letterSpacing: "0.08em",
+                      background: `${COLORS.purple}20`, color: COLORS.purple,
+                      border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
+                      cursor: "pointer", outline: "none",
+                    }}
+                  >
+                    Compare this run →
+                  </button>
                 )}
 
                 {/* Session totals — across the current browser session */}
@@ -2071,6 +2094,16 @@ export default function App() {
                   observerEquity={obsEquity}
                   observerTotalTicks={totalTicks}
                   onObserverClose={() => setObserverClosed(true)}
+                  onCompareThisRun={(expId) => {
+                    // Jump to COMPARE, refresh the library so the fresh run
+                    // is present, and pre-select it so the user only needs
+                    // to pick one more to comparison against.
+                    setCompareSelected((prev) =>
+                      prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
+                    );
+                    setActiveTab("COMPARE");
+                    fetchLibrary();
+                  }}
                 />
               </div>
             )}
