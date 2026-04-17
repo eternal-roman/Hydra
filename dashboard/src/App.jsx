@@ -294,6 +294,307 @@ const RIGOR_GATES = [
   },
 ];
 
+// ─── Companion subsystem (v2.10.4+) ───
+// Renders an orb + drawer + chat UI. All WS messages use the `companion.*`
+// namespace and do not interfere with LIVE/BACKTEST/COMPARE. When the
+// backend subsystem is disabled the orb never receives a `companion.hello`
+// and stays invisible.
+
+const COMPANION_THEMES = {
+  athena: { primary: "#C9A227", accent: "#F6E7B7", glow: "#F4D35E", sigil: "\u26B2" },
+  apex:   { primary: "#0EA5A4", accent: "#22D3EE", glow: "#22D3EE", sigil: "\u25B2" },
+  broski: { primary: "#FF6B35", accent: "#FFD23F", glow: "#FF4757", sigil: "\u2736" },
+};
+const COMPANION_ORDER = ["athena", "apex", "broski"];
+const COMPANION_NAMES = { athena: "Athena", apex: "Apex", broski: "Broski" };
+
+function CompanionOrb({ theme, onClick, regime, hasUnread, visible }) {
+  if (!visible) return null;
+  const pulseDuration = regime === "VOLATILE" ? "1.8s"
+                     : regime === "RANGING"  ? "4.5s"
+                     : "3.2s";
+  return (
+    <>
+      <style>{`
+        @keyframes hc-breathe { 0%,100% { transform: scale(1.00);} 50% { transform: scale(1.04);} }
+        @keyframes hc-glow-pulse { 0%,100% { box-shadow: 0 0 16px ${theme.glow}66, 0 0 4px ${theme.primary}cc inset;} 50% { box-shadow: 0 0 28px ${theme.glow}aa, 0 0 6px ${theme.primary}ee inset;} }
+      `}</style>
+      <button
+        onClick={onClick}
+        aria-label={`Open companion drawer`}
+        title="Click: open \u2022 \u2328 Esc: close"
+        style={{
+          position: "fixed", right: 24, bottom: 24, zIndex: 9000,
+          width: 56, height: 56, borderRadius: "50%",
+          background: `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary} 55%, ${theme.primary}99)`,
+          border: `2px solid ${theme.primary}`,
+          cursor: "pointer", padding: 0,
+          animation: `hc-breathe ${pulseDuration} ease-in-out infinite, hc-glow-pulse ${pulseDuration} ease-in-out infinite`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#fff", fontSize: 22, fontFamily: heading, fontWeight: 700,
+          textShadow: `0 0 6px ${theme.glow}`,
+        }}>
+        <span style={{ pointerEvents: "none" }}>{theme.sigil}</span>
+        {hasUnread && (
+          <span style={{
+            position: "absolute", top: 4, right: 4, width: 10, height: 10,
+            borderRadius: "50%", background: theme.glow,
+            boxShadow: `0 0 8px ${theme.glow}`,
+          }} />
+        )}
+      </button>
+    </>
+  );
+}
+
+function CompanionSwitcher({ active, companions, onSwitch }) {
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      {COMPANION_ORDER.map((cid) => {
+        const theme = COMPANION_THEMES[cid];
+        const isActive = active === cid;
+        const exists = companions[cid];
+        return (
+          <button
+            key={cid}
+            onClick={() => exists && onSwitch(cid)}
+            title={exists ? COMPANION_NAMES[cid] : "offline"}
+            disabled={!exists}
+            style={{
+              width: 32, height: 32, borderRadius: "50%",
+              background: isActive
+                ? `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary})`
+                : `${theme.primary}33`,
+              border: isActive ? `2px solid ${theme.glow}` : `1px solid ${theme.primary}66`,
+              color: isActive ? "#fff" : `${theme.primary}`,
+              fontFamily: heading, fontWeight: 700, fontSize: 14,
+              cursor: exists ? "pointer" : "not-allowed", opacity: exists ? 1 : 0.35,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              transition: "all 180ms ease",
+            }}>
+            {theme.sigil}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CompanionMessage({ m, theme, userTheme }) {
+  const isUser = m.role === "user";
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column",
+      alignItems: isUser ? "flex-end" : "flex-start",
+      margin: "6px 0",
+    }}>
+      {!isUser && m.display_name && (
+        <div style={{ fontSize: 9, color: theme.accent, fontFamily: mono,
+                      letterSpacing: "0.08em", marginBottom: 2, marginLeft: 12, textTransform: "uppercase" }}>
+          {m.display_name}
+        </div>
+      )}
+      <div style={{
+        maxWidth: "85%",
+        padding: "8px 12px",
+        borderRadius: 10,
+        borderLeft: isUser ? "none" : `3px solid ${theme.primary}`,
+        background: isUser ? `${userTheme}15` : `${theme.primary}10`,
+        color: COLORS.text,
+        fontFamily: isUser ? mono : mono,
+        fontSize: 13, lineHeight: 1.45,
+        whiteSpace: "pre-wrap", wordBreak: "break-word",
+      }}>
+        {m.text}
+        {m.error && (
+          <div style={{ marginTop: 6, fontSize: 10, color: COLORS.red, fontFamily: mono }}>
+            {m.error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompanionTypingBubble({ theme, name }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", margin: "6px 0" }}>
+      <div style={{ fontSize: 9, color: theme.accent, fontFamily: mono,
+                    letterSpacing: "0.08em", marginBottom: 2, marginLeft: 12, textTransform: "uppercase" }}>
+        {name}
+      </div>
+      <div style={{
+        padding: "8px 14px", borderRadius: 10, borderLeft: `3px solid ${theme.primary}`,
+        background: `${theme.primary}10`, display: "inline-flex", gap: 4,
+      }}>
+        <style>{`@keyframes hc-dot { 0%,80%,100% { opacity: 0.3; transform: translateY(0);} 40% { opacity: 1; transform: translateY(-3px);} }`}</style>
+        {[0, 1, 2].map((i) => (
+          <span key={i} style={{
+            width: 6, height: 6, borderRadius: "50%", background: theme.primary,
+            animation: `hc-dot 1.2s ease-in-out ${i * 0.15}s infinite`,
+          }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CompanionDrawer({
+  open, onClose, active, onSwitch, companions, messages, typing,
+  onSend, connected, drawerWidth, onResize, costAlerts,
+}) {
+  const theme = COMPANION_THEMES[active] || COMPANION_THEMES.apex;
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Auto-scroll to bottom on new messages / typing
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, typing, active]);
+
+  // Focus composer on open / active-change
+  useEffect(() => {
+    if (open && inputRef.current) inputRef.current.focus();
+  }, [open, active]);
+
+  // Esc closes
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    onSend(text);
+    setDraft("");
+    setTimeout(() => setSending(false), 250);
+  };
+
+  const onKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
+  if (!open) return null;
+  const comp = companions[active];
+  const name = comp?.display_name || COMPANION_NAMES[active] || "Companion";
+  const alert = costAlerts[active];
+
+  return (
+    <div style={{
+      position: "fixed", top: 0, right: 0, bottom: 0, width: drawerWidth,
+      zIndex: 9000, background: `${COLORS.panel}f0`, backdropFilter: "blur(14px)",
+      borderLeft: `1px solid ${theme.primary}55`,
+      boxShadow: `-8px 0 32px rgba(0,0,0,0.5), inset 2px 0 0 ${theme.primary}33`,
+      display: "flex", flexDirection: "column",
+      animation: "hc-slide-in 260ms cubic-bezier(0.32, 0.72, 0, 1)",
+      fontFamily: mono,
+    }}>
+      <style>{`@keyframes hc-slide-in { from { transform: translateX(100%);} to { transform: translateX(0);} }`}</style>
+
+      {/* Header */}
+      <div style={{
+        padding: "12px 14px", display: "flex", alignItems: "center", gap: 10,
+        borderBottom: `1px solid ${theme.primary}33`,
+        background: `linear-gradient(90deg, ${theme.primary}22, transparent)`,
+      }}>
+        <div style={{
+          width: 32, height: 32, borderRadius: "50%",
+          background: `radial-gradient(circle at 35% 30%, ${theme.accent}, ${theme.primary})`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#fff", fontFamily: heading, fontWeight: 700, fontSize: 14,
+        }}>{theme.sigil}</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: heading, fontSize: 14, fontWeight: 700, color: COLORS.text }}>{name}</div>
+          <div style={{ fontSize: 9, color: theme.accent, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            {comp?.mood || "calm"}{comp?.serious_mode ? " \u00b7 serious" : ""}
+          </div>
+        </div>
+        <CompanionSwitcher active={active} companions={companions} onSwitch={onSwitch} />
+        <button onClick={onClose} aria-label="Close drawer" style={{
+          background: "transparent", border: `1px solid ${COLORS.panelBorder}`,
+          color: COLORS.textMuted, cursor: "pointer", borderRadius: 4,
+          padding: "4px 10px", fontFamily: mono, fontSize: 11,
+        }}>\u2716</button>
+      </div>
+
+      {alert && (
+        <div style={{
+          padding: "6px 14px", fontSize: 10, background: `${theme.glow}22`,
+          borderBottom: `1px solid ${theme.glow}44`, color: theme.accent, fontFamily: mono,
+        }}>
+          budget alert: ${alert.daily_cost_usd} of ${alert.hard_stop_usd} used
+        </div>
+      )}
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{
+        flex: 1, overflowY: "auto", padding: "10px 14px",
+      }}>
+        {messages.length === 0 && !typing && (
+          <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 20, textAlign: "center" }}>
+            say hi to {name.toLowerCase()} \u2014 or type <code style={{ color: theme.accent }}>/help</code>
+          </div>
+        )}
+        {messages.map((m) => (
+          <CompanionMessage key={m.id} m={m} theme={theme} userTheme={COLORS.accent} />
+        ))}
+        {typing && <CompanionTypingBubble theme={theme} name={name} />}
+      </div>
+
+      {/* Composer */}
+      <div style={{
+        borderTop: `1px solid ${theme.primary}33`,
+        padding: "10px 12px", background: `${COLORS.panel}ee`,
+      }}>
+        <textarea
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKey}
+          placeholder={active === "apex" ? "message apex \u2014"
+                     : active === "athena" ? "speak to Athena\u2026"
+                     : "yo what's up"}
+          disabled={!connected}
+          style={{
+            width: "100%", minHeight: 40, maxHeight: 140, resize: "none",
+            background: `${COLORS.bg}cc`, color: COLORS.text,
+            border: `1px solid ${theme.primary}55`, borderRadius: 6,
+            padding: "8px 10px", fontFamily: mono, fontSize: 13, lineHeight: 1.4,
+            outline: "none",
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+          <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono }}>
+            \u21B5 send \u00b7 Shift+\u21B5 newline \u00b7 Esc close
+          </div>
+          <button
+            onClick={submit}
+            disabled={!draft.trim() || !connected || sending}
+            style={{
+              background: draft.trim() && connected ? theme.primary : `${theme.primary}44`,
+              color: "#fff", border: "none", borderRadius: 4,
+              padding: "6px 14px", fontFamily: mono, fontSize: 11, fontWeight: 700,
+              cursor: draft.trim() && connected ? "pointer" : "default",
+              letterSpacing: "0.08em", textTransform: "uppercase",
+            }}>
+            send
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
@@ -2003,6 +2304,25 @@ export default function App() {
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
   const [viewingExpId, setViewingExpId] = useState(null);      // single-experiment detail view (stretch)
+  // ─── Companion state (Phase 1+) ───
+  const [companions, setCompanions] = useState({});             // companion_id -> meta
+  const [activeCompanion, setActiveCompanion] = useState(() => {
+    try { return localStorage.getItem("hydra.companion.active") || "apex"; }
+    catch { return "apex"; }
+  });
+  const [companionDrawerOpen, setCompanionDrawerOpen] = useState(() => {
+    try { return localStorage.getItem("hydra.companion.drawer.open") === "1"; }
+    catch { return false; }
+  });
+  const [companionDrawerWidth, setCompanionDrawerWidth] = useState(() => {
+    try { return parseInt(localStorage.getItem("hydra.companion.drawer.width") || "380", 10); }
+    catch { return 380; }
+  });
+  const [companionMessages, setCompanionMessages] = useState({ athena: [], apex: [], broski: [] });
+  const [companionTyping, setCompanionTyping] = useState({ athena: false, apex: false, broski: false });
+  const [companionUnread, setCompanionUnread] = useState({ athena: false, apex: false, broski: false });
+  const [companionCostAlerts, setCompanionCostAlerts] = useState({});
+  const [companionVisible, setCompanionVisible] = useState(false);   // true once hello received
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -2115,6 +2435,90 @@ export default function App() {
               }
               setViewInFlight(null);
               return;
+            // ─── Companion channel ───
+            case "companion.connect_ack": {
+              if (msg.success) {
+                const metas = {};
+                for (const c of (msg.all_companions || [])) metas[c.id] = c;
+                if (msg.companion) metas[msg.companion.id] = msg.companion;
+                setCompanions((prev) => ({ ...prev, ...metas }));
+                setCompanionVisible(true);
+                // Seed history for the active companion if provided
+                if (msg.companion && Array.isArray(msg.history_tail)) {
+                  const seeded = msg.history_tail.map((t, i) => ({
+                    id: `seed-${msg.companion.id}-${i}`,
+                    role: t.role, text: t.content,
+                    display_name: t.role === "assistant" ? msg.companion.display_name : null,
+                  }));
+                  setCompanionMessages((prev) => ({ ...prev, [msg.companion.id]: seeded }));
+                }
+              }
+              return;
+            }
+            case "companion.switch_ack": {
+              if (msg.success && msg.companion) {
+                setCompanions((prev) => ({ ...prev, [msg.companion.id]: msg.companion }));
+                if (Array.isArray(msg.history_tail)) {
+                  const seeded = msg.history_tail.map((t, i) => ({
+                    id: `seed-${msg.companion.id}-${i}`,
+                    role: t.role, text: t.content,
+                    display_name: t.role === "assistant" ? msg.companion.display_name : null,
+                  }));
+                  setCompanionMessages((prev) => ({ ...prev, [msg.companion.id]: seeded }));
+                }
+              }
+              return;
+            }
+            case "companion.typing": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionTyping((prev) => ({ ...prev, [cid]: msg.state === "thinking" }));
+              }
+              return;
+            }
+            case "companion.message.complete": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionTyping((prev) => ({ ...prev, [cid]: false }));
+                setCompanionMessages((prev) => {
+                  const list = prev[cid] || [];
+                  const next = [...list, {
+                    id: msg.message_id || `m-${Date.now()}-${Math.random()}`,
+                    role: "assistant",
+                    text: msg.text || "",
+                    display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
+                    error: msg.error,
+                    intent: msg.intent,
+                    model_used: msg.model_used,
+                  }];
+                  return { ...prev, [cid]: next.slice(-200) };
+                });
+                if (!companionDrawerOpen || activeCompanion !== cid) {
+                  setCompanionUnread((prev) => ({ ...prev, [cid]: true }));
+                }
+              }
+              return;
+            }
+            case "companion.cost_alert": {
+              const cid = msg.companion_id;
+              if (cid) {
+                setCompanionCostAlerts((prev) => ({ ...prev, [cid]: msg }));
+              }
+              return;
+            }
+            case "companion.system_note": {
+              // Could surface as a toast; for now append to active companion's thread as a muted note.
+              const cid = activeCompanion;
+              setCompanionMessages((prev) => {
+                const list = prev[cid] || [];
+                const next = [...list, {
+                  id: `sys-${Date.now()}`,
+                  role: "system", text: msg.text || "", display_name: null,
+                }];
+                return { ...prev, [cid]: next.slice(-200) };
+              });
+              return;
+            }
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
               if (msg.channel === "backtest") setBtLastAck(msg);
@@ -2164,6 +2568,55 @@ export default function App() {
       return false;
     }
   }, []);
+
+  // ─── Companion send/switch + connect kickoff ───
+  const companionConnect = useCallback(() => {
+    sendMessage({ type: "companion.connect", companion_id: activeCompanion });
+  }, [sendMessage, activeCompanion]);
+
+  const companionSend = useCallback((text) => {
+    const msgId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Optimistic: add the user message immediately
+    setCompanionMessages((prev) => {
+      const list = prev[activeCompanion] || [];
+      return {
+        ...prev,
+        [activeCompanion]: [...list, {
+          id: msgId, role: "user", text,
+        }].slice(-200),
+      };
+    });
+    setCompanionTyping((prev) => ({ ...prev, [activeCompanion]: true }));
+    sendMessage({
+      type: "companion.message",
+      companion_id: activeCompanion,
+      text, message_id: msgId,
+    });
+  }, [sendMessage, activeCompanion]);
+
+  const companionSwitch = useCallback((cid) => {
+    setActiveCompanion(cid);
+    setCompanionUnread((prev) => ({ ...prev, [cid]: false }));
+    try { localStorage.setItem("hydra.companion.active", cid); } catch {}
+    sendMessage({ type: "companion.switch", to_id: cid });
+  }, [sendMessage]);
+
+  const companionToggle = useCallback(() => {
+    setCompanionDrawerOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch {}
+      if (next) {
+        setCompanionUnread((prev2) => ({ ...prev2, [activeCompanion]: false }));
+      }
+      return next;
+    });
+  }, [activeCompanion]);
+
+  // On WS connect, probe the companion subsystem. If unmounted server-side,
+  // no connect_ack arrives and the orb stays invisible.
+  useEffect(() => {
+    if (connected) companionConnect();
+  }, [connected, companionConnect]);
 
   // Phase 10 — library + compare helpers
   const fetchLibrary = useCallback(() => {
@@ -2810,6 +3263,29 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ─── Companion Orb + Drawer ─── */}
+      <CompanionOrb
+        theme={COMPANION_THEMES[activeCompanion] || COMPANION_THEMES.apex}
+        onClick={companionToggle}
+        regime={state?.pairs ? (Object.values(state.pairs).map(p => p.regime).find(r => r === "VOLATILE") || "TREND") : "TREND"}
+        hasUnread={companionUnread[activeCompanion]}
+        visible={companionVisible && !companionDrawerOpen}
+      />
+      <CompanionDrawer
+        open={companionDrawerOpen && companionVisible}
+        onClose={companionToggle}
+        active={activeCompanion}
+        onSwitch={companionSwitch}
+        companions={companions}
+        messages={companionMessages[activeCompanion] || []}
+        typing={companionTyping[activeCompanion]}
+        onSend={companionSend}
+        connected={connected}
+        drawerWidth={companionDrawerWidth}
+        onResize={setCompanionDrawerWidth}
+        costAlerts={companionCostAlerts}
+      />
 
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
