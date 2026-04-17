@@ -39,3 +39,9 @@ def mount_companion_routes(broadcaster, coordinator) -> None:
 
     # Transcript management
     broadcaster.register_handler("companion.transcript.clear", lambda p: coordinator.handle_clear_transcript(p))
+
+    # Mode toggles
+    broadcaster.register_handler("companion.set_serious_mode", lambda p: coordinator.handle_set_serious_mode(p))
+
+    # Proactive nudges
+    broadcaster.register_handler("companion.nudge.mute", lambda p: coordinator.handle_nudge_mute(p))

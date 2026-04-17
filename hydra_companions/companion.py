@@ -45,11 +45,18 @@ class Companion:
         self.provider = provider
         self.user_id = user_id
         self.transcript: list[dict] = []
-        # Per-soul default mood (calm | focused | chill | \u2026) \u2014 pulled from
-        # the soul's mood_model.default at compile time; stored on the
-        # CompiledSoul as .default_mood (see compiler.py).
+        # Per-soul default mood label \u2014 pulled from mood_model.default in
+        # compiler.py. The mood is currently a static label surfaced in
+        # meta() for the UI. Dynamic mood transitions (VOLATILE \u2192
+        # "cautionary", drawdown \u2192 "sober", etc.) are a Phase-7
+        # follow-up once trigger wiring is in place.
         self.mood: str = getattr(soul, "default_mood", None) or "calm"
-        self.serious_mode: bool = False  # broski-only, default off
+        # Broski-specific: a flag that the router reads to lower LLM
+        # temperature when real risk is on the table. Currently only
+        # reachable manually via `companion.set_serious_mode` WS route
+        # (see coordinator.handle_set_serious_mode). Automated triggers
+        # (rent-money language, tilt detection) are Phase-7 work.
+        self.serious_mode: bool = False
         self._transcript_path = TRANSCRIPTS_DIR / f"{user_id}_{soul.id}.jsonl"
         self._load_transcript_tail()
         # Phase 5: distilled memory (topic-bucketed facts)

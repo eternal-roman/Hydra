@@ -313,6 +313,31 @@ class CompanionCoordinator:
         self._pending.pop(pid, None)
         return {"success": True}
 
+    def handle_nudge_mute(self, payload: dict) -> Optional[dict]:
+        """Silence proactive nudges for a window (seconds). 0 = forever
+        this session."""
+        if self.nudge_scheduler is None:
+            return {"success": False, "error": "nudges not running"}
+        try:
+            secs = float(payload.get("seconds", 3600))
+        except (TypeError, ValueError):
+            return {"success": False, "error": "bad seconds arg"}
+        self.nudge_scheduler.mute(secs)
+        return {"success": True, "muted_seconds": secs}
+
+    def handle_set_serious_mode(self, payload: dict) -> Optional[dict]:
+        """Toggle Broski's serious mode (router temperature delta kicks in).
+        Other companions ignore the flag \u2014 the router only reads it for
+        broski. Returns the new state."""
+        cid = (payload.get("companion_id") or "broski").lower()
+        uid = payload.get("user_id") or DEFAULT_USER_ID
+        comp = self.get(cid, uid)
+        if comp is None:
+            return {"success": False, "error": f"unknown companion: {cid}"}
+        on = bool(payload.get("on", True))
+        comp.serious_mode = on
+        return {"success": True, "companion_id": cid, "serious_mode": on}
+
     def handle_clear_transcript(self, payload: dict) -> Optional[dict]:
         """Clear one companion's transcript, or all three with scope=all."""
         scope = (payload.get("scope") or "one").lower()

@@ -139,10 +139,21 @@ class NudgeScheduler:
         return None, {}
 
     def _companion_for_trigger(self, trigger: str) -> str:
-        # Regime flips \u2014 Apex is the one who talks regimes in trader-speak.
-        if trigger == "regime_flip":
-            return "apex"
-        return "apex"
+        """Route a nudge trigger to the best-fit companion voice.
+
+        Phase 6 v1 only ships regime-flip triggers and routes them to
+        Apex (trader-speak). Future triggers \u2014 drawdown \u2192 Athena,
+        narrative spike \u2192 Broski, etc. \u2014 should extend this map.
+        Unknown triggers fall back to Apex as the neutral choice.
+        """
+        trigger_to_companion = {
+            "regime_flip": "apex",
+            # Reserved mappings for Phase 6.x expansion:
+            # "drawdown_gt_5pct": "athena",
+            # "narrative_spike":  "broski",
+            # "funding_extreme":  "apex",
+        }
+        return trigger_to_companion.get(trigger, "apex")
 
     def _nudge_prompt(self, trigger: str, context: dict, display_name: str) -> str:
         if trigger == "regime_flip":

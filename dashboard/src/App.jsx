@@ -455,7 +455,7 @@ function fmtPxShort(p) {
   return Number(p) < 100 ? Number(p).toFixed(4) : Number(p).toFixed(2);
 }
 
-function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status, onStatusReset }) {
+function ProposalCard({ proposal, kind, theme, onConfirm, onReject, status }) {
   // kind: "trade" | "ladder"
   // status: null | "armed" | "submitting" | "filled" | "rejected" | "failed" | "expired"
   const [now, setNow] = useState(() => Date.now() / 1000);
@@ -628,7 +628,7 @@ function CompanionTypingBubble({ theme, name }) {
 
 function CompanionDrawer({
   open, onClose, active, onSwitch, companions, messages, typing,
-  onSend, onProposalConfirm, onProposalReject, connected, drawerWidth, onResize, costAlerts,
+  onSend, onProposalConfirm, onProposalReject, connected, drawerWidth, costAlerts,
 }) {
   const theme = COMPANION_THEMES[active] || COMPANION_THEMES.apex;
   const [draft, setDraft] = useState("");
@@ -768,7 +768,6 @@ function CompanionDrawer({
                 status={m.status}
                 onConfirm={() => onProposalConfirm(m)}
                 onReject={() => onProposalReject(m)}
-                onStatusReset={() => {}}
               />
             );
           }
@@ -2540,10 +2539,12 @@ export default function App() {
     try { return localStorage.getItem("hydra.companion.drawer.open") === "1"; }
     catch { return false; }
   });
-  const [companionDrawerWidth, setCompanionDrawerWidth] = useState(() => {
+  // Drawer width read once from localStorage; interactive resize is a
+  // future enhancement and will flip this to useState when wired.
+  const companionDrawerWidth = (() => {
     try { return parseInt(localStorage.getItem("hydra.companion.drawer.width") || "380", 10); }
     catch { return 380; }
-  });
+  })();
   // Per-companion state as INDEPENDENT useState hooks so updates to one
   // companion physically cannot leak into another. A prior object-keyed
   // state had a subtle cross-contamination bug where user-echo messages
@@ -3691,7 +3692,6 @@ export default function App() {
         onProposalReject={companionProposalReject}
         connected={connected}
         drawerWidth={companionDrawerWidth}
-        onResize={setCompanionDrawerWidth}
         costAlerts={companionCostAlerts}
       />
 
