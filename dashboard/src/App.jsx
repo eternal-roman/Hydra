@@ -1201,10 +1201,13 @@ const VERDICT_COLORS = {
 };
 
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
-                             onView, filters, onFilterChange, loading }) {
+                             onView, filters, onFilterChange, loading,
+                             onCompare, canCompare, compareInFlight }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const hasAdvancedFilters = !!(filters.triggered_by || filters.tag);
 
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
@@ -1226,7 +1229,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             )}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           {selCount > 0 && (
             <button
               onClick={onClearSelection}
@@ -1249,48 +1252,123 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           >
             {loading ? "…" : "Refresh"}
           </button>
+          {/* Primary inline Compare button — visible right next to the selection
+              so the user never has to hunt for it. Disabled state explains why. */}
+          {onCompare && (
+            <button
+              onClick={onCompare}
+              disabled={!canCompare}
+              title={
+                selCount < 2 ? "Tick at least 2 rows below to enable Compare."
+                             : selCount > 8 ? "Max 8 experiments per comparison."
+                             : "Run the comparison."
+              }
+              style={{ padding: "6px 14px", fontSize: 12, fontFamily: mono, fontWeight: 700,
+                       background: canCompare ? COLORS.purple : `${COLORS.purple}20`,
+                       color: canCompare ? "#0a0a0f" : COLORS.textMuted,
+                       border: `1px solid ${canCompare ? COLORS.purple : `${COLORS.purple}40`}`,
+                       borderRadius: 4,
+                       cursor: canCompare ? "pointer" : "not-allowed",
+                       letterSpacing: "0.1em", textTransform: "uppercase",
+                       boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
+            >
+              {compareInFlight
+                ? "Comparing…"
+                : selCount >= 2 ? `Compare ${selCount} →` : "Compare →"}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Filter row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
-        <div>
-          <FieldLabel labelSize={11} hintSize={11}>Status</FieldLabel>
-          <select
-            value={filters.status || ""}
-            onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
-            style={{ width: "100%", padding: "7px 10px", background: COLORS.bg, color: COLORS.text,
-                     border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
-                     fontSize: 12, fontFamily: mono, outline: "none" }}
-          >
-            <option value="">Any</option>
-            <option value="complete">complete</option>
-            <option value="running">running</option>
-            <option value="pending">pending</option>
-            <option value="failed">failed</option>
-            <option value="cancelled">cancelled</option>
-          </select>
-        </div>
-        <div>
-          <FieldLabel labelSize={11} hintSize={11}>Triggered By</FieldLabel>
-          <StyledInput
-            value={filters.triggered_by || ""}
-            onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
-            placeholder="e.g. dashboard, brain:analyst"
-            fontSize={12}
-            padding="7px 10px"
-          />
-        </div>
-        <div>
-          <FieldLabel labelSize={11} hintSize={11}>Tag Contains</FieldLabel>
-          <StyledInput
-            value={filters.tag || ""}
-            onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
-            placeholder="e.g. preset:divergent"
-            fontSize={12}
-            padding="7px 10px"
-          />
-        </div>
+      {/* Filters — collapsed by default. Clutter for new users running a
+          handful of manual experiments; useful once the library grows and
+          the brain/tuner start auto-submitting. */}
+      <div style={{ marginBottom: 12 }}>
+        <button
+          onClick={() => setFiltersOpen(v => !v)}
+          style={{ background: "transparent", border: "none", padding: 0,
+                   fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                   cursor: "pointer", letterSpacing: "0.08em",
+                   textTransform: "uppercase", fontWeight: 600,
+                   display: "flex", alignItems: "center", gap: 6 }}
+          title="Show filters for narrowing a large library by run status, who submitted the run, or a specific tag."
+        >
+          <span style={{ fontSize: 10, transition: "transform 0.15s",
+                         display: "inline-block",
+                         transform: filtersOpen ? "rotate(90deg)" : "none" }}>▶</span>
+          Filters
+          {hasAdvancedFilters && (
+            <span style={{ color: COLORS.purple, fontSize: 10 }}>
+              ({[filters.status, filters.triggered_by, filters.tag]
+                  .filter(Boolean).length} active)
+            </span>
+          )}
+        </button>
+
+        {filtersOpen && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+                        gap: 10, marginTop: 10 }}>
+            <div>
+              <FieldLabel
+                labelSize={11}
+                hintSize={11}
+                hint="Run state reported by the server."
+              >
+                Status
+              </FieldLabel>
+              <select
+                value={filters.status || ""}
+                onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
+                style={{ width: "100%", padding: "7px 10px", background: COLORS.bg, color: COLORS.text,
+                         border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
+                         fontSize: 12, fontFamily: mono, outline: "none" }}
+              >
+                <option value="">Any</option>
+                <option value="complete">complete</option>
+                <option value="running">running</option>
+                <option value="pending">pending</option>
+                <option value="failed">failed</option>
+                <option value="cancelled">cancelled</option>
+              </select>
+            </div>
+            <div>
+              <FieldLabel
+                labelSize={11}
+                hintSize={11}
+                hint="Who submitted: dashboard (you), brain:analyst / brain:strategist (AI), tuner (auto-probe)."
+              >
+                <span title="Every run is stamped with its submitter. 'dashboard' = you clicked Run Backtest. 'brain:analyst' or 'brain:strategist' = the AI brain auto-submitted an experiment. 'tuner' = the self-tuner is probing parameter values. Leave blank when you only have manual runs.">
+                  Triggered By ⓘ
+                </span>
+              </FieldLabel>
+              <StyledInput
+                value={filters.triggered_by || ""}
+                onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
+                placeholder="e.g. dashboard"
+                fontSize={12}
+                padding="7px 10px"
+              />
+            </div>
+            <div>
+              <FieldLabel
+                labelSize={11}
+                hintSize={11}
+                hint="Free-text tag match. e.g. preset:divergent, mc, wf."
+              >
+                <span title="Every run is stamped with tags when submitted — preset:NAME, caller:dashboard, mc (Monte Carlo enabled), wf (Walk-Forward enabled), and anything custom. Use this to find 'all runs with Monte Carlo' or 'all runs on the divergent preset'.">
+                  Tag Contains ⓘ
+                </span>
+              </FieldLabel>
+              <StyledInput
+                value={filters.tag || ""}
+                onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
+                placeholder="e.g. preset:divergent"
+                fontSize={12}
+                padding="7px 10px"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Column legend — placed ABOVE the list so columns are labelled before you read them. */}
@@ -1661,6 +1739,9 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         filters={filters}
         onFilterChange={onFilterChange}
         loading={loading}
+        onCompare={onCompare}
+        canCompare={canCompare}
+        compareInFlight={compareInFlight}
       />
 
       {/* Compare action row */}
