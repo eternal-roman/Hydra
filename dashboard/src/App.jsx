@@ -602,45 +602,108 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             )}
           </div>
 
-          {/* Backtest Status */}
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16 }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
-              Backtest Status
-            </div>
-            {ackMsg ? (
-              <div>
-                <div style={{ fontFamily: mono, fontSize: 12, fontWeight: 700,
-                              color: ackMsg.success ? COLORS.accent : COLORS.danger }}>
-                  {ackMsg.success ? "✓ Submitted" : "✗ Rejected"}
+          {/* Run Status — lifecycle of the most recent submission. Derives a
+              single state from (ackMsg × observerProgress × observerResult). */}
+          {(() => {
+            // State machine:
+            //   idle       — never submitted
+            //   rejected   — server refused (validation, quota, etc.)
+            //   queued     — accepted, not started yet
+            //   running    — tick stream active
+            //   complete   — terminal result received
+            const stage = observerProgress?.stage;
+            const runState =
+              ackMsg && ackMsg.success === false ? "rejected" :
+              observerResult ? "complete" :
+              (observerProgress && (stage === "running" || stage === "started")) ? "running" :
+              ackMsg?.success ? "queued" :
+              "idle";
+
+            const paletteByState = {
+              idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
+              queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
+              running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
+              complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
+              rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
+            };
+            const p = paletteByState[runState];
+
+            const bodyByState = {
+              idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
+              queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
+              running: observerProgress
+                ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
+                : "Executing. Live data streams into the Observer chart below.",
+              complete: "Finished — Last Result shows metrics, Rigor Gates reflect which checks passed, and the equity curve is in the Observer.",
+              rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
+            };
+
+            const expId = observerResult?.experiment_id
+                       || observerProgress?.experiment_id
+                       || ackMsg?.experiment_id;
+
+            return (
+              <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                            borderRadius: 8, padding: 16 }}>
+                <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                              marginBottom: 4 }}>
+                  Run Status
                 </div>
-                {ackMsg.experiment_id && (
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginTop: 4 }}>
-                    {ackMsg.experiment_id.slice(0, 12)}…
+                <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textMuted,
+                              marginBottom: 12 }}>
+                  Lifecycle of your most recent submission.
+                </div>
+
+                {/* State badge */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%",
+                                 background: p.dot,
+                                 boxShadow: runState === "running"
+                                   ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}`
+                                   : `0 0 4px ${p.dot}80`,
+                                 animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
+                  <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700,
+                                 color: p.fg, letterSpacing: "0.04em" }}>
+                    {p.label}
+                  </span>
+                </div>
+
+                {/* Body — plain-English description of what this state means */}
+                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                              lineHeight: 1.5, marginBottom: expId || (completedCount > 0) ? 10 : 0 }}>
+                  {bodyByState[runState]}
+                </div>
+
+                {/* Experiment id — only when a run has actually been accepted */}
+                {expId && (
+                  <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textMuted,
+                                marginBottom: completedCount > 0 ? 10 : 0,
+                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                       title={`Full experiment id: ${expId}`}>
+                    id: {expId.slice(0, 12)}…
                   </div>
                 )}
-                {ackMsg.error && (
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.danger, marginTop: 4 }}>
-                    {ackMsg.error}
+
+                {/* Session totals — across the current browser session */}
+                {(completedCount > 0 || reviewedCount > 0) && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                                paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}
+                       title="Totals since you opened the dashboard. 'Reviewed' = the AI reviewer finished scoring the run against the Rigor Gates.">
+                    <span style={{ color: COLORS.text, fontWeight: 700 }}>{completedCount}</span>
+                    {" "}completed
+                    {reviewedCount > 0 && (
+                      <>
+                        {" · "}
+                        <span style={{ color: COLORS.purple, fontWeight: 700 }}>{reviewedCount}</span>
+                        {" AI-reviewed"}
+                      </>
+                    )}
+                    {" "}this session
                   </div>
                 )}
               </div>
-            ) : (
-              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
-                No backtest submitted this session.
-              </div>
-            )}
-            {(lastResultId || completedCount > 0) && (
-              <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginTop: 10,
-                            paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-                Session: <span style={{ color: COLORS.text }}>{completedCount}</span> done
-                {reviewedCount > 0 && (
-                  <>, <span style={{ color: COLORS.purple }}>{reviewedCount}</span> reviewed</>
-                )}
-              </div>
-            )}
-          </div>
+            );
+          })()}
 
           {/* Rigor Gates — color-coded pills driven by the latest review's
               gates_passed dict. Grey = no result yet, green = passed, red = failed.
