@@ -1030,12 +1030,12 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                   borderRadius: 8, padding: 16 }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                    marginBottom: 12 }}>
+                    marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
             Experiment Library
           </div>
-          <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.textDim }}>
+          <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
             {count} experiments
             {selCount > 0 && (
               <>
@@ -1049,7 +1049,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           {selCount > 0 && (
             <button
               onClick={onClearSelection}
-              style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+              style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
                        background: "transparent", color: COLORS.textDim,
                        border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
                        cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase" }}
@@ -1060,7 +1060,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           <button
             onClick={onRefresh}
             disabled={loading}
-            style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+            style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
                      background: COLORS.blue + "20", color: COLORS.blue,
                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
                      cursor: loading ? "wait" : "pointer", letterSpacing: "0.1em",
@@ -1072,15 +1072,15 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
       </div>
 
       {/* Filter row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
         <div>
-          <FieldLabel>Status</FieldLabel>
+          <FieldLabel labelSize={11} hintSize={11}>Status</FieldLabel>
           <select
             value={filters.status || ""}
             onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
-            style={{ width: "100%", padding: "6px 8px", background: COLORS.bg, color: COLORS.text,
+            style={{ width: "100%", padding: "7px 10px", background: COLORS.bg, color: COLORS.text,
                      border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
-                     fontSize: 11, fontFamily: mono, outline: "none" }}
+                     fontSize: 12, fontFamily: mono, outline: "none" }}
           >
             <option value="">Any</option>
             <option value="complete">complete</option>
@@ -1091,31 +1091,52 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           </select>
         </div>
         <div>
-          <FieldLabel>Triggered By</FieldLabel>
+          <FieldLabel labelSize={11} hintSize={11}>Triggered By</FieldLabel>
           <StyledInput
             value={filters.triggered_by || ""}
             onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
             placeholder="e.g. dashboard, brain:analyst"
+            fontSize={12}
+            padding="7px 10px"
           />
         </div>
         <div>
-          <FieldLabel>Tag Contains</FieldLabel>
+          <FieldLabel labelSize={11} hintSize={11}>Tag Contains</FieldLabel>
           <StyledInput
             value={filters.tag || ""}
             onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
             placeholder="e.g. preset:divergent"
+            fontSize={12}
+            padding="7px 10px"
           />
         </div>
       </div>
 
+      {/* Column legend — placed ABOVE the list so columns are labelled before you read them. */}
+      {count > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
+                      gap: 6, marginBottom: 6, padding: "0 10px",
+                      fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                      textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600 }}>
+          <span />
+          <span>Name / ID</span>
+          <span style={{ textAlign: "right" }}>Status</span>
+          <span style={{ textAlign: "right" }}>Trades</span>
+          <span style={{ textAlign: "right" }}>Return</span>
+          <span style={{ textAlign: "right" }}>Sharpe</span>
+          <span style={{ textAlign: "right" }}>Max DD</span>
+          <span />
+        </div>
+      )}
+
       {/* List */}
       {count === 0 ? (
-        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                      padding: "32px 0", textAlign: "center" }}>
-          {loading ? "Loading…" : "No experiments found. Submit a backtest from the BACKTEST tab."}
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                      padding: "40px 0", textAlign: "center" }}>
+          {loading ? "Loading…" : "No experiments yet. Submit a backtest from the BACKTEST tab, then return here."}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4,
+        <div style={{ display: "flex", flexDirection: "column", gap: 5,
                       maxHeight: 420, overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
@@ -1132,12 +1153,12 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 onClick={() => canSelect && onToggleSelect(e.id)}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
+                  gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
                   gap: 6, alignItems: "center",
-                  padding: "6px 10px",
+                  padding: "8px 10px",
                   background: selected ? `${COLORS.purple}12` : COLORS.bg,
                   border: `1px solid ${selected ? COLORS.purple + "60" : COLORS.panelBorder}`,
-                  borderRadius: 4, fontFamily: mono, fontSize: 10,
+                  borderRadius: 4, fontFamily: mono, fontSize: 12,
                   cursor: canSelect ? "pointer" : "not-allowed",
                   opacity: canSelect ? 1 : 0.5,
                 }}
@@ -1152,12 +1173,16 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 />
                 <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   <span style={{ color: COLORS.text, fontWeight: 600 }}>{e.name}</span>
-                  <span style={{ color: COLORS.textMuted, marginLeft: 8 }}>{e.id.slice(0, 8)}</span>
+                  <span style={{ color: COLORS.textMuted, marginLeft: 8, fontSize: 11 }}>
+                    {e.id.slice(0, 8)}
+                  </span>
                   {e.base_preset && (
-                    <span style={{ color: COLORS.blue, marginLeft: 6 }}>[{e.base_preset}]</span>
+                    <span style={{ color: COLORS.blue, marginLeft: 6, fontSize: 11 }}>
+                      [{e.base_preset}]
+                    </span>
                   )}
                 </div>
-                <span style={{ color: statusColor, textAlign: "right",
+                <span style={{ color: statusColor, textAlign: "right", fontSize: 11,
                                textTransform: "uppercase", letterSpacing: "0.05em" }}>
                   {e.status}
                 </span>
@@ -1178,7 +1203,8 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 <button
                   onClick={(ev) => { ev.stopPropagation(); onView(e.id); }}
                   style={{ background: "transparent", border: "none", color: COLORS.textDim,
-                           cursor: "pointer", fontSize: 11, padding: 0, fontFamily: mono }}
+                           cursor: "pointer", fontSize: 14, padding: 0, fontFamily: mono,
+                           lineHeight: 1 }}
                   title="View details"
                 >
                   ›
@@ -1186,23 +1212,6 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
               </div>
             );
           })}
-        </div>
-      )}
-
-      {/* Column legend */}
-      {count > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
-                      gap: 6, marginTop: 6, padding: "0 10px",
-                      fontFamily: mono, fontSize: 9, color: COLORS.textMuted,
-                      textTransform: "uppercase", letterSpacing: "0.08em" }}>
-          <span />
-          <span>Name / ID</span>
-          <span style={{ textAlign: "right" }}>Status</span>
-          <span style={{ textAlign: "right" }}>Trades</span>
-          <span style={{ textAlign: "right" }}>Return</span>
-          <span style={{ textAlign: "right" }}>Sharpe</span>
-          <span style={{ textAlign: "right" }}>Max DD</span>
-          <span />
         </div>
       )}
     </div>
@@ -1222,25 +1231,25 @@ function CompareResults({ report, experimentsById }) {
   return (
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                   borderRadius: 8, padding: 16, marginTop: 12 }}>
-      <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                    marginBottom: 10 }}>
+      <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                    marginBottom: 12 }}>
         Comparison
       </div>
 
       {/* Ranked table */}
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 11 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 12 }}>
           <thead>
-            <tr style={{ color: COLORS.textDim, fontSize: 9, textTransform: "uppercase",
-                         letterSpacing: "0.08em" }}>
-              <th style={{ textAlign: "left",  padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+            <tr style={{ color: COLORS.textDim, fontSize: 11, textTransform: "uppercase",
+                         letterSpacing: "0.08em", fontWeight: 600 }}>
+              <th style={{ textAlign: "left",  padding: "10px 8px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                 Experiment
               </th>
-              <th style={{ textAlign: "right", padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+              <th style={{ textAlign: "right", padding: "10px 8px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                 Trades
               </th>
               {metrics.map(m => (
-                <th key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                <th key={m.key} style={{ textAlign: "right", padding: "10px 8px",
                                           borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                   {m.label}
                 </th>
@@ -1251,13 +1260,13 @@ function CompareResults({ report, experimentsById }) {
             {report.rows.map((row) => (
               <tr key={row.experiment_id}
                   style={{ borderBottom: `1px solid ${COLORS.bg}` }}>
-                <td style={{ padding: "8px 6px", minWidth: 160 }}>
+                <td style={{ padding: "10px 8px", minWidth: 160 }}>
                   <div style={{ color: COLORS.text, fontWeight: 600 }}>{row.name}</div>
-                  <div style={{ color: COLORS.textMuted, fontSize: 9 }}>
+                  <div style={{ color: COLORS.textMuted, fontSize: 11 }}>
                     {row.experiment_id.slice(0, 16)}
                   </div>
                 </td>
-                <td style={{ textAlign: "right", padding: "8px 6px", color: COLORS.text }}>
+                <td style={{ textAlign: "right", padding: "10px 8px", color: COLORS.text }}>
                   {row.total_trades}
                 </td>
                 {metrics.map(m => {
@@ -1266,13 +1275,13 @@ function CompareResults({ report, experimentsById }) {
                   const good = m.higherBetter ? (val > 0) : (val < 10);
                   const color = isWinner ? COLORS.accent : (good ? COLORS.text : COLORS.textDim);
                   return (
-                    <td key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                    <td key={m.key} style={{ textAlign: "right", padding: "10px 8px",
                                               color, fontWeight: isWinner ? 700 : 400 }}>
                       {val != null && Number.isFinite(val)
                         ? `${m.higherBetter && val > 0 ? "+" : ""}${val.toFixed(2)}${m.suffix}`
                         : "—"}
                       {isWinner && (
-                        <span style={{ marginLeft: 4, fontSize: 9, color: COLORS.accent }}>★</span>
+                        <span style={{ marginLeft: 4, fontSize: 11, color: COLORS.accent }}>★</span>
                       )}
                     </td>
                   );
@@ -1284,22 +1293,22 @@ function CompareResults({ report, experimentsById }) {
       </div>
 
       {/* Per-metric winners */}
-      <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}`,
-                    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.panelBorder}`,
+                    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
         {metrics.map(m => {
           const winnerId = winners[m.key];
           const winner = winnerId
             ? (report.rows.find(r => r.experiment_id === winnerId) || experimentsById?.[winnerId])
             : null;
           return (
-            <div key={m.key} style={{ background: COLORS.bg, padding: "8px 10px",
+            <div key={m.key} style={{ background: COLORS.bg, padding: "10px 12px",
                                        border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
-              <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
-                            letterSpacing: "0.1em", fontFamily: mono }}>
+              <div style={{ fontSize: 11, color: COLORS.textDim, textTransform: "uppercase",
+                            letterSpacing: "0.1em", fontFamily: mono, fontWeight: 600 }}>
                 {m.label} winner
               </div>
-              <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.accent,
-                            marginTop: 4, whiteSpace: "nowrap", overflow: "hidden",
+              <div style={{ fontSize: 13, fontFamily: mono, color: COLORS.accent, fontWeight: 700,
+                            marginTop: 5, whiteSpace: "nowrap", overflow: "hidden",
                             textOverflow: "ellipsis" }}>
                 {winner ? (winner.name || winner.id?.slice(0, 12) || "—") : "—"}
               </div>
@@ -1308,32 +1317,41 @@ function CompareResults({ report, experimentsById }) {
         })}
       </div>
 
-      {/* Pairwise p-values (significance). "__" is the key separator. */}
+      {/* Pairwise p-values (significance). "__" is the key separator.
+          Resolve short IDs back to experiment names so chips are readable. */}
       {report.pairwise_sharpe_p_values && Object.keys(report.pairwise_sharpe_p_values).length > 0 && (
-        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-          <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
-                        letterSpacing: "0.1em", fontFamily: mono, marginBottom: 6 }}>
-            Paired bootstrap p-values (per-tick return diffs)
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+          <div style={{ fontSize: 11, color: COLORS.textDim, textTransform: "uppercase",
+                        letterSpacing: "0.1em", fontFamily: mono, marginBottom: 8, fontWeight: 600 }}>
+            Paired bootstrap p-values · per-tick return diffs
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {Object.entries(report.pairwise_sharpe_p_values).map(([key, p]) => {
               const [a, b] = key.split("__");
               const significant = p < 0.05;
+              const nameFor = (id) =>
+                report.rows.find(r => r.experiment_id === id || r.experiment_id?.startsWith(id))?.name
+                || experimentsById?.[id]?.name
+                || id.slice(0, 8);
               return (
-                <div key={key} style={{ fontFamily: mono, fontSize: 10,
-                                         padding: "4px 8px",
+                <div key={key} style={{ fontFamily: mono, fontSize: 12,
+                                         padding: "6px 10px",
                                          background: significant ? `${COLORS.accent}12` : COLORS.bg,
                                          border: `1px solid ${significant ? COLORS.accent : COLORS.panelBorder}`,
                                          borderRadius: 3,
                                          color: significant ? COLORS.accent : COLORS.textDim }}>
-                  {a.slice(0, 6)} vs {b.slice(0, 6)}: p={p.toFixed(3)}
-                  {significant && " ✓"}
+                  <span style={{ fontWeight: 600 }}>{nameFor(a)}</span>
+                  <span style={{ opacity: 0.6, margin: "0 6px" }}>vs</span>
+                  <span style={{ fontWeight: 600 }}>{nameFor(b)}</span>
+                  <span style={{ marginLeft: 8 }}>p={p.toFixed(3)}</span>
+                  {significant && <span style={{ marginLeft: 4 }}>✓</span>}
                 </div>
               );
             })}
           </div>
-          <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono, marginTop: 6 }}>
-            ✓ = difference statistically significant at p&lt;0.05.
+          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, marginTop: 8 }}>
+            <span style={{ color: COLORS.accent }}>✓</span> = sharpe difference statistically
+            significant at p&lt;0.05 (not just noise from random variation).
           </div>
         </div>
       )}
@@ -1348,6 +1366,25 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 
   return (
     <div>
+      {/* How-it-works banner — the COMPARE tab's workflow is otherwise implicit. */}
+      <div style={{ marginBottom: 12, padding: "12px 16px",
+                    background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
+                    borderRadius: 8, fontFamily: mono, fontSize: 12, color: COLORS.text,
+                    lineHeight: 1.55 }}>
+        <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700,
+                      color: COLORS.purple, marginBottom: 6, letterSpacing: "0.02em" }}>
+          Compare Past Backtests
+        </div>
+        <div style={{ color: COLORS.textDim }}>
+          Every run from the <span style={{ color: COLORS.blue }}>BACKTEST</span> tab is stored here.
+          {" "}<span style={{ color: COLORS.text }}>1.</span> Filter/browse the library below ·
+          {" "}<span style={{ color: COLORS.text }}>2.</span> Check 2–8 experiments ·
+          {" "}<span style={{ color: COLORS.text }}>3.</span> Click Compare to rank them on Return,
+          Sharpe, Max DD, and Profit Factor — with paired-bootstrap p-values showing which
+          sharpe differences are real signal vs. noise.
+        </div>
+      </div>
+
       <ExperimentLibrary
         experiments={experiments}
         selectedIds={selectedIds}
@@ -1362,24 +1399,25 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 
       {/* Compare action row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                    marginTop: 12, padding: "10px 16px",
+                    marginTop: 12, padding: "12px 16px",
                     background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
                     borderRadius: 8 }}>
-        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
           {selectedIds.length === 0 ? (
-            "Select 2-8 experiments from the library above to compare."
+            "Check 2–8 experiments above to enable compare."
           ) : selectedIds.length === 1 ? (
             <>1 selected — <span style={{ color: COLORS.warn }}>need at least 2 to compare</span></>
           ) : (
             <>
-              <span style={{ color: COLORS.purple }}>{selectedIds.length}</span> selected · ready to compare
+              <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
+              {" "}selected · ready to compare
             </>
           )}
         </div>
         <button
           onClick={onCompare}
           disabled={!canCompare}
-          style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, fontFamily: mono,
+          style={{ padding: "10px 20px", fontSize: 13, fontWeight: 700, fontFamily: mono,
                    textTransform: "uppercase", letterSpacing: "0.1em",
                    background: canCompare ? COLORS.purple : COLORS.panelBorder,
                    color: canCompare ? "#0a0a0f" : COLORS.textMuted,
@@ -1398,24 +1436,25 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
       ) : compareReport && !compareReport.success ? (
         <div style={{ marginTop: 12, padding: 16, background: COLORS.panel,
                       border: `1px solid ${COLORS.danger}40`, borderRadius: 8,
-                      color: COLORS.danger, fontFamily: mono, fontSize: 11 }}>
+                      color: COLORS.danger, fontFamily: mono, fontSize: 12 }}>
           Compare failed: {compareReport.error}
           {compareReport.missing_ids && (
-            <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 4 }}>
               Missing: {compareReport.missing_ids.join(", ")}
             </div>
           )}
         </div>
       ) : null}
 
-      {/* Tip */}
+      {/* Tip — reading guide for first-time users once a comparison is pending */}
       {!compareReport && (
-        <div style={{ marginTop: 12, padding: "10px 14px",
+        <div style={{ marginTop: 12, padding: "12px 16px",
                       background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 6, fontSize: 10, fontFamily: mono, color: COLORS.textDim,
-                      lineHeight: 1.5 }}>
-          Per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
-          Pairwise p-values use paired bootstrap over per-tick return diffs —
+                      borderRadius: 6, fontSize: 12, fontFamily: mono, color: COLORS.textDim,
+                      lineHeight: 1.55 }}>
+          <span style={{ color: COLORS.text, fontWeight: 600 }}>How to read results:</span>{" "}
+          per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
+          Pairwise p-values use a paired bootstrap on per-tick return diffs —
           <span style={{ color: COLORS.accent }}> p&lt;0.05</span> means the sharpe gap isn't just noise.
         </div>
       )}
@@ -1795,17 +1834,17 @@ export default function App() {
             {activeTab === "COMPARE" && (
               <div style={{ padding: "16px 24px" }}>
                 {viewingExpId && (
-                  <div style={{ marginBottom: 10, padding: "8px 14px",
+                  <div style={{ marginBottom: 12, padding: "10px 16px",
                                 background: `${COLORS.blue}10`,
                                 border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                fontFamily: mono, fontSize: 10, color: COLORS.blue,
+                                fontFamily: mono, fontSize: 12, color: COLORS.blue,
                                 display: "flex", justifyContent: "space-between",
                                 alignItems: "center" }}>
                     <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
                     <button onClick={() => setViewingExpId(null)}
                             style={{ background: "transparent", border: "none",
                                      color: COLORS.blue, cursor: "pointer",
-                                     fontFamily: mono, fontSize: 10 }}>
+                                     fontFamily: mono, fontSize: 12 }}>
                       dismiss
                     </button>
                   </div>
