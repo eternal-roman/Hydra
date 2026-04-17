@@ -2536,9 +2536,53 @@ export default function App() {
     try { return parseInt(localStorage.getItem("hydra.companion.drawer.width") || "380", 10); }
     catch { return 380; }
   });
-  const [companionMessages, setCompanionMessages] = useState({ athena: [], apex: [], broski: [] });
-  const [companionTyping, setCompanionTyping] = useState({ athena: false, apex: false, broski: false });
-  const [companionUnread, setCompanionUnread] = useState({ athena: false, apex: false, broski: false });
+  // Per-companion state as INDEPENDENT useState hooks so updates to one
+  // companion physically cannot leak into another. A prior object-keyed
+  // state had a subtle cross-contamination bug where user-echo messages
+  // appeared in all three drawers.
+  const [athenaMessages, setAthenaMessages] = useState([]);
+  const [apexMessages, setApexMessages] = useState([]);
+  const [broskiMessages, setBroskiMessages] = useState([]);
+  const [athenaTyping, setAthenaTyping] = useState(false);
+  const [apexTyping, setApexTyping] = useState(false);
+  const [broskiTyping, setBroskiTyping] = useState(false);
+  const [athenaUnread, setAthenaUnread] = useState(false);
+  const [apexUnread, setApexUnread] = useState(false);
+  const [broskiUnread, setBroskiUnread] = useState(false);
+  // Unified read/write helpers. The setter IS a single companion's setter,
+  // so overlapping state updates are impossible.
+  const getMessages = useCallback((cid) =>
+    cid === "athena" ? athenaMessages
+    : cid === "apex" ? apexMessages
+    : broskiMessages,
+    [athenaMessages, apexMessages, broskiMessages]
+  );
+  const getMessageSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaMessages
+    : cid === "apex" ? setApexMessages
+    : setBroskiMessages,
+    []
+  );
+  const getTypingSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaTyping
+    : cid === "apex" ? setApexTyping
+    : setBroskiTyping,
+    []
+  );
+  const getUnreadSetter = useCallback((cid) =>
+    cid === "athena" ? setAthenaUnread
+    : cid === "apex" ? setApexUnread
+    : setBroskiUnread,
+    []
+  );
+  const getTyping = (cid) =>
+    cid === "athena" ? athenaTyping
+    : cid === "apex" ? apexTyping
+    : broskiTyping;
+  const getUnread = (cid) =>
+    cid === "athena" ? athenaUnread
+    : cid === "apex" ? apexUnread
+    : broskiUnread;
   const [companionCostAlerts, setCompanionCostAlerts] = useState({});
   const [companionVisible, setCompanionVisible] = useState(true);    // optimistic \u2014 orb shows immediately; hides on failed connect
   const wsRef = useRef(null);
@@ -2661,18 +2705,19 @@ export default function App() {
                 if (msg.companion) metas[msg.companion.id] = msg.companion;
                 setCompanions((prev) => ({ ...prev, ...metas }));
                 setCompanionVisible(true);
-              } else {
-                // Subsystem disabled on server \u2014 hide the orb.
-                setCompanionVisible(false);
-                // Seed history for the active companion if provided
+                // Seed history for the specific companion the server named.
+                // (Was previously in the else-branch by mistake, which meant
+                // initial-open history never populated.)
                 if (msg.companion && Array.isArray(msg.history_tail)) {
                   const seeded = msg.history_tail.map((t, i) => ({
                     id: `seed-${msg.companion.id}-${i}`,
                     role: t.role, text: t.content,
                     display_name: t.role === "assistant" ? msg.companion.display_name : null,
                   }));
-                  setCompanionMessages((prev) => ({ ...prev, [msg.companion.id]: seeded }));
+                  getMessageSetter(msg.companion.id)(seeded);
                 }
+              } else {
+                setCompanionVisible(false);
               }
               return;
             }
@@ -2685,7 +2730,7 @@ export default function App() {
                     role: t.role, text: t.content,
                     display_name: t.role === "assistant" ? msg.companion.display_name : null,
                   }));
-                  setCompanionMessages((prev) => ({ ...prev, [msg.companion.id]: seeded }));
+                  getMessageSetter(msg.companion.id)(seeded);
                 }
               }
               return;
@@ -2693,32 +2738,26 @@ export default function App() {
             case "companion.typing": {
               const cid = msg.companion_id;
               if (cid) {
-                // Any state that isn't "thinking" clears the indicator.
-                const on = msg.state === "thinking";
-                setCompanionTyping((prev) => ({ ...prev, [cid]: on }));
+                getTypingSetter(cid)(msg.state === "thinking");
               }
               return;
             }
             case "companion.message.complete": {
               const cid = msg.companion_id;
               if (cid) {
-                setCompanionTyping((prev) => ({ ...prev, [cid]: false }));
-                setCompanionMessages((prev) => {
-                  const list = prev[cid] || [];
-                  const next = [...list, {
-                    id: msg.message_id || `m-${Date.now()}-${Math.random()}`,
-                    role: "assistant",
-                    text: msg.text || "",
-                    display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
-                    error: msg.error,
-                    intent: msg.intent,
-                    model_used: msg.model_used,
-                    proactive: msg.proactive === true,
-                  }];
-                  return { ...prev, [cid]: next.slice(-200) };
-                });
+                getTypingSetter(cid)(false);
+                getMessageSetter(cid)((list) => [...list, {
+                  id: msg.message_id || `m-${Date.now()}-${Math.random()}`,
+                  role: "assistant",
+                  text: msg.text || "",
+                  display_name: companions[cid]?.display_name || COMPANION_NAMES[cid],
+                  error: msg.error,
+                  intent: msg.intent,
+                  model_used: msg.model_used,
+                  proactive: msg.proactive === true,
+                }].slice(-200));
                 if (!companionDrawerOpen || activeCompanion !== cid) {
-                  setCompanionUnread((prev) => ({ ...prev, [cid]: true }));
+                  getUnreadSetter(cid)(true);
                 }
               }
               return;
@@ -2736,21 +2775,13 @@ export default function App() {
               const kind = msg.type === "companion.ladder.proposal" ? "ladder" : "trade";
               if (cid) {
                 const proposalEntry = {
-                  id: msg.proposal_id,
-                  role: "proposal",
-                  kind,
-                  proposal: msg.card,
-                  token: msg.confirmation_token,
-                  nonce: msg.nonce,
-                  ttl: msg.ttl_expires_at,
-                  status: null,
+                  id: msg.proposal_id, role: "proposal", kind,
+                  proposal: msg.card, token: msg.confirmation_token,
+                  nonce: msg.nonce, ttl: msg.ttl_expires_at, status: null,
                 };
-                setCompanionMessages((prev) => {
-                  const list = prev[cid] || [];
-                  return { ...prev, [cid]: [...list, proposalEntry].slice(-200) };
-                });
+                getMessageSetter(cid)((list) => [...list, proposalEntry].slice(-200));
                 if (!companionDrawerOpen || activeCompanion !== cid) {
-                  setCompanionUnread((prev) => ({ ...prev, [cid]: true }));
+                  getUnreadSetter(cid)(true);
                 }
               }
               return;
@@ -2759,44 +2790,29 @@ export default function App() {
             case "companion.ladder.executed": {
               const cid = msg.companion_id;
               if (cid) {
-                setCompanionMessages((prev) => {
-                  const list = prev[cid] || [];
-                  return {
-                    ...prev,
-                    [cid]: list.map((m) => m.id === msg.proposal_id
-                      ? { ...m, status: msg.status || "filled" }
-                      : m),
-                  };
-                });
+                getMessageSetter(cid)((list) =>
+                  list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: msg.status || "filled" }
+                    : m));
               }
               return;
             }
             case "companion.trade.failed": {
               const cid = msg.companion_id;
               if (cid) {
-                setCompanionMessages((prev) => {
-                  const list = prev[cid] || [];
-                  return {
-                    ...prev,
-                    [cid]: list.map((m) => m.id === msg.proposal_id
-                      ? { ...m, status: "failed" }
-                      : m),
-                  };
-                });
+                getMessageSetter(cid)((list) =>
+                  list.map((m) => m.id === msg.proposal_id
+                    ? { ...m, status: "failed" }
+                    : m));
               }
               return;
             }
             case "companion.system_note": {
-              // Could surface as a toast; for now append to active companion's thread as a muted note.
               const cid = activeCompanion;
-              setCompanionMessages((prev) => {
-                const list = prev[cid] || [];
-                const next = [...list, {
-                  id: `sys-${Date.now()}`,
-                  role: "system", text: msg.text || "", display_name: null,
-                }];
-                return { ...prev, [cid]: next.slice(-200) };
-              });
+              getMessageSetter(cid)((list) => [...list, {
+                id: `sys-${Date.now()}`,
+                role: "system", text: msg.text || "", display_name: null,
+              }].slice(-200));
               return;
             }
             case "error":
@@ -2864,26 +2880,16 @@ export default function App() {
       ttl_expires_at: m.ttl,
     });
     // Optimistic: mark submitting so buttons hide
-    setCompanionMessages((prev) => {
-      const list = prev[activeCompanion] || [];
-      return {
-        ...prev,
-        [activeCompanion]: list.map((x) => x.id === m.id ? { ...x, status: "submitting" } : x),
-      };
-    });
-  }, [sendMessage, activeCompanion]);
+    getMessageSetter(activeCompanion)((list) =>
+      list.map((x) => x.id === m.id ? { ...x, status: "submitting" } : x));
+  }, [sendMessage, activeCompanion, getMessageSetter]);
 
   const companionProposalReject = useCallback((m) => {
     const type = m.kind === "ladder" ? "companion.ladder.reject" : "companion.trade.reject";
     sendMessage({ type, proposal_id: m.id });
-    setCompanionMessages((prev) => {
-      const list = prev[activeCompanion] || [];
-      return {
-        ...prev,
-        [activeCompanion]: list.map((x) => x.id === m.id ? { ...x, status: "rejected" } : x),
-      };
-    });
-  }, [sendMessage, activeCompanion]);
+    getMessageSetter(activeCompanion)((list) =>
+      list.map((x) => x.id === m.id ? { ...x, status: "rejected" } : x));
+  }, [sendMessage, activeCompanion, getMessageSetter]);
 
   const companionSend = useCallback((text) => {
     const msgId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2906,111 +2912,74 @@ export default function App() {
           type: "companion.transcript.clear",
           companion_id: cid, scope,
         });
-        // Single atomic update \u2014 no echo preserved, just the system note.
         if (scope === "all") {
-          setCompanionMessages({
-            athena: [sysNote("(all three transcripts cleared)")],
-            apex:   [],
-            broski: [],
-          });
+          setAthenaMessages([sysNote("(all three transcripts cleared)")]);
+          setApexMessages([]);
+          setBroskiMessages([]);
         } else {
-          setCompanionMessages((prev) => ({
-            ...prev,
-            [cid]: [sysNote("(transcript cleared)")],
-          }));
+          getMessageSetter(cid)([sysNote("(transcript cleared)")]);
         }
         return;
       }
 
       if (cmd === "help") {
-        setCompanionMessages((prev) => {
-          const list = prev[cid] || [];
-          return {
-            ...prev,
-            [cid]: [...list,
-              { id: msgId, role: "user", text },
-              sysNote(
-                "commands:\n" +
-                "  /clear        \u2014 clear this companion's transcript\n" +
-                "  /clear all    \u2014 clear all three transcripts\n" +
-                "  /help         \u2014 show this list"
-              ),
-            ].slice(-200),
-          };
-        });
+        getMessageSetter(cid)((list) => [...list,
+          { id: msgId, role: "user", text },
+          sysNote(
+            "commands:\n" +
+            "  /clear        \u2014 clear this companion's transcript\n" +
+            "  /clear all    \u2014 clear all three transcripts\n" +
+            "  /help         \u2014 show this list"
+          ),
+        ].slice(-200));
         return;
       }
-
-      // Unknown slash command \u2014 fall through and let the companion see it
     }
 
-    // Optimistic: add the user message immediately
-    setCompanionMessages((prev) => {
-      const list = prev[cid] || [];
-      return {
-        ...prev,
-        [cid]: [...list, { id: msgId, role: "user", text }].slice(-200),
-      };
-    });
-    setCompanionTyping((prev) => ({ ...prev, [cid]: true }));
+    // Optimistic: add the user message immediately to the ACTIVE companion only.
+    getMessageSetter(cid)((list) => [...list, { id: msgId, role: "user", text }].slice(-200));
+    getTypingSetter(cid)(true);
     const ok = sendMessage({
       type: "companion.message",
       companion_id: cid,
       text, message_id: msgId,
     });
     if (!ok) {
-      setCompanionTyping((prev) => ({ ...prev, [cid]: false }));
-      setCompanionMessages((prev) => {
-        const list = prev[cid] || [];
-        return {
-          ...prev,
-          [cid]: [...list, {
-            id: `err-${msgId}`, role: "system",
-            text: "(not connected to agent \u2014 restart Hydra or refresh)",
-          }].slice(-200),
-        };
-      });
+      getTypingSetter(cid)(false);
+      getMessageSetter(cid)((list) => [...list, {
+        id: `err-${msgId}`, role: "system",
+        text: "(not connected to agent \u2014 restart Hydra or refresh)",
+      }].slice(-200));
       return;
     }
-    // 30s timeout — if no message.complete arrives, show a helpful error.
+    // 30s timeout \u2014 helpful error if no reply arrives.
     setTimeout(() => {
-      setCompanionTyping((prev) => {
-        if (!prev[cid]) return prev;
-        setCompanionMessages((prev2) => {
-          const list = prev2[cid] || [];
-          // only append if we still haven't gotten a reply for this msgId
-          const already = list.some((m) => m.id === `timeout-${msgId}`);
-          if (already) return prev2;
-          return {
-            ...prev2,
-            [cid]: [...list, {
-              id: `timeout-${msgId}`, role: "system",
-              text: "(no response in 30s \u2014 check the agent console for errors; API key may be missing or model rate-limited)",
-            }].slice(-200),
-          };
-        });
-        return { ...prev, [cid]: false };
+      getMessageSetter(cid)((list) => {
+        if (list.some((m) => m.id === `timeout-${msgId}`)) return list;
+        return [...list, {
+          id: `timeout-${msgId}`, role: "system",
+          text: "(no response in 30s \u2014 check the agent console for errors; API key may be missing or model rate-limited)",
+        }].slice(-200);
       });
+      getTypingSetter(cid)(false);
     }, 30000);
-  }, [sendMessage, activeCompanion]);
+  }, [sendMessage, activeCompanion, getMessageSetter, getTypingSetter]);
 
   const companionSwitch = useCallback((cid) => {
     setActiveCompanion(cid);
-    setCompanionUnread((prev) => ({ ...prev, [cid]: false }));
+    getUnreadSetter(cid)(false);
     try { localStorage.setItem("hydra.companion.active", cid); } catch {}
     sendMessage({ type: "companion.switch", to_id: cid });
-  }, [sendMessage]);
+  }, [sendMessage, getUnreadSetter]);
 
   const companionToggle = useCallback(() => {
     setCompanionDrawerOpen((prev) => {
       const next = !prev;
       try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch {}
-      if (next) {
-        setCompanionUnread((prev2) => ({ ...prev2, [activeCompanion]: false }));
-      }
+      if (next) getUnreadSetter(activeCompanion)(false);
       return next;
     });
-  }, [activeCompanion]);
+  }, [activeCompanion, getUnreadSetter]);
 
   // On WS connect, probe the companion subsystem. If unmounted server-side,
   // no connect_ack arrives and the orb stays invisible.
@@ -3669,7 +3638,7 @@ export default function App() {
         theme={COMPANION_THEMES[activeCompanion] || COMPANION_THEMES.apex}
         onClick={companionToggle}
         regime={state?.pairs ? (Object.values(state.pairs).map(p => p.regime).find(r => r === "VOLATILE") || "TREND") : "TREND"}
-        hasUnread={companionUnread[activeCompanion]}
+        hasUnread={getUnread(activeCompanion)}
         visible={companionVisible && !companionDrawerOpen}
         soulId={activeCompanion}
       />
@@ -3679,8 +3648,8 @@ export default function App() {
         active={activeCompanion}
         onSwitch={companionSwitch}
         companions={companions}
-        messages={companionMessages[activeCompanion] || []}
-        typing={companionTyping[activeCompanion]}
+        messages={getMessages(activeCompanion) || []}
+        typing={getTyping(activeCompanion)}
         onSend={companionSend}
         onProposalConfirm={companionProposalConfirm}
         onProposalReject={companionProposalReject}
