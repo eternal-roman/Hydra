@@ -2848,22 +2848,55 @@ export default function App() {
 
   const companionSend = useCallback((text) => {
     const msgId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const cid = activeCompanion;
     // Optimistic: add the user message immediately
     setCompanionMessages((prev) => {
-      const list = prev[activeCompanion] || [];
+      const list = prev[cid] || [];
       return {
         ...prev,
-        [activeCompanion]: [...list, {
-          id: msgId, role: "user", text,
-        }].slice(-200),
+        [cid]: [...list, { id: msgId, role: "user", text }].slice(-200),
       };
     });
-    setCompanionTyping((prev) => ({ ...prev, [activeCompanion]: true }));
-    sendMessage({
+    setCompanionTyping((prev) => ({ ...prev, [cid]: true }));
+    const ok = sendMessage({
       type: "companion.message",
-      companion_id: activeCompanion,
+      companion_id: cid,
       text, message_id: msgId,
     });
+    if (!ok) {
+      setCompanionTyping((prev) => ({ ...prev, [cid]: false }));
+      setCompanionMessages((prev) => {
+        const list = prev[cid] || [];
+        return {
+          ...prev,
+          [cid]: [...list, {
+            id: `err-${msgId}`, role: "system",
+            text: "(not connected to agent \u2014 restart Hydra or refresh)",
+          }].slice(-200),
+        };
+      });
+      return;
+    }
+    // 30s timeout — if no message.complete arrives, show a helpful error.
+    setTimeout(() => {
+      setCompanionTyping((prev) => {
+        if (!prev[cid]) return prev;
+        setCompanionMessages((prev2) => {
+          const list = prev2[cid] || [];
+          // only append if we still haven't gotten a reply for this msgId
+          const already = list.some((m) => m.id === `timeout-${msgId}`);
+          if (already) return prev2;
+          return {
+            ...prev2,
+            [cid]: [...list, {
+              id: `timeout-${msgId}`, role: "system",
+              text: "(no response in 30s \u2014 check the agent console for errors; API key may be missing or model rate-limited)",
+            }].slice(-200),
+          };
+        });
+        return { ...prev, [cid]: false };
+      });
+    }, 30000);
   }, [sendMessage, activeCompanion]);
 
   const companionSwitch = useCallback((cid) => {

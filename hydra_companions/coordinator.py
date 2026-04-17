@@ -128,6 +128,7 @@ class CompanionCoordinator:
         uid = payload.get("user_id") or DEFAULT_USER_ID
         text = (payload.get("text") or "").strip()
         msg_id = payload.get("message_id") or str(uuid.uuid4())
+        print(f"  [COMPANION] inbound message cid={cid} msg_id={msg_id} chars={len(text)}")
         if not text:
             return
         if self.nudge_scheduler is not None:
@@ -372,12 +373,17 @@ class CompanionCoordinator:
             })
             return
         try:
+            print(f"  [COMPANION] thread run start cid={cid} msg_id={msg_id}")
             self._broadcast("companion.typing", {
                 "companion_id": cid, "user_id": uid, "state": "thinking",
                 "message_id": msg_id,
             })
             result = comp.respond(text)
             self._record_cost(uid, cid, result.cost_usd)
+            preview = (result.message or "")[:60].replace("\n", " ")
+            print(f"  [COMPANION] thread run done cid={cid} model={result.model_used} "
+                  f"in={result.tokens_in} out={result.tokens_out} err={result.error!r} "
+                  f"text={preview!r}")
             self._broadcast("companion.message.complete", {
                 "message_id": msg_id,
                 "companion_id": cid,
@@ -390,6 +396,7 @@ class CompanionCoordinator:
                 "cost_usd": round(result.cost_usd, 6),
                 "error": result.error,
             })
+            print(f"  [COMPANION] broadcast message.complete sent cid={cid} msg_id={msg_id}")
         except Exception as e:
             traceback.print_exc()
             self._broadcast("companion.message.complete", {
