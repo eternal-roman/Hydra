@@ -82,17 +82,21 @@ function StatCard({ label, value, unit, color = COLORS.text }) {
   );
 }
 
-function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, filled = false }) {
+function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, filled = false, fill = false }) {
   if (!data || data.length < 2) return null;
   const min = Math.min(...data);
   const max = Math.max(...data);
   const range = max - min || 1;
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * (height - 4) - 2}`);
   const pathD = `M${pts.join(" L")}`;
+  const svgStyle = fill
+    ? { display: "block", width: "100%", height: "100%" }
+    : { display: "block" };
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: "block" }}>
-      {filled && <path d={`${pathD} L${width},${height} L0,${height} Z`} fill={color} opacity={0.1} />}
-      <path d={pathD} fill="none" stroke={color} strokeWidth={1.5} />
+    <svg width="100%" height={fill ? "100%" : undefined}
+         viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={svgStyle}>
+      {filled && <path d={`${pathD} L${width},${height} L0,${height} Z`} fill={color} opacity={0.1} vectorEffect="non-scaling-stroke" />}
+      <path d={pathD} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -229,19 +233,19 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   );
 }
 
-function FieldLabel({ children, hint }) {
+function FieldLabel({ children, hint, labelSize = 9, hintSize = 10 }) {
   return (
     <div style={{ marginBottom: 4 }}>
-      <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
+      <div style={{ fontSize: labelSize, color: COLORS.textDim, textTransform: "uppercase",
                     letterSpacing: "0.1em", fontFamily: mono, fontWeight: 600 }}>
         {children}
       </div>
-      {hint && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: mono, marginTop: 2 }}>{hint}</div>}
+      {hint && <div style={{ fontSize: hintSize, color: COLORS.textMuted, fontFamily: mono, marginTop: 2 }}>{hint}</div>}
     </div>
   );
 }
 
-function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
+function StyledInput({ value, onChange, placeholder, type = "text", fontSize = 12, padding = "7px 10px", ...rest }) {
   return (
     <input
       type={type}
@@ -250,12 +254,12 @@ function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
       placeholder={placeholder}
       style={{
         width: "100%",
-        padding: "7px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
         boxSizing: "border-box",
@@ -267,19 +271,19 @@ function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
   );
 }
 
-function StyledSelect({ value, onChange, options }) {
+function StyledSelect({ value, onChange, options, fontSize = 12, padding = "7px 10px" }) {
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
       style={{
         width: "100%",
-        padding: "7px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
       }}
@@ -293,7 +297,7 @@ function StyledSelect({ value, onChange, options }) {
   );
 }
 
-function StyledTextarea({ value, onChange, placeholder, minHeight = 70 }) {
+function StyledTextarea({ value, onChange, placeholder, minHeight = 70, fontSize = 12, padding = "8px 10px" }) {
   return (
     <textarea
       value={value}
@@ -302,12 +306,12 @@ function StyledTextarea({ value, onChange, placeholder, minHeight = 70 }) {
       style={{
         width: "100%",
         minHeight,
-        padding: "8px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
         resize: "vertical",
@@ -385,53 +389,70 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16, alignItems: "start" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, alignItems: "stretch",
+                   height: "calc(100vh - 140px)", minHeight: 520 }}>
       {/* LEFT: control form */}
       <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                    borderRadius: 8, padding: 16 }}>
-        <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                      marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                    borderRadius: 8, padding: 20, alignSelf: "stretch",
+                    overflowY: "auto", minHeight: 0 }}>
+        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                      marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <div>
-            <FieldLabel>Preset</FieldLabel>
-            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} />
+            <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
+            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
           </div>
 
           <div>
-            <FieldLabel hint="Min 8 chars. Logged + reviewed by the AI observer.">Hypothesis *</FieldLabel>
+            <FieldLabel labelSize={11} hintSize={11} hint="Min 8 chars · AI-reviewed.">Hypothesis *</FieldLabel>
             <StyledTextarea
               value={hypothesis}
               onChange={setHypothesis}
               placeholder="e.g., tighter RSI upper should reduce false BUYs in VOLATILE regime"
+              fontSize={14}
+              padding="9px 12px"
             />
             {!hypothesisValid && hypothesis.length > 0 && (
-              <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
+              <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
                 {8 - hypothesis.trim().length} more character(s) required
               </div>
             )}
           </div>
 
           <div>
-            <FieldLabel>Pairs (comma-separated)</FieldLabel>
-            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" />
+            <FieldLabel labelSize={11} hintSize={12}>Pairs (comma-separated)</FieldLabel>
+            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" fontSize={14} padding="8px 12px" />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div>
-              <FieldLabel>Candles</FieldLabel>
-              <StyledInput value={nCandles} onChange={setNCandles} type="number" />
+          {/* Candles + Seed: label row, input row, hint row — each grid row aligned
+              so the two inputs sit on the same Y regardless of hint wrapping. */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
+                        columnGap: 12, rowGap: 6 }}>
+            <FieldLabel labelSize={11} hintSize={12}>
+              <span title="Number of simulated 15-minute candles the synthetic GBM generator will produce for this run. Not historical market data.">
+                Synthetic Candles ⓘ
+              </span>
+            </FieldLabel>
+            <FieldLabel labelSize={11} hintSize={12}>
+              <span title="Experiment seed for the synthetic (GBM) price generator. Identical seed + identical params reproduce an identical candle series, so two runs are directly comparable.">
+                Experiment Seed ⓘ
+              </span>
+            </FieldLabel>
+
+            <StyledInput value={nCandles} onChange={setNCandles} type="number" fontSize={14} padding="8px 12px" />
+            <StyledInput value={seed} onChange={setSeed} type="number" fontSize={14} padding="8px 12px" />
+
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
+              Synthetic (GBM) — not historical Kraken data.
               {!nCandlesValid && (
-                <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
-                  50-20000
-                </div>
+                <div style={{ color: COLORS.danger, marginTop: 2 }}>50–20000</div>
               )}
             </div>
-            <div>
-              <FieldLabel>Seed</FieldLabel>
-              <StyledInput value={seed} onChange={setSeed} type="number" />
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
+              PRNG seed — same seed = same price path.
             </div>
           </div>
 
@@ -453,8 +474,8 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             disabled={!canSubmit}
             style={{
               marginTop: 6,
-              padding: "10px 16px",
-              fontSize: 12,
+              padding: "12px 18px",
+              fontSize: 14,
               fontWeight: 700,
               fontFamily: mono,
               textTransform: "uppercase",
@@ -473,104 +494,167 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           </button>
 
           {!connected && (
-            <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono }}>
+            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono }}>
               Disconnected — start hydra_agent.py to enable.
             </div>
           )}
+
         </div>
       </div>
 
-      {/* RIGHT: status + ack feedback */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                        marginBottom: 10 }}>
-            Backtest Status
-          </div>
-          {ackMsg ? (
-            <div>
-              <div style={{ fontFamily: mono, fontSize: 11,
-                            color: ackMsg.success ? COLORS.accent : COLORS.danger }}>
-                {ackMsg.success ? "✓ Submitted" : "✗ Rejected"}
+      {/* RIGHT: tri-panel (Last Result + Status + Rigor Gates) above the observer chart */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch",
+                    minHeight: 0 }}>
+        {/* Tri-panel: three equal panels sharing the same width as the observer
+            chart beneath them. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12,
+                      flex: "0 0 auto" }}>
+          {/* Last Result */}
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
+              Last Result
+            </div>
+            {observerResult?.metrics ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto",
+                            rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
+                <span style={{ color: COLORS.textDim }}>Trades</span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {observerResult.metrics.total_trades}
+                </span>
+                <span style={{ color: COLORS.textDim }}>Return</span>
+                <span style={{ textAlign: "right",
+                               color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
+                  {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
+                  {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
+                </span>
+                <span style={{ color: COLORS.textDim }}>Sharpe</span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {fmtInd(observerResult.metrics.sharpe)}
+                </span>
+                <span style={{ color: COLORS.textDim }}>Max DD</span>
+                <span style={{ color: COLORS.warn, textAlign: "right" }}>
+                  {(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%
+                </span>
+                {observerResult.metrics.profit_factor != null && (
+                  <>
+                    <span style={{ color: COLORS.textDim }}>Profit Factor</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>
+                      {observerResult.metrics.profit_factor.toFixed(2)}
+                    </span>
+                  </>
+                )}
+                {observerResult.metrics.win_rate_pct != null && (
+                  <>
+                    <span style={{ color: COLORS.textDim }}>Win Rate</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>
+                      {observerResult.metrics.win_rate_pct.toFixed(0)}%
+                    </span>
+                  </>
+                )}
               </div>
-              {ackMsg.experiment_id && (
-                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
-                  experiment_id: <span style={{ color: COLORS.text }}>{ackMsg.experiment_id.slice(0, 16)}…</span>
-                </div>
-              )}
-              {ackMsg.error && (
-                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.danger, marginTop: 4 }}>
-                  {ackMsg.error}
-                </div>
-              )}
+            ) : (
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
+                No completed backtest yet this session.
+              </div>
+            )}
+          </div>
+
+          {/* Backtest Status */}
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
+              Backtest Status
             </div>
-          ) : (
-            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
-              No backtest submitted this session.
-            </div>
-          )}
-          {(lastResultId || completedCount > 0) && (
-            <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 10,
-                          paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-              {lastResultId && (
-                <div>Last completed: <span style={{ color: COLORS.accent }}>{lastResultId.slice(0, 16)}…</span></div>
-              )}
-              <div style={{ marginTop: 4 }}>
-                Session: <span style={{ color: COLORS.text }}>{completedCount}</span> completed
+            {ackMsg ? (
+              <div>
+                <div style={{ fontFamily: mono, fontSize: 12, fontWeight: 700,
+                              color: ackMsg.success ? COLORS.accent : COLORS.danger }}>
+                  {ackMsg.success ? "✓ Submitted" : "✗ Rejected"}
+                </div>
+                {ackMsg.experiment_id && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginTop: 4 }}>
+                    {ackMsg.experiment_id.slice(0, 12)}…
+                  </div>
+                )}
+                {ackMsg.error && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.danger, marginTop: 4 }}>
+                    {ackMsg.error}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
+                No backtest submitted this session.
+              </div>
+            )}
+            {(lastResultId || completedCount > 0) && (
+              <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginTop: 10,
+                            paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+                Session: <span style={{ color: COLORS.text }}>{completedCount}</span> done
                 {reviewedCount > 0 && (
                   <>, <span style={{ color: COLORS.purple }}>{reviewedCount}</span> reviewed</>
                 )}
               </div>
+            )}
+          </div>
+
+          {/* Rigor Gates */}
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
+              Rigor Gates
             </div>
-          )}
+            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginBottom: 8 }}>
+              7 code-enforced gates
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
+                          rowGap: 4, columnGap: 10, fontFamily: mono, fontSize: 11,
+                          color: COLORS.text, lineHeight: 1.35 }}>
+              <span>min_trades_50</span>
+              <span>mc_ci_lower</span>
+              <span>wf_majority</span>
+              <span>oos_gap</span>
+              <span>improvement_2se</span>
+              <span>cross_pair_majority</span>
+              <span>regime_spread</span>
+            </div>
+          </div>
         </div>
 
         {/* Phase 9: Dual-state Observer — backtest pair cards stream here
-            live during a run, using the same visual language as LIVE. */}
+            live during a run, using the same visual language as LIVE.
+            flex: 1 so the chart expands to fill the column down to the
+            bottom of the adjacent (left) control panel. */}
         {(observerProgress || observerResult) ? (
-          <ObserverModal
-            progress={observerProgress}
-            result={observerResult}
-            review={observerReview}
-            equityHistory={observerEquity}
-            totalTicks={observerTotalTicks}
-            variant="dock"
-            onClose={onObserverClose}
-          />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <ObserverModal
+              progress={observerProgress}
+              result={observerResult}
+              review={observerReview}
+              equityHistory={observerEquity}
+              totalTicks={observerTotalTicks}
+              variant="dock"
+              onClose={onObserverClose}
+            />
+          </div>
         ) : (
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16, minHeight: 180 }}>
-            <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 10 }}>
+          <div style={{ flex: 1, background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16, minHeight: 180,
+                        display: "flex", flexDirection: "column" }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
               Observer
             </div>
-            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim, lineHeight: 1.5 }}>
               Submit a backtest to stream per-tick pair state here in real time —
               the same pair cards, regime badges, and equity curves as the LIVE view.
             </div>
           </div>
         )}
-
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                        marginBottom: 10 }}>
-            Rigor Gates
-          </div>
-          <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, lineHeight: 1.6 }}>
-            Every completed backtest is reviewed against 7 code-enforced gates:<br />
-            <span style={{ color: COLORS.text }}>min_trades_50</span> • {" "}
-            <span style={{ color: COLORS.text }}>mc_ci_lower_positive</span> • {" "}
-            <span style={{ color: COLORS.text }}>wf_majority_improved</span><br />
-            <span style={{ color: COLORS.text }}>oos_gap_acceptable</span> • {" "}
-            <span style={{ color: COLORS.text }}>improvement_above_2se</span> • {" "}
-            <span style={{ color: COLORS.text }}>cross_pair_majority</span> • {" "}
-            <span style={{ color: COLORS.text }}>regime_not_concentrated</span><br /><br />
-            A proposed param change is auto-apply-eligible ONLY when every gate passes. The AI reviewer
-            cannot override gates via reasoning — anti-handwaving is architectural, not prompt-level.
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -658,7 +742,7 @@ function ObserverProgressBar({ tick, totalTicks, stage }) {
 // Compact per-pair card for the observer. Intentionally a separate visual
 // from LIVE's PairPanel (simpler, smaller) because the observer coexists
 // with the LIVE grid on the LIVE tab — we want a distinct affordance.
-function ObserverPairCard({ pair, state, equityHistory }) {
+function ObserverPairCard({ pair, state, equityHistory, expand = false }) {
   if (!state) return null;
   const sig = state.signal || {};
   const port = state.portfolio || {};
@@ -667,10 +751,12 @@ function ObserverPairCard({ pair, state, equityHistory }) {
 
   return (
     <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 6, padding: 10 }}>
+                  borderRadius: 6, padding: 10,
+                  flex: expand ? 1 : "0 0 auto",
+                  display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                     marginBottom: 8 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>
+        <div style={{ fontSize: 13, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>
           {pair}
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -678,7 +764,7 @@ function ObserverPairCard({ pair, state, equityHistory }) {
           <SignalChip action={sig.action} size="compact" />
         </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10,
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, fontSize: 12,
                     fontFamily: mono }}>
         <span style={{ color: COLORS.textDim }}>Price</span>
         <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtPrice(state.price, px)}</span>
@@ -694,13 +780,17 @@ function ObserverPairCard({ pair, state, equityHistory }) {
         </span>
       </div>
       {equityHistory && equityHistory.length >= 2 && (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 8,
+                      flex: expand ? 1 : "0 0 auto",
+                      minHeight: expand ? 80 : 36,
+                      display: "flex" }}>
           <MiniChart
             data={equityHistory}
             width={240}
-            height={36}
+            height={expand ? 160 : 36}
             color={(port.pnl_pct || 0) >= 0 ? COLORS.accent : COLORS.danger}
             filled
+            fill={expand}
           />
         </div>
       )}
@@ -829,7 +919,7 @@ function ObserverModal({
     ? { position: "fixed", right: 16, top: 80, width: 360, maxHeight: "calc(100vh - 100px)",
         overflowY: "auto", zIndex: 20,
         boxShadow: "0 8px 32px rgba(0,0,0,0.45)" }
-    : { };
+    : { flex: 1, display: "flex", flexDirection: "column", minHeight: 0 };
 
   return (
     <div
@@ -881,47 +971,23 @@ function ObserverModal({
         <ObserverProgressBar tick={tick} totalTicks={totalTicks || 0} stage={stage} />
       </div>
 
-      {/* Terminal summary (shown once result lands) */}
-      {summary && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6,
-                      fontFamily: mono, fontSize: 10, marginBottom: 10,
-                      padding: "8px 10px", background: COLORS.bg,
-                      border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
-          <span style={{ color: COLORS.textDim }}>Trades</span>
-          <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.total_trades}</span>
-          <span style={{ color: COLORS.textDim }}>Return</span>
-          <span style={{ textAlign: "right",
-                         color: (summary.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
-            {(summary.total_return_pct || 0) >= 0 ? "+" : ""}{(summary.total_return_pct || 0).toFixed(2)}%
-          </span>
-          <span style={{ color: COLORS.textDim }}>Sharpe</span>
-          <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(summary.sharpe)}</span>
-          <span style={{ color: COLORS.textDim }}>Max DD</span>
-          <span style={{ color: COLORS.warn, textAlign: "right" }}>{(summary.max_drawdown_pct || 0).toFixed(2)}%</span>
-          {summary.profit_factor != null && (
-            <>
-              <span style={{ color: COLORS.textDim }}>Profit Factor</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.profit_factor.toFixed(2)}</span>
-            </>
-          )}
-          {summary.win_rate_pct != null && (
-            <>
-              <span style={{ color: COLORS.textDim }}>Win Rate</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.win_rate_pct.toFixed(0)}%</span>
-            </>
-          )}
-        </div>
-      )}
+      {/* Terminal summary is rendered in the left control panel (BacktestResultMetrics)
+          to give the equity chart more headroom. */}
 
-      {/* Per-pair cards — same visual DNA as LIVE */}
+      {/* Per-pair cards — same visual DNA as LIVE.
+          flex: 1 + minHeight: 0 lets the card stack fill the panel height so
+          the equity chart stretches down to the bottom of the adjacent
+          control panel on the left. */}
       {pairNames.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6,
+                      flex: variant === "dock" ? 1 : "0 0 auto", minHeight: 0 }}>
           {pairNames.map(pair => (
             <ObserverPairCard
               key={pair}
               pair={pair}
               state={pairs[pair]}
               equityHistory={equityHistory?.[pair] || []}
+              expand={variant === "dock"}
             />
           ))}
         </div>
