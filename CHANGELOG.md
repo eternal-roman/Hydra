@@ -6,6 +6,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.11] — 2026-04-17
+
+Companion subsystem — end-of-day release-readiness audit + bug pass.
+Fixes four correctness bugs, removes dead props, wires up three
+previously-dormant code paths, and adds six unit tests. No feature
+regressions; the same 73+2 test suite is green.
+
+### Fixed — correctness
+
+- **Router fallback cascade** (`hydra_companions/router.py`): now walks
+  the full fallback chain via `already_tried` list. Previously only
+  the first candidate was tried; a double-provider failure failed the
+  whole turn even with viable alternates.
+- **Daily trade-count rollover** (`hydra_companions/coordinator.py`):
+  `_daily_trades` now clears at UTC midnight alongside `_daily_costs`
+  and `_alert_fired`. Previously trade caps persisted across days.
+- **Kraken status health check** (`hydra_companions/executor.py`):
+  validator now reads `agent._last_kraken_status` (the real source)
+  and walks `agent.engines` for halts, instead of
+  `snap.get("kraken_status")` which nothing populates.
+- **UI state cross-talk** (`dashboard/src/App.jsx`): per-companion
+  `useState` hooks for messages/typing/unread replace the previous
+  object-keyed state. Send lock via `useRef` + message-id dedup +
+  cancellable 30s timeout. Addresses the "BooM! leaks to all three
+  drawers" report.
+
+### Wired — previously-dormant code paths
+
+- `companion.set_serious_mode` + `/serious on|off` slash command so
+  Broski's router temperature delta actually has a trigger.
+- `companion.nudge.mute` + `/mute [seconds]` slash command so
+  proactive nudges can be silenced from the UI.
+- `companion.ladder.invalidation_triggered` now rendered on the
+  dashboard: ladder card flips to status "invalidated" and a system
+  note lands in the thread.
+- `CompanionCoordinator.notify_fill(userref)` stub for the
+  ExecutionStream \u2192 LadderWatcher fill bridge.
+- NudgeScheduler init now prints a full traceback on failure instead
+  of silently disabling.
+- `typing:idle` is now broadcast *before* `message.complete` so there's
+  no sub-frame flicker where dots restart after the reply lands.
+
+### Pruned
+
+- `ProposalCard.onStatusReset` and `CompanionDrawer.onResize` \u2014 dead
+  props (no callers, no implementations).
+- Duplicate `import time` in coordinator.py.
+- Unused `field`, `Path`, `os`, `json` imports across six files.
+
+### Added — tests
+
+- `test_fallback_cascade_walks_past_tried_candidates`
+- `test_fallback_cascade_returns_none_when_exhausted`
+- `test_companion_rollover.py` (UTC-midnight clears daily trades + costs)
+
+### Git hygiene
+
+Verified runtime artifacts are ignored across the full history:
+`.hydra-companions/transcripts/*.jsonl`, `memory/*.jsonl`,
+`proposals.jsonl`, `routing.jsonl`, `costs.jsonl` all covered by
+`.gitignore:59`. No runtime data leaked across 24 commits.
+
+---
+
 ## [2.10.10] — 2026-04-17
 
 Companion UX fix \u2014 **default-on**. The orb now appears immediately
