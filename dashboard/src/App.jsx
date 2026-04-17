@@ -3389,6 +3389,14 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
                         <span style={{ fontSize: 16, fontWeight: 700, fontFamily: heading, color: COLORS.text }}>{pair}</span>
                         <span style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>{fmtPrice(ps.price || 0, pairPrefix(pair))}</span>
+                        {ps.tradable === false && (
+                          <span title="Signal-only: the quote currency for this pair isn't held, so orders won't be placed. Signals still feed cross-pair confluence."
+                                style={{ fontSize: 9, fontFamily: mono, color: COLORS.warn,
+                                         background: `${COLORS.warn}18`, padding: "2px 6px",
+                                         borderRadius: 3, letterSpacing: "0.08em", fontWeight: 700 }}>
+                            INFO-ONLY
+                          </span>
+                        )}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime), boxShadow: `0 0 8px ${regimeColor(ps.regime)}80` }} />
@@ -3411,6 +3419,16 @@ export default function App() {
                       {/* Signal */}
                       <div style={{ flex: 1 }}>
                         <ConfidenceMeter confidence={sig.confidence || 0} signal={sig.action || "HOLD"} />
+                        {ps.cross_pair_override && ps.cross_pair_override.confluence_source && (
+                          <div style={{ marginTop: 4, display: "inline-flex", alignItems: "center", gap: 6,
+                                        fontSize: 10, fontFamily: mono, color: COLORS.accent,
+                                        background: `${COLORS.accent}18`, padding: "2px 6px", borderRadius: 3,
+                                        letterSpacing: "0.04em", fontWeight: 700 }}
+                               title={`Rule 4 confluence: ${ps.cross_pair_override.confluence_source.source_pair} conf ${ps.cross_pair_override.confluence_source.other_conf}`}>
+                            ρ={(ps.cross_pair_override.confluence_source.rho ?? 0).toFixed(2)}
+                            &nbsp;↑ +{(ps.cross_pair_override.confluence_source.bonus ?? 0).toFixed(3)}
+                          </div>
+                        )}
                         <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>{sig.reason || ""}</div>
                       </div>
                       {/* Position */}
@@ -3741,7 +3759,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.10.11 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.11.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

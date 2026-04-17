@@ -923,6 +923,17 @@ class CrossPairCoordinator:
 
     HISTORY_SIZE = 10
 
+    # Rule 4 confluence parameters. CO_MOVE_THRESHOLD gates the boost on a
+    # minimum Pearson correlation of log-returns — below this the pairs are
+    # behaving independently and their simultaneous signals are coincidence,
+    # not confluence. CONFLUENCE_WINDOW is the number of aligned candles
+    # used to compute ρ (the engine keeps up to 250). CONFLUENCE_MAX_BONUS
+    # caps the confidence boost — shares the +0.15 total-modifier budget
+    # documented in CLAUDE.md with the order-book and FOREX modifiers.
+    CO_MOVE_THRESHOLD = 0.5
+    CONFLUENCE_WINDOW = 60
+    CONFLUENCE_MAX_BONUS = 0.10
+
     def __init__(self, pairs: List[str]):
         self.pairs = pairs
         self.regime_history: Dict[str, List[str]] = {p: [] for p in pairs}
@@ -934,7 +945,9 @@ class CrossPairCoordinator:
         if len(history) > self.HISTORY_SIZE:
             self.regime_history[pair] = history[-self.HISTORY_SIZE:]
 
-    def get_overrides(self, all_states: Dict[str, dict]) -> Dict[str, dict]:
+    def get_overrides(self, all_states: Dict[str, dict],
+                      price_series: Optional[Dict[str, List[float]]] = None,
+                      ) -> Dict[str, dict]:
         """Return signal overrides where cross-pair evidence contradicts single-pair signals.
 
         Rules:
@@ -944,10 +957,22 @@ class CrossPairCoordinator:
            TREND_DOWN → boost SOL/USDC confidence (recovery likely).
         3. Coordinated swap: If SOL/USDC is TREND_DOWN and SOL/BTC is
            TREND_UP → suggest selling SOL/USDC and buying SOL/BTC.
+        4. Signal confluence: If SOL/BTC and SOL/USDC emit same-direction
+           BUY or SELL AND their log-return correlation over the last
+           CONFLUENCE_WINDOW candles exceeds CO_MOVE_THRESHOLD, boost the
+           SOL/USDC confidence by a bounded covariance-weighted amount.
+           Requires `price_series` to be supplied for both pairs — without
+           it Rule 4 is a no-op (safe fallback).
+
+        Args:
+            all_states: per-pair state dicts from HydraEngine.tick()
+            price_series: optional per-pair close-price history. Only
+                consumed by Rule 4. Keys match `all_states`.
 
         Returns:
             {pair: {"action": str, "signal": str, "confidence_adj": float,
-                    "reason": str, "swap": optional dict}}
+                    "reason": str, "swap": optional dict,
+                    "confluence_source": optional dict}}
         """
         overrides: Dict[str, dict] = {}
 
@@ -1002,7 +1027,137 @@ class CrossPairCoordinator:
                     },
                 }
 
+        # Rule 4: SOL/BTC ↔ SOL/USDC signal confluence.
+        # When both same-direction signals fire AND the two pairs are
+        # behaving as co-movers (ρ > CO_MOVE_THRESHOLD over the last
+        # CONFLUENCE_WINDOW candles of log-returns), boost SOL/USDC
+        # confidence. This converts SOL/BTC from "dead informational
+        # signal for a USDC-only portfolio" into a second-order confidence
+        # source on SOL/USDC, without triggering any independent SOL/BTC
+        # trade (which is blocked at the engine level by tradable=False
+        # whenever we hold no BTC). Rule 4 does not override an action —
+        # it only ADJUSTs an existing BUY/SELL confidence upward.
+        rule3_active = "SOL/USDC" in overrides and overrides["SOL/USDC"].get("action") == "OVERRIDE"
+        if not rule3_active and sol_usdc and sol_btc and price_series:
+            sol_usdc_sig = (sol_usdc.get("signal") or {})
+            sol_btc_sig = (sol_btc.get("signal") or {})
+            usdc_action = sol_usdc_sig.get("action")
+            btc_action = sol_btc_sig.get("action")
+            if usdc_action in ("BUY", "SELL") and usdc_action == btc_action:
+                # Gate SELL confluence on actually holding SOL — same guard
+                # as Rule 3 so we don't boost an exit signal we can't act on.
+                sell_gate_ok = True
+                if usdc_action == "SELL":
+                    pos = sol_usdc.get("position") or {}
+                    sol_pos = pos.get("size", 0.0)
+                    sell_gate_ok = sol_pos > 0
+                if sell_gate_ok:
+                    # Look up price histories under both canonical and
+                    # legacy XBT aliases — matches the state-dict lookup above.
+                    prices_usdc = (price_series.get("SOL/USDC")
+                                   or price_series.get("SOL/USD")
+                                   or [])
+                    prices_btc = (price_series.get("SOL/BTC")
+                                  or price_series.get("SOL/XBT")
+                                  or [])
+                    rho = CrossPairCoordinator.pair_correlation(
+                        prices_usdc, prices_btc, window=self.CONFLUENCE_WINDOW,
+                    )
+                    if rho > self.CO_MOVE_THRESHOLD:
+                        btc_conf = float(sol_btc_sig.get("confidence") or 0.0)
+                        usdc_conf = float(sol_usdc_sig.get("confidence") or 0.0)
+                        bonus = CrossPairCoordinator.confluence_bonus(
+                            rho, btc_conf,
+                            max_bonus=self.CONFLUENCE_MAX_BONUS,
+                        )
+                        if bonus > 0.0:
+                            boosted = min(0.95, usdc_conf + bonus)
+                            overrides["SOL/USDC"] = {
+                                "action": "ADJUST",
+                                "signal": usdc_action,
+                                "confidence_adj": boosted,
+                                "reason": (
+                                    f"Rule 4 confluence: SOL/BTC {usdc_action} (conf {btc_conf:.2f}) "
+                                    f"co-moves with SOL/USDC (ρ={rho:.2f}) — +{bonus:.3f} boost"
+                                ),
+                                "confluence_source": {
+                                    "source_pair": "SOL/BTC",
+                                    "rho": round(rho, 4),
+                                    "bonus": round(bonus, 4),
+                                    "other_conf": round(btc_conf, 4),
+                                    "window": self.CONFLUENCE_WINDOW,
+                                },
+                            }
+
         return overrides
+
+    # ─── Confluence helpers (pure-Python, stdlib only) ─────────────────
+    # Respects the "no numpy/pandas" engine invariant. All three methods
+    # are static so they can be called before the coordinator has state.
+
+    @staticmethod
+    def _log_returns(prices: List[float]) -> List[float]:
+        """Log-return series from a price list. Returns [] when input has
+        fewer than 2 points or any non-positive price (log undefined)."""
+        if len(prices) < 2:
+            return []
+        out: List[float] = []
+        for i in range(1, len(prices)):
+            prev = prices[i - 1]
+            curr = prices[i]
+            if prev <= 0.0 or curr <= 0.0:
+                return []
+            out.append(math.log(curr / prev))
+        return out
+
+    @staticmethod
+    def pair_correlation(prices_a: List[float], prices_b: List[float],
+                         window: int = 60) -> float:
+        """Pearson correlation of log-returns over the last `window`
+        aligned observations. Returns 0.0 when either series has fewer
+        than `window + 1` points (insufficient data) or when either
+        return series has zero variance (undefined correlation — treat
+        as "no co-movement signal" rather than raising)."""
+        ra = CrossPairCoordinator._log_returns(prices_a)
+        rb = CrossPairCoordinator._log_returns(prices_b)
+        if len(ra) < window or len(rb) < window:
+            return 0.0
+        ra = ra[-window:]
+        rb = rb[-window:]
+        n = len(ra)
+        mean_a = sum(ra) / n
+        mean_b = sum(rb) / n
+        cov = 0.0
+        var_a = 0.0
+        var_b = 0.0
+        for i in range(n):
+            da = ra[i] - mean_a
+            db = rb[i] - mean_b
+            cov += da * db
+            var_a += da * da
+            var_b += db * db
+        if var_a <= 0.0 or var_b <= 0.0:
+            return 0.0
+        return cov / math.sqrt(var_a * var_b)
+
+    @staticmethod
+    def confluence_bonus(rho: float, other_conf: float,
+                         max_bonus: float = 0.10) -> float:
+        """Deterministic confidence bonus from a confluence signal.
+
+        Scales linearly with ρ (how strongly the pairs co-move) and with
+        the other pair's confidence above 0.5 (the Kelly-edge threshold,
+        below which the sizer already returns 0). Caps at `max_bonus`.
+        Returns 0.0 when either input is non-positive — no bonus from a
+        weak or negative confidence, no bonus from anti- or un-correlated
+        pairs.
+        """
+        if rho <= 0.0 or other_conf <= 0.5:
+            return 0.0
+        raw = rho * (other_conf - 0.5) * 0.3
+        if raw <= 0.0:
+            return 0.0
+        return min(raw, max_bonus)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1031,10 +1186,19 @@ class HydraEngine:
                  momentum_rsi_lower: float = 30.0,
                  momentum_rsi_upper: float = 70.0,
                  mean_reversion_rsi_buy: float = 35.0,
-                 mean_reversion_rsi_sell: float = 65.0):
+                 mean_reversion_rsi_sell: float = 65.0,
+                 tradable: bool = True):
         self.asset = asset
         self.initial_balance = initial_balance
         self.balance = initial_balance
+        # `tradable` gates the execution path. When False, _maybe_execute and
+        # execute_signal short-circuit without producing a Trade, and the
+        # drawdown-based circuit breaker is suppressed. Signal generation in
+        # tick() continues so the engine can still contribute as a confluence
+        # source for other pairs (see CrossPairCoordinator Rule 4). The agent
+        # flips this flag per-tick based on real exchange holdings of the
+        # quote currency — pairs whose quote we don't hold cannot transact.
+        self.tradable = tradable
         self.position = Position(asset=asset)
         cfg = sizing or SIZING_CONSERVATIVE
         self.sizer = PositionSizer(**cfg)
@@ -1137,8 +1301,12 @@ class HydraEngine:
         if drawdown > self.max_drawdown:
             self.max_drawdown = drawdown
 
-        # Circuit breaker
-        if self.max_drawdown > self.CIRCUIT_BREAKER_PCT:
+        # Circuit breaker — suppressed for informational-only engines.
+        # A non-tradable engine's equity curve is driven purely by price
+        # movement on a phantom balance, not by real P&L, so halting it on
+        # drawdown would be meaningless and would block it from re-activating
+        # if the operator later deposits the quote currency.
+        if self.tradable and self.max_drawdown > self.CIRCUIT_BREAKER_PCT:
             self.halted = True
             self.halt_reason = f"CIRCUIT BREAKER: drawdown {self.max_drawdown:.1f}% > {self.CIRCUIT_BREAKER_PCT}% limit"
 
@@ -1159,7 +1327,14 @@ class HydraEngine:
         that invoked execute_signal() directly (e.g., the swap handler at
         hydra_agent.py:1337) would bypass the halt check. This adds defense-
         in-depth so every execution path respects halt state.
+
+        Informational-only engines (tradable=False) never produce a Trade
+        — the agent-level guard (real quote-currency balance) flipped the
+        flag because we don't hold the currency needed to fund this pair's
+        orders. The signal still exists in state for confluence consumers.
         """
+        if not self.tradable:
+            return None
         if self.halted:
             return None
         if not self.prices:
@@ -1363,6 +1538,10 @@ class HydraEngine:
             # the exchange confirms — must rollback on rejection.
             "gross_profit": self.gross_profit,
             "gross_loss": self.gross_loss,
+            # tradable flag — informational-only engines cannot place orders.
+            # Persisted so --resume doesn't silently re-enable a pair whose
+            # quote currency the user no longer holds.
+            "tradable": self.tradable,
         }
 
     def restore_position(self, snap: Dict[str, Any]) -> None:
@@ -1382,6 +1561,10 @@ class HydraEngine:
         self.max_drawdown = snap["max_drawdown"]
         self.gross_profit = snap["gross_profit"]
         self.gross_loss = snap["gross_loss"]
+        # Backward-compat: snapshots written before v2.11.0 have no
+        # "tradable" field; default to True so resumed sessions behave
+        # identically to pre-flag behavior until the agent refreshes.
+        self.tradable = snap.get("tradable", True)
 
     def reconcile_partial_fill(
         self,

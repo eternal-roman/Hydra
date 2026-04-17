@@ -1126,6 +1126,114 @@ class TestHaltedEngineExecuteSignal:
 
 
 # ═══════════════════════════════════════════════════════════════
+# v2.11.0 — informational-only (tradable=False) engine guard
+# ═══════════════════════════════════════════════════════════════
+
+class TestTradableFlag:
+    """Verifies HydraEngine's `tradable` gate (v2.11.0).
+
+    When `tradable=False`, _maybe_execute and execute_signal must
+    short-circuit to None; the drawdown-based circuit breaker must not
+    fire; and snapshot/restore must preserve the flag with a backward-
+    compatible default of True on pre-2.11.0 snapshots.
+    """
+
+    def _seeded_engine(self, tradable: bool = True) -> HydraEngine:
+        eng = HydraEngine(initial_balance=1.0, asset="SOL/BTC", tradable=tradable)
+        # Enough candles to clear warmup + enable sizer logic.
+        for i in range(60):
+            price = 0.0011 + i * 0.000001
+            eng.ingest_candle({
+                "open": price, "high": price, "low": price,
+                "close": price, "volume": 100.0,
+                "timestamp": float(1700000000 + i * 300),
+            })
+        return eng
+
+    def test_default_tradable_true(self):
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC")
+        assert eng.tradable is True, "tradable must default to True for backward compat"
+
+    def test_execute_signal_buy_returns_none_when_not_tradable(self):
+        eng = self._seeded_engine(tradable=False)
+        result = eng.execute_signal("BUY", 0.80, "test")
+        assert result is None
+        # And no state mutation.
+        assert eng.position.size == 0.0
+        assert eng.balance == 1.0
+
+    def test_execute_signal_sell_returns_none_when_not_tradable(self):
+        eng = self._seeded_engine(tradable=False)
+        eng.position.size = 0.5
+        eng.position.avg_entry = 0.001
+        pre_balance = eng.balance
+        result = eng.execute_signal("SELL", 0.85, "test")
+        assert result is None
+        assert eng.balance == pre_balance
+        assert eng.position.size == 0.5, "position must not change on non-tradable engine"
+
+    def test_circuit_breaker_suppressed_when_not_tradable(self):
+        eng = self._seeded_engine(tradable=False)
+        # Force a drawdown that would halt a tradable engine.
+        eng.peak_equity = 100.0
+        eng.balance = 50.0
+        eng.position.size = 0
+        state = eng.tick()
+        assert state["halted"] is False, (
+            "tradable=False engine must not halt via circuit breaker — its "
+            "phantom equity is meaningless"
+        )
+
+    def test_circuit_breaker_still_fires_when_tradable(self):
+        # Ensure we haven't broken the existing circuit breaker for
+        # real (tradable) engines. Mirrors the existing test_circuit_breaker
+        # but uses the same helper to minimize drift.
+        eng = HydraEngine(initial_balance=10000, asset="BTC/USD")
+        eng.peak_equity = 10000
+        eng.balance = 8000
+        eng.position.size = 0
+        for i in range(60):
+            eng.ingest_candle({
+                "open": 50000, "high": 50100, "low": 49900,
+                "close": 50000, "volume": 100,
+            })
+        state = eng.tick()
+        assert state["halted"] is True
+
+    def test_snapshot_roundtrip_preserves_flag(self):
+        eng = self._seeded_engine(tradable=False)
+        snap = eng.snapshot_position()
+        assert snap.get("tradable") is False
+        eng2 = self._seeded_engine(tradable=True)
+        eng2.restore_position(snap)
+        assert eng2.tradable is False
+
+    def test_missing_tradable_key_defaults_true(self):
+        # Pre-2.11.0 snapshot: no `tradable` key. Engine must come back
+        # with tradable=True so existing resume flows are unaffected.
+        eng = HydraEngine(initial_balance=100.0, asset="SOL/USDC", tradable=False)
+        legacy_snap = {
+            "balance": 100.0,
+            "position_size": 0.0,
+            "position_avg_entry": 0.0,
+            "position_realized_pnl": 0.0,
+            "position_params_at_entry": None,
+            "total_trades": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "trades_len": 0,
+            "equity_history_len": 0,
+            "peak_equity": 100.0,
+            "max_drawdown": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            # no "tradable" key
+        }
+        eng.restore_position(legacy_snap)
+        assert eng.tradable is True
+
+
+# ═══════════════════════════════════════════════════════════════
 # TEST: HF-004 — snapshot_runtime/restore_runtime round-trip for trades
 # ═══════════════════════════════════════════════════════════════
 
@@ -1305,7 +1413,7 @@ def run_tests():
         TestEMA, TestRSI, TestATR, TestBollingerBands, TestMACD,
         TestRegimeDetection, TestSignalGeneration, TestPositionSizer,
         TestHydraEngine, TestSnapshotAndRollback, TestCompetitionMode, TestBrain,
-        TestHaltedEngineExecuteSignal, TestSnapshotTradesRoundTrip,
+        TestHaltedEngineExecuteSignal, TestTradableFlag, TestSnapshotTradesRoundTrip,
     ]
 
     for cls in test_classes:

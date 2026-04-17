@@ -1989,6 +1989,12 @@ class HydraAgent:
             for asset, amount in bal.items():
                 print(f"  [HYDRA]   {asset}: {amount}")
 
+            # Cache BEFORE _set_engine_balances so v2.11.0's live-path
+            # `tradable` flag initialization can read real BTC/quote holdings.
+            # Prior ordering marked every non-USD pair info-only at startup
+            # until the first tick's _refresh_tradable_flags() self-corrected.
+            self._cached_balance = bal
+
             if not self.paper:
                 # Compute tradable USD balance (excludes staked/bonded assets)
                 breakdown = self._compute_balance_usd(bal)
@@ -2009,7 +2015,6 @@ class HydraAgent:
                     print(f"  [HYDRA] Engine balance set from exchange: ${per_pair_usd:,.2f} per pair")
                 else:
                     print(f"  [WARN] No tradable balance — using --balance fallback: ${self.initial_balance:,.2f}")
-            self._cached_balance = bal
         else:
             print(f"  [WARN] Balance check failed: {bal} — using --balance fallback: ${self.initial_balance:,.2f}")
 
@@ -2104,6 +2109,14 @@ class HydraAgent:
                     KrakenCLI.cancel_after(self._dms_timeout)
                     time.sleep(2)  # Rate limit
 
+                # Phase 0.5: Re-evaluate per-engine `tradable` flags from the
+                # latest balance snapshot. Flips an engine to informational-
+                # only when its quote currency is depleted, or re-activates
+                # it when the operator (or a BTC/USDC fill) tops it back up.
+                # Cheap dict lookup; transition logging only, no tick spam.
+                if not self.paper:
+                    self._refresh_tradable_flags()
+
                 # Phase 1: Fetch data and run all engines (regimes, signals, positions)
                 engine_states = {}
                 for pair in self.pairs:
@@ -2124,7 +2137,14 @@ class HydraAgent:
                     if state:
                         self.coordinator.update(pair, state.get("regime", "RANGING"))
 
-                cross_overrides = self.coordinator.get_overrides(engine_states)
+                # Rule 4 confluence needs price histories — pull from the
+                # engines rather than bloating the broadcast state dicts.
+                price_series = {
+                    p: list(self.engines[p].prices) for p in self.pairs
+                }
+                cross_overrides = self.coordinator.get_overrides(
+                    engine_states, price_series=price_series,
+                )
                 pending_swaps = []
                 for pair, override in cross_overrides.items():
                     state = engine_states.get(pair)
@@ -2920,6 +2940,14 @@ class HydraAgent:
                 "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
                 "params_at_entry": trade.get("params_at_entry"),
                 "cross_pair_override": state.get("cross_pair_override") if isinstance(state, dict) else None,
+                # Lifted from cross_pair_override when a Rule 4 confluence
+                # boost drove the trade. Surfaces {source_pair, rho, bonus,
+                # other_conf, window} at the top level for dashboard/analytics
+                # consumers that don't want to unwrap the override dict.
+                "confluence_source": (
+                    (state.get("cross_pair_override") or {}).get("confluence_source")
+                    if isinstance(state, dict) else None
+                ),
                 "book_confidence_modifier": book_mod,
                 "brain_verdict": brain_verdict,
                 "swap_id": trade.get("swap_id"),
@@ -2976,8 +3004,20 @@ class HydraAgent:
                     is_usd = quote in ("USDC", "USD")
                     fmt = f"${real_bal:,.2f}" if is_usd else f"{real_bal:.8f}"
                     cost_fmt = f"${cost_estimate:,.2f}" if is_usd else f"{cost_estimate:.8f}"
-                    print(f"  [TRADE] Insufficient {quote} balance ({fmt}) for {pair} "
-                          f"BUY cost ~{cost_fmt} — skipping")
+                    engine = self.engines.get(pair)
+                    # Post-v2.11.0 this path should be unreachable for non-
+                    # USD-quoted pairs — the engine's `tradable` flag and
+                    # _refresh_tradable_flags() combine to prevent sizing
+                    # against a phantom balance. If we're here with
+                    # tradable=True, it's a race with BalanceStream or a
+                    # regression; surface sharply so it's easy to spot.
+                    if engine is not None and getattr(engine, "tradable", True) and quote not in ("USDC", "USD"):
+                        print(f"  [TRADE] Unexpected insufficient {quote} balance on "
+                              f"tradable=True engine {pair} — likely BalanceStream race "
+                              f"or regression. real={fmt} cost={cost_fmt}")
+                    else:
+                        print(f"  [TRADE] Insufficient {quote} balance ({fmt}) for {pair} "
+                              f"BUY cost ~{cost_fmt} — skipping")
                     self._finalize_failed_entry(
                         entry, terminal_reason=f"insufficient_{quote}_balance",
                     )
@@ -3594,12 +3634,23 @@ class HydraAgent:
             self.prev_regimes[pair] = current_regime
 
     def _set_engine_balances(self, per_pair_usd: float):
-        """Set engine balances, converting USD to quote currency for non-USD pairs.
+        """Set engine balances and the per-engine `tradable` flag.
 
-        The engine's internal bookkeeping (balance -= cost) uses the quote currency,
-        so SOL/BTC must have its balance in BTC, not USD. Without this conversion,
-        position sizes for BTC-quoted pairs are wildly inflated (dividing USD by a
-        BTC-denominated price).
+        USDC/USD-quoted pairs get a 1/N slice of the tradable USD balance.
+
+        Non-USD-quoted pairs (e.g. SOL/BTC) previously received a USD→quote
+        converted slice, which produced a "phantom" balance when the account
+        held none of the quote currency. That phantom balance caused the
+        engine to size and attempt orders it could never actually place,
+        triggering a loop of `PLACEMENT_FAILED: insufficient_{quote}_balance`
+        entries (see v2.11.0 CHANGELOG).
+
+        Fixed policy:
+          • Balance = real exchange holding of the quote currency (not a
+            USD-derived estimate).
+          • `tradable = True` iff the real holding exceeds costmin for that
+            quote — otherwise the engine is `tradable=False` (signal still
+            generated for Rule 4 confluence, but no Trade is ever produced).
 
         When an engine already holds a position (e.g. from --resume), we set
         initial_balance = cash + position_value so that P&L starts at 0% from
@@ -3610,21 +3661,98 @@ class HydraAgent:
         for pair in self.pairs:
             engine = self.engines[pair]
             quote = pair.split("/")[1]
-            if quote not in ("USDC", "USD") and quote in prices and prices[quote] > 0:
-                balance_quote = per_pair_usd / prices[quote]
-                engine.balance = balance_quote
-                # Account for existing position value so P&L doesn't spike
-                current_price = engine.prices[-1] if engine.prices else 0
-                equity = balance_quote + engine.position.size * current_price
-                engine.initial_balance = equity
-                engine.peak_equity = equity
-                print(f"  [HYDRA] {pair}: balance converted ${per_pair_usd:,.2f} -> {balance_quote:.8f} {quote} (equity {equity:.8f})")
-            else:
-                current_price = engine.prices[-1] if engine.prices else 0
+            current_price = engine.prices[-1] if engine.prices else 0
+            if quote in ("USDC", "USD"):
                 equity = per_pair_usd + engine.position.size * current_price
                 engine.balance = per_pair_usd
                 engine.initial_balance = equity
                 engine.peak_equity = equity
+                engine.tradable = True
+                continue
+
+            # Paper mode: keep the legacy USD→quote conversion so strategy
+            # simulations are not artificially gated by on-account holdings.
+            # Paper users are testing the thesis, not funding constraints.
+            if self.paper:
+                if quote in prices and prices[quote] > 0:
+                    balance_quote = per_pair_usd / prices[quote]
+                    equity = balance_quote + engine.position.size * current_price
+                    engine.balance = balance_quote
+                    engine.initial_balance = equity
+                    engine.peak_equity = equity
+                else:
+                    equity = per_pair_usd + engine.position.size * current_price
+                    engine.balance = per_pair_usd
+                    engine.initial_balance = equity
+                    engine.peak_equity = equity
+                engine.tradable = True
+                continue
+
+            # Live mode, non-USD quote: use the real exchange balance.
+            real_quote = self._get_real_quote_balance(quote) or 0.0
+            costmin = PositionSizer.MIN_COST.get(quote, 0.0)
+            if real_quote > costmin:
+                equity = real_quote + engine.position.size * current_price
+                engine.balance = real_quote
+                engine.initial_balance = equity
+                engine.peak_equity = equity
+                engine.tradable = True
+                print(f"  [HYDRA] {pair}: tradable — real balance {real_quote:.8f} {quote} "
+                      f"(equity {equity:.8f})")
+            else:
+                # Informational-only: engine ticks normally, surfaces
+                # regime + signal for confluence, but _maybe_execute
+                # short-circuits so no placement is attempted.
+                equity = engine.position.size * current_price
+                engine.balance = 0.0
+                engine.initial_balance = equity if equity > 0 else 0.0
+                engine.peak_equity = engine.initial_balance
+                engine.tradable = False
+                print(f"  [HYDRA] {pair}: informational-only — no {quote} held "
+                      f"(balance {real_quote:.8f}, costmin {costmin})")
+
+    def _refresh_tradable_flags(self) -> None:
+        """Re-evaluate the `tradable` flag for every engine once per tick.
+
+        Cheap: reads the latest BalanceStream snapshot (push-based, no
+        REST call). Transitions are logged exactly once (False→True and
+        True→False). When a pair flips False→True — e.g. a BTC/USDC BUY
+        just filled, so we now hold BTC — the engine's balance and equity
+        baseline are re-seeded from the real holding so its circuit
+        breaker and P&L calculations start clean from that point.
+
+        USDC/USD-quoted pairs are skipped because their tradability
+        depends on the shared tradable USD pool, not on holding a
+        specific currency.
+        """
+        for pair in self.pairs:
+            engine = self.engines[pair]
+            quote = pair.split("/")[1]
+            if quote in ("USDC", "USD"):
+                if not engine.tradable:
+                    # USD pairs should never be informational-only; if they
+                    # somehow are, re-enable them. Balance unchanged.
+                    engine.tradable = True
+                continue
+            real_quote = self._get_real_quote_balance(quote) or 0.0
+            costmin = PositionSizer.MIN_COST.get(quote, 0.0)
+            should_be_tradable = real_quote > costmin
+            if should_be_tradable and not engine.tradable:
+                current_price = engine.prices[-1] if engine.prices else 0
+                equity = real_quote + engine.position.size * current_price
+                engine.balance = real_quote
+                engine.initial_balance = equity
+                engine.peak_equity = equity
+                engine.max_drawdown = 0.0
+                engine.equity_history = []
+                engine.tradable = True
+                print(f"  [HYDRA] {pair}: ACTIVATED — real {quote} balance "
+                      f"{real_quote:.8f} available (equity {equity:.8f})")
+            elif not should_be_tradable and engine.tradable:
+                engine.balance = 0.0
+                engine.tradable = False
+                print(f"  [HYDRA] {pair}: DEACTIVATED — {quote} balance depleted "
+                      f"({real_quote:.8f} < costmin {costmin})")
 
     def _get_asset_prices(self) -> dict:
         """Get current USD prices for known assets from engine state.
@@ -3814,6 +3942,12 @@ class HydraAgent:
         pairs_data = {}
         for pair, state in all_states.items():
             pairs_data[pair] = state
+            # Per-pair tradable flag — dashboard renders an INFO-ONLY
+            # badge when False. Defaults to True if the engine is
+            # missing (defensive: should not happen).
+            engine = self.engines.get(pair)
+            if state is not None:
+                state["tradable"] = bool(getattr(engine, "tradable", True)) if engine else True
 
         # Journal-derived stats — wrapped in try/except so a malformed journal
         # entry can never crash the broadcast and blank the dashboard.
@@ -4119,7 +4253,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.10.11",
+            "version": "2.11.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

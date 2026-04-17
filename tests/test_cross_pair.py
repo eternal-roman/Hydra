@@ -4,6 +4,7 @@ Validates regime correlation detection, override generation, coordinated swap
 signals, and edge cases. All tests use deterministic synthetic state dicts.
 """
 
+import math
 import sys
 import os
 
@@ -273,6 +274,171 @@ class TestRulePriority:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 7b. RULE 4 — SIGNAL CONFLUENCE (v2.11.0)
+# ═══════════════════════════════════════════════════════════════
+
+def _co_move_prices(n=80, drift=0.0005, shared_noise_amp=0.015, rng_seed=11):
+    """Two tightly co-moving price series (ρ ≈ 1 across log-returns).
+    drift gives both a small upward trend; shared_noise_amp injects the
+    SAME random shock on both series so the log-return variance is
+    non-zero AND identical, driving ρ to exactly 1.
+    """
+    import random
+    rng = random.Random(rng_seed)
+    a = [100.0]
+    b = [0.0012]
+    for _ in range(n):
+        shock = rng.uniform(-1, 1) * shared_noise_amp
+        a.append(a[-1] * math.exp(drift + shock))
+        b.append(b[-1] * math.exp(drift + shock))
+    return a, b
+
+
+def _independent_prices(n=80, rng_seed_a=7, rng_seed_b=8):
+    """Two independent walks — ρ should be near zero."""
+    import random
+    rng_a = random.Random(rng_seed_a)
+    rng_b = random.Random(rng_seed_b)
+    a = [100.0]
+    b = [0.0012]
+    for _ in range(n):
+        a.append(a[-1] * math.exp(rng_a.gauss(0, 0.008)))
+        b.append(b[-1] * math.exp(rng_b.gauss(0, 0.008)))
+    return a, b
+
+
+def make_state_with_signal(regime, action="HOLD", confidence=0.5, position_size=0.0, price=100.0):
+    """Variant of make_state that lets us set a specific signal action."""
+    return {
+        "regime": regime,
+        "signal": {"action": action, "confidence": confidence, "reason": "test"},
+        "position": {"size": position_size, "avg_entry": price, "unrealized_pnl": 0.0},
+        "price": price,
+        "portfolio": {"balance": 100.0, "equity": 100.0, "pnl_pct": 0.0},
+    }
+
+
+class TestRule4Confluence:
+    """Rule 4: SOL/BTC + SOL/USDC same-direction signal confluence."""
+
+    def test_buy_confluence_boosts_when_rho_high(self):
+        """Both BUY + high ρ → SOL/USDC gets a bounded confidence boost."""
+        coord = CrossPairCoordinator(PAIRS)
+        # Same-direction BUY; Rule 3 won't trigger because SOL/USDC is RANGING.
+        states = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("RANGING", action="BUY", confidence=0.68),
+            "SOL/BTC":  make_state_with_signal("RANGING", action="BUY", confidence=0.72),
+        }
+        prices_usdc, prices_btc = _co_move_prices()
+        overrides = coord.get_overrides(
+            states, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        assert "SOL/USDC" in overrides
+        ov = overrides["SOL/USDC"]
+        assert ov["action"] == "ADJUST"
+        assert ov["signal"] == "BUY"
+        assert ov["confidence_adj"] > 0.68, "confidence must be boosted above baseline"
+        assert ov["confidence_adj"] <= 0.95, "boost must respect the 0.95 ceiling"
+        src = ov["confluence_source"]
+        assert src["source_pair"] == "SOL/BTC"
+        assert src["rho"] > 0.5
+        assert 0.0 < src["bonus"] <= 0.10
+
+    def test_buy_confluence_skipped_when_rho_low(self):
+        """Below threshold ρ → no confluence override."""
+        coord = CrossPairCoordinator(PAIRS)
+        states = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("RANGING", action="BUY", confidence=0.68),
+            "SOL/BTC":  make_state_with_signal("RANGING", action="BUY", confidence=0.72),
+        }
+        prices_usdc, prices_btc = _independent_prices()
+        overrides = coord.get_overrides(
+            states, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        # Either no override at all, or an override that did NOT come from Rule 4.
+        ov = overrides.get("SOL/USDC")
+        if ov is not None:
+            assert "confluence_source" not in ov, (
+                "low-ρ pairs must not produce a Rule 4 confluence_source"
+            )
+
+    def test_mixed_actions_no_confluence(self):
+        coord = CrossPairCoordinator(PAIRS)
+        states = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("RANGING", action="BUY", confidence=0.70),
+            "SOL/BTC":  make_state_with_signal("RANGING", action="SELL", confidence=0.70),
+        }
+        prices_usdc, prices_btc = _co_move_prices()
+        overrides = coord.get_overrides(
+            states, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        ov = overrides.get("SOL/USDC")
+        assert ov is None or "confluence_source" not in ov
+
+    def test_sell_confluence_requires_sol_position(self):
+        """Sell confluence only fires when we hold SOL via SOL/USDC."""
+        coord = CrossPairCoordinator(PAIRS)
+        states_no_pos = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("RANGING", action="SELL", confidence=0.70, position_size=0.0),
+            "SOL/BTC":  make_state_with_signal("RANGING", action="SELL", confidence=0.70),
+        }
+        prices_usdc, prices_btc = _co_move_prices()
+        overrides_no = coord.get_overrides(
+            states_no_pos, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        ov_no = overrides_no.get("SOL/USDC")
+        assert ov_no is None or "confluence_source" not in ov_no
+
+        coord2 = CrossPairCoordinator(PAIRS)
+        states_pos = dict(states_no_pos)
+        states_pos["SOL/USDC"] = make_state_with_signal("RANGING", action="SELL",
+                                                        confidence=0.70, position_size=5.0)
+        overrides_pos = coord2.get_overrides(
+            states_pos, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        ov_pos = overrides_pos.get("SOL/USDC")
+        assert ov_pos is not None
+        assert ov_pos.get("confluence_source") is not None
+        assert ov_pos["signal"] == "SELL"
+
+    def test_no_price_series_is_safe_noop(self):
+        """Coordinator must not crash when no price_series is supplied; Rule 4 simply doesn't fire."""
+        coord = CrossPairCoordinator(PAIRS)
+        states = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("RANGING", action="BUY", confidence=0.70),
+            "SOL/BTC":  make_state_with_signal("RANGING", action="BUY", confidence=0.70),
+        }
+        # No price_series argument at all (legacy callers).
+        overrides = coord.get_overrides(states)
+        ov = overrides.get("SOL/USDC")
+        assert ov is None or "confluence_source" not in ov
+
+    def test_rule3_suppresses_rule4_on_same_pair(self):
+        """When Rule 3 emits an OVERRIDE swap, Rule 4 must not clobber it."""
+        coord = CrossPairCoordinator(PAIRS)
+        # Rule 3 conditions: SOL/USDC TREND_DOWN + SOL/BTC TREND_UP + holds SOL.
+        states = {
+            "BTC/USDC": make_state_with_signal("RANGING"),
+            "SOL/USDC": make_state_with_signal("TREND_DOWN", action="SELL", confidence=0.70,
+                                                position_size=5.0),
+            "SOL/BTC":  make_state_with_signal("TREND_UP", action="BUY", confidence=0.70),
+        }
+        prices_usdc, prices_btc = _co_move_prices()
+        overrides = coord.get_overrides(
+            states, price_series={"SOL/USDC": prices_usdc, "SOL/BTC": prices_btc},
+        )
+        assert "SOL/USDC" in overrides
+        # Rule 3 signature: OVERRIDE + swap dict.
+        assert overrides["SOL/USDC"]["action"] == "OVERRIDE"
+        assert "swap" in overrides["SOL/USDC"]
+
+
+# ═══════════════════════════════════════════════════════════════
 # 8. SHARPE ANNUALIZATION FIX
 # ═══════════════════════════════════════════════════════════════
 
@@ -316,6 +482,7 @@ def run_tests():
         TestRule3CoordinatedSwap,
         TestNoOverride,
         TestRulePriority,
+        TestRule4Confluence,
         TestSharpeAnnualization,
     ]
 

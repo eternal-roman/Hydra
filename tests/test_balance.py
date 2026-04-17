@@ -296,94 +296,175 @@ class TestEngineBalanceInit:
         size = engine.sizer.calculate(0.7, engine.balance, 130.0, "SOL/USDC")
         assert size == 0, "Tiny balance should fail to meet minimum order size"
 
-    def test_btc_quoted_pair_balance_converted_from_usd(self):
-        """SOL/BTC engine balance must be in BTC, not USD.
-        Without conversion, position sizes are ~60,000x too large because
-        the sizer divides a USD balance by a BTC-denominated price."""
+    class _NullBalanceStream:
+        """Stub BalanceStream for tests — declares unhealthy so
+        _get_real_quote_balance falls through to _cached_balance."""
+        healthy = False
+        def latest_balances(self):  # pragma: no cover — never called
+            return {}
+
+    def _bare_agent_for_balance_tests(self, cached_balance: dict,
+                                       pair_prices: dict,
+                                       paper: bool = False) -> HydraAgent:
+        """Construct a bare HydraAgent skeleton wired for _set_engine_balances.
+
+        v2.11.0 routes non-USD-quoted pairs through the real-holding path in
+        LIVE mode (paper=False) so we test the info-only transitions here.
+        Paper mode preserves the pre-v2.11.0 USD→quote conversion path for
+        backward compatibility with paper-only strategy simulations.
+        """
         agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
+        agent.paper = paper
+        agent.balance_stream = self._NullBalanceStream()
+        agent._cached_balance = cached_balance
+        agent.pairs = list(pair_prices.keys())
         agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
-            engine = HydraEngine(initial_balance=100.0, asset=pair)
+        for pair, price in pair_prices.items():
+            engine = HydraEngine(initial_balance=0.0, asset=pair)
             engine.prices = [price]
             agent.engines[pair] = engine
+        return agent
 
-        per_pair_usd = 100.0
-        agent._set_engine_balances(per_pair_usd)
+    def test_btc_quoted_balance_uses_real_holding_when_btc_held(self):
+        """v2.11.0: SOL/BTC engine balance = real BTC holding, not a USD
+        conversion. tradable=True when the holding exceeds costmin."""
+        real_btc = 0.00300
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0, "XXBT": real_btc},
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
+        agent._set_engine_balances(per_pair_usd=100.0)
 
-        # SOL/USDC and BTC/USDC: balance stays in USD
+        # USD-quoted pairs get the 1/N USDC slice
         assert agent.engines["SOL/USDC"].balance == 100.0
+        assert agent.engines["SOL/USDC"].tradable is True
         assert agent.engines["BTC/USDC"].balance == 100.0
+        assert agent.engines["BTC/USDC"].tradable is True
 
-        # SOL/BTC: balance converted from $100 USD to BTC
-        btc_balance = agent.engines["SOL/BTC"].balance
-        expected_btc = 100.0 / 60000.0  # ~0.001667 BTC
-        assert abs(btc_balance - expected_btc) < 1e-8, \
-            f"SOL/BTC balance should be ~{expected_btc:.8f} BTC, got {btc_balance:.8f}"
+        # SOL/BTC: real BTC holding, not a USD-derived phantom
+        sol_btc = agent.engines["SOL/BTC"]
+        assert abs(sol_btc.balance - real_btc) < 1e-12, \
+            f"SOL/BTC should hold real BTC amount {real_btc}, got {sol_btc.balance}"
+        assert sol_btc.tradable is True
 
-    def test_btc_quoted_pair_produces_sane_position_size(self):
-        """After balance conversion, SOL/BTC position size should be reasonable,
-        not the inflated 4000+ SOL that caused the 'api' failures."""
-        agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
-        agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
-            engine = HydraEngine(initial_balance=100.0, asset=pair)
-            engine.prices = [price]
-            agent.engines[pair] = engine
+    def test_btc_quoted_is_informational_when_no_btc_held(self):
+        """v2.11.0: zero BTC balance → tradable=False, balance=0. This is the
+        core fix for the phantom-balance bug — the SOL/BTC engine no longer
+        sizes orders it cannot fund."""
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0},  # no BTC at all
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
+        agent._set_engine_balances(per_pair_usd=100.0 / 3)
 
-        agent._set_engine_balances(100.0)
+        sol_btc = agent.engines["SOL/BTC"]
+        assert sol_btc.tradable is False
+        assert sol_btc.balance == 0.0
+        # USD-quoted pairs are unaffected
+        assert agent.engines["SOL/USDC"].tradable is True
+        assert agent.engines["BTC/USDC"].tradable is True
 
-        # Now calculate position size for SOL/BTC
-        engine = agent.engines["SOL/BTC"]
-        size = engine.sizer.calculate(0.58, engine.balance, 0.002167, "SOL/BTC")
+    def test_info_only_sol_btc_refuses_to_execute(self):
+        """End-to-end: an info-only engine must return None from execute_signal
+        regardless of how strong the signal. No Trade object is ever produced,
+        so the placement path is never reached — the journaled
+        PLACEMENT_FAILED(insufficient_BTC_balance) entries from the bug
+        simply cannot happen anymore."""
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0},
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
+        agent._set_engine_balances(per_pair_usd=100.0 / 3)
+        sol_btc = agent.engines["SOL/BTC"]
+        # Seed warmup so execute_signal isn't filtered by the prices guard
+        for i in range(60):
+            price = 0.002167 + i * 1e-7
+            sol_btc.ingest_candle({
+                "open": price, "high": price, "low": price,
+                "close": price, "volume": 100.0,
+                "timestamp": float(1700000000 + i * 300),
+            })
+        trade = sol_btc.execute_signal("BUY", 0.85, "strong mean-reversion signal")
+        assert trade is None, \
+            "info-only engine must not produce a Trade for any signal strength"
 
-        # With ~0.00167 BTC balance, position should be small (< 1 SOL),
-        # NOT the 4000+ SOL that was happening before
-        assert size < 10, f"Position size should be small, got {size:.4f} SOL"
+    def test_refresh_tradable_activates_when_btc_arrives(self):
+        """v2.11.0: _refresh_tradable_flags re-seats the flag when real BTC
+        appears mid-session (e.g., BTC/USDC fill or user deposit). The
+        engine transitions False→True and the equity baseline resets."""
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0},
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
+        agent._set_engine_balances(per_pair_usd=100.0 / 3)
+        sol_btc = agent.engines["SOL/BTC"]
+        assert sol_btc.tradable is False
 
-    def test_btc_quoted_no_conversion_without_btc_price(self):
-        """If BTC price unavailable, SOL/BTC balance stays in USD (safe fallback)."""
-        agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/BTC"]
-        agent.engines = {}
-        engine = HydraEngine(initial_balance=100.0, asset="SOL/BTC")
-        engine.prices = [0.002167]
-        agent.engines["SOL/BTC"] = engine
+        # BTC balance arrives (simulate a fill or deposit)
+        agent._cached_balance = {"USDC": 70.0, "XXBT": 0.0005}
+        agent._refresh_tradable_flags()
+        assert sol_btc.tradable is True, "engine must activate once BTC is held"
+        assert abs(sol_btc.balance - 0.0005) < 1e-12
+        # Equity baseline re-seated cleanly
+        assert sol_btc.initial_balance == sol_btc.balance + sol_btc.position.size * 0.002167
+        assert sol_btc.peak_equity == sol_btc.initial_balance
+        assert sol_btc.max_drawdown == 0.0
 
-        # No BTC/USDC or SOL/USDC engines → can't derive BTC price
-        agent._set_engine_balances(100.0)
-        assert agent.engines["SOL/BTC"].balance == 100.0  # Unchanged (no price to convert)
+    def test_refresh_tradable_deactivates_when_btc_depleted(self):
+        """Symmetric: if BTC is spent down below costmin, the engine flips
+        back to info-only on the next refresh."""
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0, "XXBT": 0.0005},
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
+        agent._set_engine_balances(per_pair_usd=100.0 / 3)
+        sol_btc = agent.engines["SOL/BTC"]
+        assert sol_btc.tradable is True
+
+        # BTC depleted to below costmin (0.00002 BTC)
+        agent._cached_balance = {"USDC": 100.0, "XXBT": 0.0}
+        agent._refresh_tradable_flags()
+        assert sol_btc.tradable is False
+        assert sol_btc.balance == 0.0
 
     def test_btc_quoted_resumed_with_position_pnl_sane(self):
-        """Resumed SOL/BTC engine with existing position must NOT show insane P&L.
-        Bug: _set_engine_balances set initial_balance to converted cash only,
-        ignoring the position value — causing equity >> initial_balance."""
-        agent = object.__new__(HydraAgent)
-        agent.pairs = ["SOL/USDC", "BTC/USDC", "SOL/BTC"]
-        agent.engines = {}
-        for pair, price in [("SOL/USDC", 130.0), ("BTC/USDC", 60000.0), ("SOL/BTC", 0.002167)]:
-            engine = HydraEngine(initial_balance=100.0, asset=pair)
-            engine.prices = [price]
-            agent.engines[pair] = engine
-
-        # Simulate resumed position: 0.5 SOL held in SOL/BTC engine
+        """Resumed SOL/BTC engine with existing position must not inflate P&L.
+        initial_balance is set so that pnl_pct ≈ 0% at reset time, regardless
+        of whether the engine is info-only or tradable."""
+        # Info-only case: no BTC held, but a SOL position exists from before.
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0},
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+        )
         agent.engines["SOL/BTC"].position.size = 0.5
         agent.engines["SOL/BTC"].position.avg_entry = 0.002100
-
-        agent._set_engine_balances(100.0)
+        agent._set_engine_balances(per_pair_usd=100.0 / 3)
 
         engine = agent.engines["SOL/BTC"]
         current_price = 0.002167
         equity = engine.balance + engine.position.size * current_price
-        pnl_pct = ((equity - engine.initial_balance) / engine.initial_balance * 100)
-
-        # P&L must be near 0%, NOT +239000%
+        # When info-only: balance=0, initial_balance=position_value, pnl_pct=0.
+        pnl_pct = ((equity - engine.initial_balance) / engine.initial_balance * 100) \
+            if engine.initial_balance > 0 else 0.0
         assert abs(pnl_pct) < 5.0, \
             f"P&L should be near 0% after balance reset, got {pnl_pct:+.2f}%"
-        # initial_balance must include position value
-        assert engine.initial_balance > engine.balance, \
-            "initial_balance should include position value, not just cash"
+
+    def test_paper_mode_preserves_legacy_usd_conversion(self):
+        """Paper mode must NOT gate on real holdings — strategy simulations
+        should work regardless of live-account composition. Preserves the
+        pre-v2.11.0 USD→quote conversion so SOL/BTC remains tradable in paper."""
+        agent = self._bare_agent_for_balance_tests(
+            cached_balance={"USDC": 100.0},  # no BTC anywhere
+            pair_prices={"SOL/USDC": 130.0, "BTC/USDC": 60000.0, "SOL/BTC": 0.002167},
+            paper=True,
+        )
+        agent._set_engine_balances(per_pair_usd=33.33)
+
+        sol_btc = agent.engines["SOL/BTC"]
+        # Legacy behavior: USD/BTC_price phantom balance, always tradable.
+        expected_btc = 33.33 / 60000.0
+        assert sol_btc.tradable is True
+        assert abs(sol_btc.balance - expected_btc) < 1e-10
 
     def test_equity_history_clean_after_balance_reset(self):
         """Engine that only had candles ingested (no ticks) should have empty equity history."""
