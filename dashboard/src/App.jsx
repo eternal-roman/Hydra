@@ -301,13 +301,13 @@ const RIGOR_GATES = [
 // and stays invisible.
 
 // Companion themes drawn from the existing Hydra palette so the drawer
-// visually belongs to the dashboard. Athena takes the warm amber
-// (patient, defensive), Apex the precise blue (professional), Broski
-// the volatile purple (matches the volatile-regime color \u2014 his element).
+// visually belongs to the dashboard. Athena takes the regal purple
+// (wise, mystical), Apex the precise blue (professional), Broski the
+// fiery amber (high-energy, warm).
 const COMPANION_THEMES = {
-  athena: { primary: COLORS.warn,    accent: COLORS.warn,   glow: COLORS.warn,   sigil: "\u26B2" },
+  athena: { primary: COLORS.purple,  accent: COLORS.purple, glow: COLORS.purple, sigil: "\u26B2" },
   apex:   { primary: COLORS.blue,    accent: COLORS.blue,   glow: COLORS.blue,   sigil: "\u25B2" },
-  broski: { primary: COLORS.purple,  accent: COLORS.purple, glow: COLORS.purple, sigil: "\u2736" },
+  broski: { primary: COLORS.warn,    accent: COLORS.warn,   glow: COLORS.warn,   sigil: "\u2736" },
 };
 const COMPANION_ORDER = ["athena", "apex", "broski"];
 const COMPANION_NAMES = { athena: "Athena", apex: "Apex", broski: "Broski" };
@@ -680,13 +680,29 @@ function CompanionDrawer({
     <div style={{
       position: "fixed", top: 0, right: 0, bottom: 0, width: drawerWidth,
       zIndex: 9000, background: `${COLORS.panel}f0`, backdropFilter: "blur(14px)",
-      borderLeft: `1px solid ${theme.primary}55`,
-      boxShadow: `-8px 0 32px rgba(0,0,0,0.5), inset 2px 0 0 ${theme.primary}33`,
+      borderLeft: `1px solid ${theme.primary}66`,
+      boxShadow: `-8px 0 32px rgba(0,0,0,0.5), inset 2px 0 0 ${theme.primary}44`,
       display: "flex", flexDirection: "column",
-      animation: "hc-slide-in 260ms cubic-bezier(0.32, 0.72, 0, 1)",
+      animation: `hc-slide-in 260ms cubic-bezier(0.32, 0.72, 0, 1), hc-drawer-glow-${active} ${(SOUL_RHYTHM[active]?.baseSeconds || 3)}s ${SOUL_RHYTHM[active]?.easing || "ease-in-out"} infinite`,
       fontFamily: mono,
     }}>
-      <style>{`@keyframes hc-slide-in { from { transform: translateX(100%);} to { transform: translateX(0);} }`}</style>
+      <style>{`
+        @keyframes hc-slide-in { from { transform: translateX(100%);} to { transform: translateX(0);} }
+        @keyframes hc-drawer-glow-${active} {
+          0%,100% {
+            box-shadow: -8px 0 32px rgba(0,0,0,0.5),
+                        inset 2px 0 0 ${theme.primary}44,
+                        inset 0 0 40px ${theme.primary}08;
+            border-left-color: ${theme.primary}66;
+          }
+          50% {
+            box-shadow: -8px 0 44px rgba(0,0,0,0.55),
+                        inset 3px 0 0 ${theme.primary}88,
+                        inset 0 0 70px ${theme.primary}16;
+            border-left-color: ${theme.primary}aa;
+          }
+        }
+      `}</style>
 
       {/* Header */}
       <div style={{

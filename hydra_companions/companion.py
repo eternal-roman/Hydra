@@ -45,7 +45,10 @@ class Companion:
         self.provider = provider
         self.user_id = user_id
         self.transcript: list[dict] = []
-        self.mood: str = "calm"
+        # Per-soul default mood (calm | focused | chill | \u2026) \u2014 pulled from
+        # the soul's mood_model.default at compile time; stored on the
+        # CompiledSoul as .default_mood (see compiler.py).
+        self.mood: str = getattr(soul, "default_mood", None) or "calm"
         self.serious_mode: bool = False  # broski-only, default off
         self._transcript_path = TRANSCRIPTS_DIR / f"{user_id}_{soul.id}.jsonl"
         self._load_transcript_tail()

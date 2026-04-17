@@ -26,6 +26,7 @@ class CompiledSoul:
     color_theme: dict
     sigil: str
     serious_mode_supported: bool
+    default_mood: str                # per-soul initial mood (mood_model.default)
 
 
 def _fmt_bullets(items, bullet: str = "- ") -> str:
@@ -210,6 +211,7 @@ def compile_soul(soul: dict) -> CompiledSoul:
         color_theme=dict(soul.get("color_theme", {})),
         sigil=soul.get("sigil", ""),
         serious_mode_supported=bool(mode_rules),
+        default_mood=(soul.get("mood_model") or {}).get("default", "calm"),
     )
 
 
