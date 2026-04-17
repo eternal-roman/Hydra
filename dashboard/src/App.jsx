@@ -1202,12 +1202,18 @@ const VERDICT_COLORS = {
 
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
                              onView, filters, onFilterChange, loading,
-                             onCompare, canCompare, compareInFlight, onGoToBacktest }) {
+                             onCompare, canCompare, compareInFlight, onGoToBacktest,
+                             totalInStore }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
   const [filtersOpen, setFiltersOpen] = useState(false);
   const hasAdvancedFilters = !!(filters.triggered_by || filters.tag);
+  const hasActiveFilters = !!(filters.status || filters.triggered_by || filters.tag);
+  // Distinguish "store is empty" (no experiments at all) from "store has N
+  // but current filters narrowed them to zero" — each gets a different CTA.
+  const storeIsEmpty = (totalInStore || 0) === 0;
+  const filteredToEmpty = !storeIsEmpty && count === 0;
   // Map selected IDs back to their rows so we can chip-render them by name.
   const selectedRows = selectedIds
     .map((id) => experiments.find((e) => e.id === id))
@@ -1224,7 +1230,9 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             Experiment Library
           </div>
           <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
-            {count} experiments
+            {hasActiveFilters && totalInStore != null && count !== totalInStore
+              ? <>{count} of {totalInStore} experiments</>
+              : <>{count} experiments</>}
             {selCount > 0 && (
               <>
                 {" "}· <span style={{ color: COLORS.purple }}>{selCount}</span> selected
@@ -1445,8 +1453,33 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             <div style={{ fontFamily: mono, fontSize: 13, color: COLORS.textDim }}>
               Loading…
             </div>
+          ) : filteredToEmpty ? (
+            <>
+              <div style={{ fontSize: 28, opacity: 0.5 }}>🧪</div>
+              <div style={{ fontFamily: heading, fontSize: 15, fontWeight: 700,
+                            color: COLORS.text }}>
+                No experiments match your filters
+              </div>
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                            lineHeight: 1.5, maxWidth: 420 }}>
+                You have <span style={{ color: COLORS.purple }}>{totalInStore}</span> in
+                the library, but the current filters hide all of them.
+              </div>
+              <button
+                onClick={() => onFilterChange({})}
+                style={{ padding: "8px 16px", fontSize: 12, fontFamily: mono,
+                         fontWeight: 700, letterSpacing: "0.1em",
+                         textTransform: "uppercase",
+                         background: `${COLORS.purple}20`, color: COLORS.purple,
+                         border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
+                         cursor: "pointer", outline: "none" }}
+              >
+                Clear Filters
+              </button>
+            </>
           ) : (
             <>
+              <div style={{ fontSize: 36, opacity: 0.6 }}>🧪</div>
               <div style={{ fontFamily: heading, fontSize: 16, fontWeight: 700,
                             color: COLORS.text }}>
                 You don't have any experiments yet
@@ -1512,7 +1545,9 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 />
                 <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   <span style={{ color: COLORS.text, fontWeight: 600 }}>{e.name}</span>
-                  <span style={{ color: COLORS.textMuted, marginLeft: 8, fontSize: 11 }}>
+                  <span style={{ color: COLORS.textMuted, marginLeft: 8, fontSize: 11 }}
+                        title={`Experiment id: ${e.id}`}>
+                    <span style={{ marginRight: 3, filter: "saturate(0.85)" }}>🧪</span>
                     {e.id.slice(0, 8)}
                   </span>
                   {e.base_preset && (
@@ -1700,9 +1735,11 @@ function CompareResults({ report, experimentsById }) {
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
                        onView, onCompare, compareReport, loading, filters, onFilterChange,
-                       compareInFlight, onGoToBacktest }) {
+                       compareInFlight, onGoToBacktest, totalInStore }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
-  const expCount = experiments?.length || 0;
+  // Step 1's "do you have any experiments" check is against the full store,
+  // not the filtered subset, so active filters don't mask a populated library.
+  const expCount = totalInStore != null ? totalInStore : (experiments?.length || 0);
   const hasEnoughForCompare = expCount >= 2;
 
   // Derive the current step so the banner can highlight where the user is.
@@ -1823,6 +1860,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
         canCompare={canCompare}
         compareInFlight={compareInFlight}
         onGoToBacktest={onGoToBacktest}
+        totalInStore={totalInStore}
       />
 
       {/* Compare action row */}
@@ -2002,6 +2040,17 @@ export default function App() {
               return;
             case "backtest_result":
               setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              // Auto-refresh the library so the freshly-completed run is
+              // present when the user next opens the COMPARE tab — without
+              // this, the library only refreshes on tab-switch or manual
+              // Refresh, which made completed runs look "missing".
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                try {
+                  wsRef.current.send(JSON.stringify({
+                    type: "experiment_list_request", limit: 100,
+                  }));
+                } catch { /* swallow — next tab switch will refetch */ }
+              }
               return;
             case "backtest_review":
               setBtReviews((prev) => ({ ...prev, [msg.experiment_id]: msg.review }));
@@ -2314,6 +2363,7 @@ export default function App() {
                   onFilterChange={setLibFilters}
                   compareInFlight={compareInFlight}
                   onGoToBacktest={() => setActiveTab("BACKTEST")}
+                  totalInStore={libExperiments.length}
                 />
               </div>
             )}
