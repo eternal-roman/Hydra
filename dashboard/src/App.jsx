@@ -2490,7 +2490,7 @@ export default function App() {
   const [companionTyping, setCompanionTyping] = useState({ athena: false, apex: false, broski: false });
   const [companionUnread, setCompanionUnread] = useState({ athena: false, apex: false, broski: false });
   const [companionCostAlerts, setCompanionCostAlerts] = useState({});
-  const [companionVisible, setCompanionVisible] = useState(false);   // true once hello received
+  const [companionVisible, setCompanionVisible] = useState(true);    // optimistic \u2014 orb shows immediately; hides on failed connect
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
@@ -2611,6 +2611,9 @@ export default function App() {
                 if (msg.companion) metas[msg.companion.id] = msg.companion;
                 setCompanions((prev) => ({ ...prev, ...metas }));
                 setCompanionVisible(true);
+              } else {
+                // Subsystem disabled on server \u2014 hide the orb.
+                setCompanionVisible(false);
                 // Seed history for the active companion if provided
                 if (msg.companion && Array.isArray(msg.history_tail)) {
                   const seeded = msg.history_tail.map((t, i) => ({
@@ -3548,7 +3551,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.10.9 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.10.10 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

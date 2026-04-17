@@ -36,22 +36,44 @@ def is_disabled() -> bool:
 
 
 def is_enabled() -> bool:
-    """Phase 1 chat gate. Off unless user opts in AND no kill switch."""
-    if is_disabled():
-        return False
-    return os.environ.get("HYDRA_COMPANION_ENABLED") == "1"
+    """Phase 1 chat gate. On by default \u2014 kill switch to disable.
+
+    The subsystem is cheap to mount (no API calls until the user
+    actually talks to a companion). Making it default-on means the
+    orb is visible immediately on launch; clicking it IS the
+    activation. Set HYDRA_COMPANION_DISABLED=1 to turn it off.
+    """
+    return not is_disabled()
 
 
 def proposals_enabled() -> bool:
-    return is_enabled() and os.environ.get("HYDRA_COMPANION_PROPOSALS_ENABLED") == "1"
+    """Phase 2 trade-card gate. Default ON once chat is on."""
+    if not is_enabled():
+        return False
+    # Explicit opt-out via env wins.
+    if os.environ.get("HYDRA_COMPANION_PROPOSALS_ENABLED") == "0":
+        return False
+    return True
 
 
 def live_execution_enabled() -> bool:
-    return proposals_enabled() and os.environ.get("HYDRA_COMPANION_LIVE_EXECUTION") == "1"
+    """Phase 3 real-order gate. Default OFF \u2014 opt-in via env or in-app
+    settings when we wire runtime settings persistence. This is the
+    only flag that *stays* explicit-opt-in by default, because it
+    places real money at risk."""
+    if not proposals_enabled():
+        return False
+    return os.environ.get("HYDRA_COMPANION_LIVE_EXECUTION") == "1"
 
 
 def nudges_enabled() -> bool:
-    return is_enabled() and os.environ.get("HYDRA_COMPANION_NUDGES") == "1"
+    """Phase 6 proactive nudge gate. Default ON once chat is on \u2014
+    opt-out via env if the user finds them noisy."""
+    if not is_enabled():
+        return False
+    if os.environ.get("HYDRA_COMPANION_NUDGES") == "0":
+        return False
+    return True
 
 
 def routing_mode() -> str:

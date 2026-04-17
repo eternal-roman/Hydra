@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.10] — 2026-04-17
+
+Companion UX fix \u2014 **default-on**. The orb now appears immediately
+when the dashboard connects to an agent. Clicking it IS the
+activation; no env var required.
+
+### Changed
+- `hydra_companions/config.py`: `is_enabled()` defaults to True
+  (kill switch `HYDRA_COMPANION_DISABLED=1` still respected). Chat,
+  proposals, and proactive nudges are on by default. Live execution
+  stays opt-in via `HYDRA_COMPANION_LIVE_EXECUTION=1` (money safety).
+  Individual features can be suppressed with `=0` env overrides.
+- Dashboard: orb renders optimistically on WS connect; only hides if
+  the server reports the subsystem is disabled (failed connect_ack).
+- `start_hydra_companion.bat`: no longer sets env vars; chat is on
+  by default. Paper mode preserved for safe testing.
+
+### Preserved
+- `start_hydra.bat` unchanged \u2014 now also shows the orb, same
+  default-on behaviour.
+- All 66 unit tests green.
+
+---
+
 ## [2.10.9] — 2026-04-17
 
 Companion **Phase 6** — proactive nudges + mood visuals. Completes the
