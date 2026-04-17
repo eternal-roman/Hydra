@@ -1509,7 +1509,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      maxHeight: compact ? "min(260px, 24vh)" : "min(420px, 38vh)",
+                      maxHeight: compact ? "min(200px, 18vh)" : "min(420px, 38vh)",
                       overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
@@ -1780,72 +1780,88 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 
   return (
     <div>
-      {/* How-it-works banner — spells out the COMPARE workflow as discrete,
-          left-justified steps so a first-time user knows what to do. */}
-      <div style={{ marginBottom: 12, padding: "14px 18px",
-                    background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
-                    borderRadius: 8 }}>
-        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700,
-                      color: COLORS.purple, marginBottom: 4, letterSpacing: "0.02em" }}>
-          Compare Past Backtests
+      {/* How-it-works banner — full guide before the first comparison; collapses
+          to a one-line title bar once the user has seen results so it stops
+          eating vertical space on subsequent runs. */}
+      {compareReport ? (
+        <div style={{ marginBottom: 10, padding: "8px 14px",
+                      background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
+                      borderRadius: 6, display: "flex", alignItems: "center",
+                      justifyContent: "space-between", gap: 10 }}>
+          <span style={{ fontSize: 12, fontFamily: heading, fontWeight: 700,
+                         color: COLORS.purple, letterSpacing: "0.02em" }}>
+            Compare Past Backtests
+          </span>
+          <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+            Select 2–8 experiments · Compare → ranks them & tests significance.
+          </span>
         </div>
-        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                      lineHeight: 1.55, marginBottom: 10 }}>
-          Rank two or more completed backtests side-by-side on Return, Sharpe,
-          Max DD, and Profit Factor — and see which Sharpe differences are real
-          signal vs. noise via paired-bootstrap p-values.
-        </div>
+      ) : (
+        <div style={{ marginBottom: 12, padding: "14px 18px",
+                      background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
+                      borderRadius: 8 }}>
+          <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700,
+                        color: COLORS.purple, marginBottom: 4, letterSpacing: "0.02em" }}>
+            Compare Past Backtests
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                        lineHeight: 1.55, marginBottom: 10 }}>
+            Rank two or more completed backtests side-by-side on Return, Sharpe,
+            Max DD, and Profit Factor — and see which Sharpe differences are real
+            signal vs. noise via paired-bootstrap p-values.
+          </div>
 
-        <Step
-          n={1}
-          active={currentStep === 1}
-          done={currentStep > 1}
-          title="Run some backtests first"
-          body={
-            hasEnoughForCompare ? (
-              <>
-                <span style={{ color: COLORS.accent }}>{expCount}</span>{" "}
-                experiment{expCount === 1 ? "" : "s"} available in the library below.
-              </>
-            ) : (
-              <>
-                You need at least 2 completed runs before you can compare.
-                Head to the <span style={{ color: COLORS.blue, fontWeight: 700 }}>BACKTEST</span> tab,
-                submit a run, wait for it to finish, then come back here.
-                Currently: <span style={{ color: COLORS.warn }}>{expCount}</span> in the library.
-              </>
-            )
-          }
-        />
-        <Step
-          n={2}
-          active={currentStep === 2}
-          done={currentStep > 2}
-          title="Filter and find the experiments you want"
-          body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
-        />
-        <Step
-          n={3}
-          active={currentStep === 3}
-          done={compareReport?.success}
-          title="Select 2–8 and click Compare"
-          body={
-            selectedIds.length === 0 ? (
-              "Tick the checkbox on each row you want to include. Maximum 8."
-            ) : selectedIds.length === 1 ? (
-              <>
-                <span style={{ color: COLORS.warn }}>1 selected</span> — pick at least one more.
-              </>
-            ) : (
-              <>
-                <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
-                {" "}selected · hit the <span style={{ color: COLORS.purple, fontWeight: 700 }}>Compare →</span>
-                {" "}button under the library to run the analysis.
-              </>
-            )
-          }
-        />
-      </div>
+          <Step
+            n={1}
+            active={currentStep === 1}
+            done={currentStep > 1}
+            title="Run some backtests first"
+            body={
+              hasEnoughForCompare ? (
+                <>
+                  <span style={{ color: COLORS.accent }}>{expCount}</span>{" "}
+                  experiment{expCount === 1 ? "" : "s"} available in the library below.
+                </>
+              ) : (
+                <>
+                  You need at least 2 completed runs before you can compare.
+                  Head to the <span style={{ color: COLORS.blue, fontWeight: 700 }}>BACKTEST</span> tab,
+                  submit a run, wait for it to finish, then come back here.
+                  Currently: <span style={{ color: COLORS.warn }}>{expCount}</span> in the library.
+                </>
+              )
+            }
+          />
+          <Step
+            n={2}
+            active={currentStep === 2}
+            done={currentStep > 2}
+            title="Filter and find the experiments you want"
+            body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
+          />
+          <Step
+            n={3}
+            active={currentStep === 3}
+            done={compareReport?.success}
+            title="Select 2–8 and click Compare"
+            body={
+              selectedIds.length === 0 ? (
+                "Tick the checkbox on each row you want to include. Maximum 8."
+              ) : selectedIds.length === 1 ? (
+                <>
+                  <span style={{ color: COLORS.warn }}>1 selected</span> — pick at least one more.
+                </>
+              ) : (
+                <>
+                  <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
+                  {" "}selected · hit the <span style={{ color: COLORS.purple, fontWeight: 700 }}>Compare →</span>
+                  {" "}button under the library to run the analysis.
+                </>
+              )
+            }
+          />
+        </div>
+      )}
 
       <ExperimentLibrary
         experiments={experiments}
