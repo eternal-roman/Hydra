@@ -19,3 +19,11 @@ body {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* Quantum-flow icon — nucleus breathes; orbit rings are static guides;
+   electrons travel their paths via SVG <animateMotion> (no CSS needed for
+   the orbit motion itself, so nothing here for those). */
+@keyframes q-nucleus {
+  0%, 100% { opacity: 1;    transform: scale(1);   }
+  50%      { opacity: 0.55; transform: scale(0.75); }
+}

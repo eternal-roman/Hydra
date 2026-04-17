@@ -71,6 +71,68 @@ const fmtInd = (v) => {
 
 // ─── Small Components ───
 
+// QuantumIcon — a static nucleus with three electron dots swirling around it
+// along three tilted elliptical orbits. Each orbit is drawn as a faint guide
+// ring (static); the electrons move via SVG <animateMotion> on that same
+// ellipse path, each with a different period + phase offset so they never
+// cluster. Nucleus breathes in scale via index.css keyframe. When `active`
+// is false the electrons freeze and the whole thing dims.
+//
+// Pinned to its parent via a constant viewBox + fixed size, so it always
+// occupies the same footprint in the AI Brain pill regardless of which
+// electron is currently at the far edge of its orbit.
+function QuantumIcon({ active = true, size = 14, color }) {
+  const c = color || COLORS.blue;
+  const dim = !active;
+  // Canonical horizontal ellipse centred at (12,12) with rx=9, ry=3.5 —
+  // a closed arc through (3,12) and (21,12). Tilt each orbit by wrapping
+  // in a rotated <g> so the same path reuses across all three.
+  const orbitPath = "M 3 12 A 9 3.5 0 1 1 21 12 A 9 3.5 0 1 1 3 12";
+  const orbits = [
+    { tilt:   0, dur: "2.8s", phase: "0s"    },
+    { tilt:  60, dur: "3.6s", phase: "-0.9s" },
+    { tilt: -60, dur: "3.2s", phase: "-1.8s" },
+  ];
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24"
+         style={{ display: "inline-block", flexShrink: 0,
+                  opacity: dim ? 0.5 : 1 }}
+         aria-hidden="true">
+      {/* Guide rings — faint, static. Give the electrons an orbit the eye
+          can follow. Slightly bolder (0.35 opacity, 1px stroke) so the atom
+          structure reads cleanly against the AI Brain pill's blue-tinted bg. */}
+      {orbits.map((o, i) => (
+        <ellipse key={`ring-${i}`}
+                 cx="12" cy="12" rx="9" ry="3.5"
+                 fill="none" stroke={c} strokeOpacity="0.35" strokeWidth="1"
+                 transform={`rotate(${o.tilt} 12 12)`} />
+      ))}
+      {/* Electrons — one per orbit, traveling its tilted ellipse. Each
+          <g> tilts the path frame; <animateMotion> drives the circle along
+          the canonical ellipse expressed in that tilted frame. */}
+      {orbits.map((o, i) => (
+        <g key={`e-${i}`} transform={`rotate(${o.tilt} 12 12)`}>
+          <circle r="1.7" fill={c}>
+            {!dim && (
+              <animateMotion
+                dur={o.dur} begin={o.phase} repeatCount="indefinite"
+                rotate="auto" path={orbitPath} />
+            )}
+            {/* When dim, freeze the electron at the leftmost point of its
+                orbit so the icon still reads as "three electrons on three
+                rings" even when no work is happening. */}
+            {dim && <set attributeName="transform" to="translate(-9,0)" />}
+          </circle>
+        </g>
+      ))}
+      {/* Nucleus — subtle breath via CSS keyframe. */}
+      <circle cx="12" cy="12" r="2.4" fill={c}
+              style={{ transformOrigin: "12px 12px", transformBox: "fill-box",
+                       animation: dim ? "none" : "q-nucleus 2.4s ease-in-out infinite" }} />
+    </svg>
+  );
+}
+
 function StatCard({ label, value, unit, color = COLORS.text }) {
   return (
     <div style={{ padding: "12px 16px", background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, flex: "1 1 0" }}>
@@ -82,17 +144,21 @@ function StatCard({ label, value, unit, color = COLORS.text }) {
   );
 }
 
-function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, filled = false }) {
+function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, filled = false, fill = false }) {
   if (!data || data.length < 2) return null;
   const min = Math.min(...data);
   const max = Math.max(...data);
   const range = max - min || 1;
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * (height - 4) - 2}`);
   const pathD = `M${pts.join(" L")}`;
+  const svgStyle = fill
+    ? { display: "block", width: "100%", height: "100%" }
+    : { display: "block" };
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: "block" }}>
-      {filled && <path d={`${pathD} L${width},${height} L0,${height} Z`} fill={color} opacity={0.1} />}
-      <path d={pathD} fill="none" stroke={color} strokeWidth={1.5} />
+    <svg width="100%" height={fill ? "100%" : undefined}
+         viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={svgStyle}>
+      {filled && <path d={`${pathD} L${width},${height} L0,${height} Z`} fill={color} opacity={0.1} vectorEffect="non-scaling-stroke" />}
+      <path d={pathD} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -187,6 +253,47 @@ const PRESET_OPTIONS = [
   { name: "regime_volatile",  label: "Regime: Volatile", desc: "Tuned for VOLATILE" },
 ];
 
+// Rigor gates — 7 code-enforced checks that must all pass before a param
+// tweak is auto-apply eligible. Backend keys (hydra_reviewer.py) ↔ plain-English
+// pill labels + tooltips shown in the dashboard.
+const RIGOR_GATES = [
+  {
+    key: "min_trades_50",
+    label: "Sample Size",
+    why: "Need ≥50 trades. Any metric built on fewer is statistical noise — you can't tell signal from randomness.",
+  },
+  {
+    key: "mc_ci_lower_positive",
+    label: "MC Confidence",
+    why: "Monte Carlo bootstrap: resamples the trade list thousands of times. The 95% CI lower bound on return must stay positive — profits survive re-ordering the trades.",
+  },
+  {
+    key: "wf_majority_improved",
+    label: "Walk-Forward",
+    why: "Slides train/test windows across the candle series. A majority of windows must improve vs. baseline — guards against curve-fitting to one specific period.",
+  },
+  {
+    key: "oos_gap_acceptable",
+    label: "OOS Gap",
+    why: "Out-of-sample performance must stay within tolerance of in-sample. A big gap means the params memorised the training data instead of learning a pattern.",
+  },
+  {
+    key: "improvement_above_2se",
+    label: "Signal vs. Noise",
+    why: "Improvement over baseline must exceed 2 standard errors — i.e., statistically meaningful, not just a lucky draw.",
+  },
+  {
+    key: "cross_pair_majority",
+    label: "Cross-Pair",
+    why: "The edge must hold across a majority of traded pairs. Catches flukes where one pair (e.g., SOL) carries the win while BTC and SOL/BTC regress.",
+  },
+  {
+    key: "regime_not_concentrated",
+    label: "Regime Spread",
+    why: "P&L must not be concentrated in one market regime. If all gains come from a single volatile week, the result is unlikely to repeat.",
+  },
+];
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
@@ -194,7 +301,10 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
     { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
   ];
   return (
-    <div style={{ display: "flex", gap: 4, padding: "8px 0" }}>
+    // Gap: 10 puts visible air between each tab so the row breathes.
+    // minHeight: 38 + flex centers content to match the AI Brain pill's
+    // icon-bearing height exactly.
+    <div style={{ display: "flex", gap: 10, padding: "8px 0" }}>
       {tabs.map(t => {
         const active = activeTab === t.key;
         return (
@@ -202,11 +312,15 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
             key={t.key}
             onClick={() => onChange(t.key)}
             style={{
-              padding: "6px 14px",
-              fontSize: 11,
+              padding: "0 18px",
+              minHeight: 38,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 12,
               fontWeight: 700,
               fontFamily: mono,
-              letterSpacing: "0.12em",
+              letterSpacing: "0.1em",
               textTransform: "uppercase",
               background: active ? `${t.color}18` : "transparent",
               color: active ? t.color : COLORS.textDim,
@@ -229,19 +343,19 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   );
 }
 
-function FieldLabel({ children, hint }) {
+function FieldLabel({ children, hint, labelSize = 9, hintSize = 10 }) {
   return (
     <div style={{ marginBottom: 4 }}>
-      <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
+      <div style={{ fontSize: labelSize, color: COLORS.textDim, textTransform: "uppercase",
                     letterSpacing: "0.1em", fontFamily: mono, fontWeight: 600 }}>
         {children}
       </div>
-      {hint && <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: mono, marginTop: 2 }}>{hint}</div>}
+      {hint && <div style={{ fontSize: hintSize, color: COLORS.textMuted, fontFamily: mono, marginTop: 2 }}>{hint}</div>}
     </div>
   );
 }
 
-function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
+function StyledInput({ value, onChange, placeholder, type = "text", fontSize = 12, padding = "7px 10px", ...rest }) {
   return (
     <input
       type={type}
@@ -250,12 +364,12 @@ function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
       placeholder={placeholder}
       style={{
         width: "100%",
-        padding: "7px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
         boxSizing: "border-box",
@@ -267,19 +381,19 @@ function StyledInput({ value, onChange, placeholder, type = "text", ...rest }) {
   );
 }
 
-function StyledSelect({ value, onChange, options }) {
+function StyledSelect({ value, onChange, options, fontSize = 12, padding = "7px 10px" }) {
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
       style={{
         width: "100%",
-        padding: "7px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
       }}
@@ -293,7 +407,7 @@ function StyledSelect({ value, onChange, options }) {
   );
 }
 
-function StyledTextarea({ value, onChange, placeholder, minHeight = 70 }) {
+function StyledTextarea({ value, onChange, placeholder, minHeight = 70, fontSize = 12, padding = "8px 10px" }) {
   return (
     <textarea
       value={value}
@@ -302,12 +416,12 @@ function StyledTextarea({ value, onChange, placeholder, minHeight = 70 }) {
       style={{
         width: "100%",
         minHeight,
-        padding: "8px 10px",
+        padding,
         background: COLORS.bg,
         color: COLORS.text,
         border: `1px solid ${COLORS.panelBorder}`,
         borderRadius: 4,
-        fontSize: 12,
+        fontSize,
         fontFamily: mono,
         outline: "none",
         resize: "vertical",
@@ -336,7 +450,8 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
                                 completedCount = 0, reviewedCount = 0,
                                 observerProgress = null, observerResult = null,
                                 observerReview = null, observerEquity = null,
-                                observerTotalTicks = 0, onObserverClose = null }) {
+                                observerTotalTicks = 0, onObserverClose = null,
+                                onCompareThisRun = null }) {
   const [preset, setPreset] = useState("default");
   const [hypothesis, setHypothesis] = useState("");
   const [pairs, setPairs] = useState("SOL/USDC");
@@ -385,53 +500,70 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16, alignItems: "start" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, alignItems: "stretch",
+                   height: "calc(100vh - 140px)", minHeight: 520 }}>
       {/* LEFT: control form */}
       <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                    borderRadius: 8, padding: 16 }}>
-        <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                      marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                    borderRadius: 8, padding: 20, alignSelf: "stretch",
+                    overflowY: "auto", minHeight: 0 }}>
+        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                      marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <div>
-            <FieldLabel>Preset</FieldLabel>
-            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} />
+            <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
+            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
           </div>
 
           <div>
-            <FieldLabel hint="Min 8 chars. Logged + reviewed by the AI observer.">Hypothesis *</FieldLabel>
+            <FieldLabel labelSize={11} hintSize={11} hint="Min 8 chars · AI-reviewed.">Hypothesis *</FieldLabel>
             <StyledTextarea
               value={hypothesis}
               onChange={setHypothesis}
               placeholder="e.g., tighter RSI upper should reduce false BUYs in VOLATILE regime"
+              fontSize={14}
+              padding="9px 12px"
             />
             {!hypothesisValid && hypothesis.length > 0 && (
-              <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
+              <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
                 {8 - hypothesis.trim().length} more character(s) required
               </div>
             )}
           </div>
 
           <div>
-            <FieldLabel>Pairs (comma-separated)</FieldLabel>
-            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" />
+            <FieldLabel labelSize={11} hintSize={12}>Pairs (comma-separated)</FieldLabel>
+            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" fontSize={14} padding="8px 12px" />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div>
-              <FieldLabel>Candles</FieldLabel>
-              <StyledInput value={nCandles} onChange={setNCandles} type="number" />
+          {/* Candles + Seed: label row, input row, hint row — each grid row aligned
+              so the two inputs sit on the same Y regardless of hint wrapping. */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
+                        columnGap: 12, rowGap: 6 }}>
+            <FieldLabel labelSize={11} hintSize={12}>
+              <span title="Number of simulated 15-minute candles the synthetic GBM generator will produce for this run. Not historical market data.">
+                Synthetic Candles ⓘ
+              </span>
+            </FieldLabel>
+            <FieldLabel labelSize={11} hintSize={12}>
+              <span title="Experiment seed for the synthetic (GBM) price generator. Identical seed + identical params reproduce an identical candle series, so two runs are directly comparable.">
+                Experiment Seed ⓘ
+              </span>
+            </FieldLabel>
+
+            <StyledInput value={nCandles} onChange={setNCandles} type="number" fontSize={14} padding="8px 12px" />
+            <StyledInput value={seed} onChange={setSeed} type="number" fontSize={14} padding="8px 12px" />
+
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
+              Synthetic (GBM) — not historical Kraken data.
               {!nCandlesValid && (
-                <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
-                  50-20000
-                </div>
+                <div style={{ color: COLORS.danger, marginTop: 2 }}>50–20000</div>
               )}
             </div>
-            <div>
-              <FieldLabel>Seed</FieldLabel>
-              <StyledInput value={seed} onChange={setSeed} type="number" />
+            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
+              PRNG seed — same seed = same price path.
             </div>
           </div>
 
@@ -453,8 +585,8 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             disabled={!canSubmit}
             style={{
               marginTop: 6,
-              padding: "10px 16px",
-              fontSize: 12,
+              padding: "12px 18px",
+              fontSize: 14,
               fontWeight: 700,
               fontFamily: mono,
               textTransform: "uppercase",
@@ -473,104 +605,292 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           </button>
 
           {!connected && (
-            <div style={{ fontSize: 10, color: COLORS.danger, fontFamily: mono }}>
+            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono }}>
               Disconnected — start hydra_agent.py to enable.
             </div>
           )}
+
         </div>
       </div>
 
-      {/* RIGHT: status + ack feedback */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                        marginBottom: 10 }}>
-            Backtest Status
-          </div>
-          {ackMsg ? (
-            <div>
-              <div style={{ fontFamily: mono, fontSize: 11,
-                            color: ackMsg.success ? COLORS.accent : COLORS.danger }}>
-                {ackMsg.success ? "✓ Submitted" : "✗ Rejected"}
-              </div>
-              {ackMsg.experiment_id && (
-                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
-                  experiment_id: <span style={{ color: COLORS.text }}>{ackMsg.experiment_id.slice(0, 16)}…</span>
-                </div>
-              )}
-              {ackMsg.error && (
-                <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.danger, marginTop: 4 }}>
-                  {ackMsg.error}
-                </div>
-              )}
+      {/* RIGHT: tri-panel (Last Result + Status + Rigor Gates) above the observer chart */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch",
+                    minHeight: 0 }}>
+        {/* Tri-panel: three equal panels sharing the same width as the observer
+            chart beneath them. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12,
+                      flex: "0 0 auto" }}>
+          {/* Last Result */}
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
+              Last Result
             </div>
-          ) : (
-            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
-              No backtest submitted this session.
-            </div>
-          )}
-          {(lastResultId || completedCount > 0) && (
-            <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, marginTop: 10,
-                          paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-              {lastResultId && (
-                <div>Last completed: <span style={{ color: COLORS.accent }}>{lastResultId.slice(0, 16)}…</span></div>
-              )}
-              <div style={{ marginTop: 4 }}>
-                Session: <span style={{ color: COLORS.text }}>{completedCount}</span> completed
-                {reviewedCount > 0 && (
-                  <>, <span style={{ color: COLORS.purple }}>{reviewedCount}</span> reviewed</>
+            {observerResult?.metrics ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto",
+                            rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
+                <span style={{ color: COLORS.textDim }}>Trades</span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {observerResult.metrics.total_trades}
+                </span>
+                <span style={{ color: COLORS.textDim }}>Return</span>
+                <span style={{ textAlign: "right",
+                               color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
+                  {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
+                  {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
+                </span>
+                <span style={{ color: COLORS.textDim }}>Sharpe</span>
+                <span style={{ color: COLORS.text, textAlign: "right" }}>
+                  {fmtInd(observerResult.metrics.sharpe)}
+                </span>
+                <span style={{ color: COLORS.textDim }}>Max DD</span>
+                <span style={{ color: COLORS.warn, textAlign: "right" }}>
+                  {(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%
+                </span>
+                {observerResult.metrics.profit_factor != null && (
+                  <>
+                    <span style={{ color: COLORS.textDim }}>Profit Factor</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>
+                      {observerResult.metrics.profit_factor.toFixed(2)}
+                    </span>
+                  </>
+                )}
+                {observerResult.metrics.win_rate_pct != null && (
+                  <>
+                    <span style={{ color: COLORS.textDim }}>Win Rate</span>
+                    <span style={{ color: COLORS.text, textAlign: "right" }}>
+                      {observerResult.metrics.win_rate_pct.toFixed(0)}%
+                    </span>
+                  </>
                 )}
               </div>
+            ) : (
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
+                No completed backtest yet this session.
+              </div>
+            )}
+          </div>
+
+          {/* Run Status — lifecycle of the most recent submission. Derives a
+              single state from (ackMsg × observerProgress × observerResult). */}
+          {(() => {
+            // State machine:
+            //   idle       — never submitted
+            //   rejected   — server refused (validation, quota, etc.)
+            //   queued     — accepted, not started yet
+            //   running    — tick stream active
+            //   complete   — terminal result received
+            const stage = observerProgress?.stage;
+            const runState =
+              ackMsg && ackMsg.success === false ? "rejected" :
+              observerResult ? "complete" :
+              (observerProgress && (stage === "running" || stage === "started")) ? "running" :
+              ackMsg?.success ? "queued" :
+              "idle";
+
+            const paletteByState = {
+              idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
+              queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
+              running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
+              complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
+              rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
+            };
+            const p = paletteByState[runState];
+
+            const bodyByState = {
+              idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
+              queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
+              running: observerProgress
+                ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
+                : "Executing. Live data streams into the Observer chart below.",
+              complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
+              rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
+            };
+
+            const expId = observerResult?.experiment_id
+                       || observerProgress?.experiment_id
+                       || ackMsg?.experiment_id;
+
+            return (
+              <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                            borderRadius: 8, padding: 16 }}>
+                <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                              marginBottom: 4 }}>
+                  Run Status
+                </div>
+                <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textMuted,
+                              marginBottom: 12 }}>
+                  Lifecycle of your most recent submission.
+                </div>
+
+                {/* State badge */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%",
+                                 background: p.dot,
+                                 boxShadow: runState === "running"
+                                   ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}`
+                                   : `0 0 4px ${p.dot}80`,
+                                 animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
+                  <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700,
+                                 color: p.fg, letterSpacing: "0.04em" }}>
+                    {p.label}
+                  </span>
+                </div>
+
+                {/* Body — plain-English description of what this state means */}
+                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                              lineHeight: 1.5, marginBottom: expId || (completedCount > 0) ? 10 : 0 }}>
+                  {bodyByState[runState]}
+                </div>
+
+                {/* Experiment id — only when a run has actually been accepted */}
+                {expId && (
+                  <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textMuted,
+                                marginBottom: completedCount > 0 ? 10 : 0,
+                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                       title={`Full experiment id: ${expId}`}>
+                    id: {expId.slice(0, 12)}…
+                  </div>
+                )}
+
+                {/* Complete-state CTA: surface the connection to COMPARE.
+                    The just-finished experiment is already in the library;
+                    this jumps tabs, refreshes, and pre-selects it. */}
+                {runState === "complete" && expId && onCompareThisRun && (
+                  <button
+                    onClick={() => onCompareThisRun(expId)}
+                    title="Jump to the Compare tab with this experiment already selected — pick one more to see them ranked side-by-side."
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      gap: 6, width: "100%", padding: "8px 12px",
+                      marginBottom: completedCount > 0 ? 10 : 0,
+                      fontSize: 12, fontWeight: 700, fontFamily: mono,
+                      textTransform: "uppercase", letterSpacing: "0.08em",
+                      background: `${COLORS.purple}20`, color: COLORS.purple,
+                      border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
+                      cursor: "pointer", outline: "none",
+                    }}
+                  >
+                    Compare this run →
+                  </button>
+                )}
+
+                {/* Session totals — across the current browser session */}
+                {(completedCount > 0 || reviewedCount > 0) && (
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                                paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}
+                       title="Totals since you opened the dashboard. 'Reviewed' = the AI reviewer finished scoring the run against the Rigor Gates.">
+                    <span style={{ color: COLORS.text, fontWeight: 700 }}>{completedCount}</span>
+                    {" "}completed
+                    {reviewedCount > 0 && (
+                      <>
+                        {" · "}
+                        <span style={{ color: COLORS.purple, fontWeight: 700 }}>{reviewedCount}</span>
+                        {" AI-reviewed"}
+                      </>
+                    )}
+                    {" "}this session
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Rigor Gates — color-coded pills driven by the latest review's
+              gates_passed dict. Grey = no result yet, green = passed, red = failed.
+              Hover a pill for the plain-English explanation. */}
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 10 }}>
+              Rigor Gates
             </div>
-          )}
+            {(() => {
+              const gp = observerReview?.gates_passed;
+              const hasReview = gp && typeof gp === "object";
+              const summary = hasReview
+                ? (() => {
+                    const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
+                    const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
+                    return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
+                  })()
+                : "No review yet — hover a pill for what it checks.";
+              return (
+                <>
+                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                                marginBottom: 10 }}>
+                    {summary}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {RIGOR_GATES.map(g => {
+                      const state = !hasReview ? "neutral"
+                                  : gp[g.key] === true ? "pass"
+                                  : gp[g.key] === false ? "fail"
+                                  : "neutral";
+                      const bg = state === "pass" ? `${COLORS.accent}18`
+                               : state === "fail" ? `${COLORS.danger}18`
+                               : COLORS.bg;
+                      const border = state === "pass" ? COLORS.accent
+                                   : state === "fail" ? COLORS.danger
+                                   : COLORS.panelBorder;
+                      const fg = state === "pass" ? COLORS.accent
+                               : state === "fail" ? COLORS.danger
+                               : COLORS.textDim;
+                      const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
+                      return (
+                        <span
+                          key={g.key}
+                          title={`${g.label} (${g.key})\n\n${g.why}`}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 4,
+                                   padding: "4px 8px", borderRadius: 999,
+                                   background: bg, border: `1px solid ${border}`,
+                                   color: fg, fontFamily: mono, fontSize: 11,
+                                   fontWeight: 600, cursor: "help",
+                                   whiteSpace: "nowrap" }}
+                        >
+                          <span style={{ fontSize: 10 }}>{icon}</span>
+                          {g.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
         </div>
 
         {/* Phase 9: Dual-state Observer — backtest pair cards stream here
-            live during a run, using the same visual language as LIVE. */}
+            live during a run, using the same visual language as LIVE.
+            flex: 1 so the chart expands to fill the column down to the
+            bottom of the adjacent (left) control panel. */}
         {(observerProgress || observerResult) ? (
-          <ObserverModal
-            progress={observerProgress}
-            result={observerResult}
-            review={observerReview}
-            equityHistory={observerEquity}
-            totalTicks={observerTotalTicks}
-            variant="dock"
-            onClose={onObserverClose}
-          />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <ObserverModal
+              progress={observerProgress}
+              result={observerResult}
+              review={observerReview}
+              equityHistory={observerEquity}
+              totalTicks={observerTotalTicks}
+              variant="dock"
+              onClose={onObserverClose}
+            />
+          </div>
         ) : (
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16, minHeight: 180 }}>
-            <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 10 }}>
+          <div style={{ flex: 1, background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                        borderRadius: 8, padding: 16, minHeight: 180,
+                        display: "flex", flexDirection: "column" }}>
+            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                          marginBottom: 12 }}>
               Observer
             </div>
-            <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim, lineHeight: 1.5 }}>
               Submit a backtest to stream per-tick pair state here in real time —
               the same pair cards, regime badges, and equity curves as the LIVE view.
             </div>
           </div>
         )}
-
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                        marginBottom: 10 }}>
-            Rigor Gates
-          </div>
-          <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textDim, lineHeight: 1.6 }}>
-            Every completed backtest is reviewed against 7 code-enforced gates:<br />
-            <span style={{ color: COLORS.text }}>min_trades_50</span> • {" "}
-            <span style={{ color: COLORS.text }}>mc_ci_lower_positive</span> • {" "}
-            <span style={{ color: COLORS.text }}>wf_majority_improved</span><br />
-            <span style={{ color: COLORS.text }}>oos_gap_acceptable</span> • {" "}
-            <span style={{ color: COLORS.text }}>improvement_above_2se</span> • {" "}
-            <span style={{ color: COLORS.text }}>cross_pair_majority</span> • {" "}
-            <span style={{ color: COLORS.text }}>regime_not_concentrated</span><br /><br />
-            A proposed param change is auto-apply-eligible ONLY when every gate passes. The AI reviewer
-            cannot override gates via reasoning — anti-handwaving is architectural, not prompt-level.
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -658,7 +978,7 @@ function ObserverProgressBar({ tick, totalTicks, stage }) {
 // Compact per-pair card for the observer. Intentionally a separate visual
 // from LIVE's PairPanel (simpler, smaller) because the observer coexists
 // with the LIVE grid on the LIVE tab — we want a distinct affordance.
-function ObserverPairCard({ pair, state, equityHistory }) {
+function ObserverPairCard({ pair, state, equityHistory, expand = false }) {
   if (!state) return null;
   const sig = state.signal || {};
   const port = state.portfolio || {};
@@ -667,10 +987,12 @@ function ObserverPairCard({ pair, state, equityHistory }) {
 
   return (
     <div style={{ background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 6, padding: 10 }}>
+                  borderRadius: 6, padding: 10,
+                  flex: expand ? 1 : "0 0 auto",
+                  display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
                     marginBottom: 8 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>
+        <div style={{ fontSize: 13, fontWeight: 700, fontFamily: mono, color: COLORS.text }}>
           {pair}
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -678,7 +1000,7 @@ function ObserverPairCard({ pair, state, equityHistory }) {
           <SignalChip action={sig.action} size="compact" />
         </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10,
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, fontSize: 12,
                     fontFamily: mono }}>
         <span style={{ color: COLORS.textDim }}>Price</span>
         <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtPrice(state.price, px)}</span>
@@ -694,13 +1016,17 @@ function ObserverPairCard({ pair, state, equityHistory }) {
         </span>
       </div>
       {equityHistory && equityHistory.length >= 2 && (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 8,
+                      flex: expand ? 1 : "0 0 auto",
+                      minHeight: expand ? 80 : 36,
+                      display: "flex" }}>
           <MiniChart
             data={equityHistory}
             width={240}
-            height={36}
+            height={expand ? 160 : 36}
             color={(port.pnl_pct || 0) >= 0 ? COLORS.accent : COLORS.danger}
             filled
+            fill={expand}
           />
         </div>
       )}
@@ -710,22 +1036,36 @@ function ObserverPairCard({ pair, state, equityHistory }) {
 
 function GatesSummary({ review }) {
   if (!review || !review.gates_passed) return null;
-  const gates = review.gates_passed;
+  const gp = review.gates_passed;
+  // Prefer the canonical RIGOR_GATES ordering + labels; fall back to any
+  // keys present on the review that we don't recognise so nothing is hidden.
+  const known = new Set(RIGOR_GATES.map(g => g.key));
+  const extras = Object.keys(gp).filter(k => !known.has(k))
+    .map(k => ({ key: k, label: k, why: "(unrecognised gate — shown for completeness)" }));
+  const all = [...RIGOR_GATES, ...extras];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4,
                   fontFamily: mono, fontSize: 10 }}>
-      {Object.entries(gates).map(([name, passed]) => (
-        <div key={name} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 10, height: 10, borderRadius: "50%",
-                         background: passed ? COLORS.accent : COLORS.danger,
-                         boxShadow: passed ? `0 0 4px ${COLORS.accent}80` : `0 0 4px ${COLORS.danger}80`,
-                         display: "inline-block" }} />
-          <span style={{ color: passed ? COLORS.text : COLORS.textDim,
-                         textDecoration: passed ? "none" : "line-through" }}>
-            {name}
-          </span>
-        </div>
-      ))}
+      {all.map(g => {
+        const passed = gp[g.key];
+        const present = g.key in gp;
+        return (
+          <div key={g.key} title={`${g.label} (${g.key})\n\n${g.why}`}
+               style={{ display: "flex", alignItems: "center", gap: 6, cursor: "help" }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%",
+                           background: !present ? COLORS.panelBorder
+                                    : passed ? COLORS.accent : COLORS.danger,
+                           boxShadow: !present ? "none"
+                                    : passed ? `0 0 4px ${COLORS.accent}80`
+                                    : `0 0 4px ${COLORS.danger}80`,
+                           display: "inline-block" }} />
+            <span style={{ color: passed ? COLORS.text : COLORS.textDim,
+                           textDecoration: present && !passed ? "line-through" : "none" }}>
+              {g.label}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -829,7 +1169,7 @@ function ObserverModal({
     ? { position: "fixed", right: 16, top: 80, width: 360, maxHeight: "calc(100vh - 100px)",
         overflowY: "auto", zIndex: 20,
         boxShadow: "0 8px 32px rgba(0,0,0,0.45)" }
-    : { };
+    : { flex: 1, display: "flex", flexDirection: "column", minHeight: 0 };
 
   return (
     <div
@@ -881,47 +1221,23 @@ function ObserverModal({
         <ObserverProgressBar tick={tick} totalTicks={totalTicks || 0} stage={stage} />
       </div>
 
-      {/* Terminal summary (shown once result lands) */}
-      {summary && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6,
-                      fontFamily: mono, fontSize: 10, marginBottom: 10,
-                      padding: "8px 10px", background: COLORS.bg,
-                      border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
-          <span style={{ color: COLORS.textDim }}>Trades</span>
-          <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.total_trades}</span>
-          <span style={{ color: COLORS.textDim }}>Return</span>
-          <span style={{ textAlign: "right",
-                         color: (summary.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
-            {(summary.total_return_pct || 0) >= 0 ? "+" : ""}{(summary.total_return_pct || 0).toFixed(2)}%
-          </span>
-          <span style={{ color: COLORS.textDim }}>Sharpe</span>
-          <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(summary.sharpe)}</span>
-          <span style={{ color: COLORS.textDim }}>Max DD</span>
-          <span style={{ color: COLORS.warn, textAlign: "right" }}>{(summary.max_drawdown_pct || 0).toFixed(2)}%</span>
-          {summary.profit_factor != null && (
-            <>
-              <span style={{ color: COLORS.textDim }}>Profit Factor</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.profit_factor.toFixed(2)}</span>
-            </>
-          )}
-          {summary.win_rate_pct != null && (
-            <>
-              <span style={{ color: COLORS.textDim }}>Win Rate</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{summary.win_rate_pct.toFixed(0)}%</span>
-            </>
-          )}
-        </div>
-      )}
+      {/* Terminal summary is rendered in the left control panel (BacktestResultMetrics)
+          to give the equity chart more headroom. */}
 
-      {/* Per-pair cards — same visual DNA as LIVE */}
+      {/* Per-pair cards — same visual DNA as LIVE.
+          flex: 1 + minHeight: 0 lets the card stack fill the panel height so
+          the equity chart stretches down to the bottom of the adjacent
+          control panel on the left. */}
       {pairNames.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6,
+                      flex: variant === "dock" ? 1 : "0 0 auto", minHeight: 0 }}>
           {pairNames.map(pair => (
             <ObserverPairCard
               key={pair}
               pair={pair}
               state={pairs[pair]}
               equityHistory={equityHistory?.[pair] || []}
+              expand={variant === "dock"}
             />
           ))}
         </div>
@@ -954,23 +1270,37 @@ const VERDICT_COLORS = {
 };
 
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
-                             onView, filters, onFilterChange, loading }) {
+                             onView, loading,
+                             onCompare, canCompare, compareInFlight, onGoToBacktest,
+                             totalInStore, compact = false }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
+  // Map selected IDs back to their rows so we can chip-render them by name.
+  const selectedRows = selectedIds
+    .map((id) => experiments.find((e) => e.id === id))
+    .filter(Boolean);
 
   return (
+    // `overflow: hidden` clips the internal row list to the panel's rounded
+    // border-radius so rows never visually escape past the panel edge, even
+    // under rapid viewport resize. The row list still scrolls internally
+    // via its own overflowY: auto.
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 16 }}>
+                  borderRadius: 8, padding: 16,
+                  display: "flex", flexDirection: "column",
+                  minHeight: 0, flex: 1, overflow: "hidden" }}>
       {/* Header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                    marginBottom: 12 }}>
+                    marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
             Experiment Library
           </div>
-          <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.textDim }}>
-            {count} experiments
+          <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim }}>
+            {totalInStore != null && count !== totalInStore
+              ? <>{count} comparable · {totalInStore} total</>
+              : <>{count} comparable experiment{count === 1 ? "" : "s"}</>}
             {selCount > 0 && (
               <>
                 {" "}· <span style={{ color: COLORS.purple }}>{selCount}</span> selected
@@ -979,11 +1309,11 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
             )}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           {selCount > 0 && (
             <button
               onClick={onClearSelection}
-              style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+              style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
                        background: "transparent", color: COLORS.textDim,
                        border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
                        cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase" }}
@@ -994,7 +1324,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           <button
             onClick={onRefresh}
             disabled={loading}
-            style={{ padding: "4px 10px", fontSize: 10, fontFamily: mono, fontWeight: 700,
+            style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
                      background: COLORS.blue + "20", color: COLORS.blue,
                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
                      cursor: loading ? "wait" : "pointer", letterSpacing: "0.1em",
@@ -1002,55 +1332,163 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           >
             {loading ? "…" : "Refresh"}
           </button>
+          {/* Primary inline Compare button — visible right next to the selection
+              so the user never has to hunt for it. Disabled state explains why. */}
+          {onCompare && (
+            <button
+              onClick={onCompare}
+              disabled={!canCompare}
+              title={
+                selCount < 2 ? "Tick at least 2 rows below to enable Compare."
+                             : selCount > 8 ? "Max 8 experiments per comparison."
+                             : "Run the comparison."
+              }
+              style={{ padding: "6px 14px", fontSize: 12, fontFamily: mono, fontWeight: 700,
+                       background: canCompare ? COLORS.purple : `${COLORS.purple}20`,
+                       color: canCompare ? "#0a0a0f" : COLORS.textMuted,
+                       border: `1px solid ${canCompare ? COLORS.purple : `${COLORS.purple}40`}`,
+                       borderRadius: 4,
+                       cursor: canCompare ? "pointer" : "not-allowed",
+                       letterSpacing: "0.1em", textTransform: "uppercase",
+                       boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
+            >
+              {compareInFlight
+                ? "Comparing…"
+                : selCount >= 2 ? `Compare ${selCount} →` : "Compare →"}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Filter row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
-        <div>
-          <FieldLabel>Status</FieldLabel>
-          <select
-            value={filters.status || ""}
-            onChange={(e) => onFilterChange({ ...filters, status: e.target.value || undefined })}
-            style={{ width: "100%", padding: "6px 8px", background: COLORS.bg, color: COLORS.text,
-                     border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
-                     fontSize: 11, fontFamily: mono, outline: "none" }}
-          >
-            <option value="">Any</option>
-            <option value="complete">complete</option>
-            <option value="running">running</option>
-            <option value="pending">pending</option>
-            <option value="failed">failed</option>
-            <option value="cancelled">cancelled</option>
-          </select>
+      {/* Selection chip bar — confirms which rows are selected by name, with a
+          per-chip deselect. Gives the user an explicit visual that selections
+          past 1 are registering. */}
+      {selCount > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6,
+                      padding: "8px 10px", marginBottom: 10,
+                      background: `${COLORS.purple}10`,
+                      border: `1px solid ${COLORS.purple}40`, borderRadius: 4 }}>
+          <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                         textTransform: "uppercase", letterSpacing: "0.08em",
+                         marginRight: 4 }}>
+            Selected ({selCount}/{maxSelect})
+          </span>
+          {selectedRows.map((e) => (
+            <span key={e.id}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6,
+                           padding: "3px 8px", borderRadius: 999,
+                           background: `${COLORS.purple}25`,
+                           border: `1px solid ${COLORS.purple}60`,
+                           color: COLORS.text, fontFamily: mono, fontSize: 11,
+                           fontWeight: 600 }}>
+              {e.name}
+              <button
+                onClick={() => onToggleSelect(e.id)}
+                title="Remove from selection"
+                style={{ background: "transparent", border: "none", padding: 0,
+                         color: COLORS.purple, cursor: "pointer",
+                         fontSize: 13, lineHeight: 1, fontFamily: mono }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          {selCount < 2 && (
+            <span style={{ fontFamily: mono, fontSize: 11, color: COLORS.warn,
+                           marginLeft: 4 }}>
+              Tick at least one more row to enable Compare.
+            </span>
+          )}
         </div>
-        <div>
-          <FieldLabel>Triggered By</FieldLabel>
-          <StyledInput
-            value={filters.triggered_by || ""}
-            onChange={(v) => onFilterChange({ ...filters, triggered_by: v || undefined })}
-            placeholder="e.g. dashboard, brain:analyst"
-          />
-        </div>
-        <div>
-          <FieldLabel>Tag Contains</FieldLabel>
-          <StyledInput
-            value={filters.tag || ""}
-            onChange={(v) => onFilterChange({ ...filters, tag: v || undefined })}
-            placeholder="e.g. preset:divergent"
-          />
-        </div>
-      </div>
+      )}
 
       {/* List */}
       {count === 0 ? (
-        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                      padding: "32px 0", textAlign: "center" }}>
-          {loading ? "Loading…" : "No experiments found. Submit a backtest from the BACKTEST tab."}
+        // Flex-fill + overflow-hidden so the dashed-border dark panel always
+        // has symmetric breathing room inside the library panel, never
+        // clipped at the bottom regardless of available vertical space.
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
+                      justifyContent: "center", gap: 14, padding: "32px 20px",
+                      textAlign: "center",
+                      background: COLORS.bg, border: `1px dashed ${COLORS.panelBorder}`,
+                      borderRadius: 6,
+                      flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {loading ? (
+            <div style={{ fontFamily: mono, fontSize: 13, color: COLORS.textDim }}>
+              Loading…
+            </div>
+          ) : (totalInStore || 0) > 0 ? (
+            <>
+              <div style={{ fontSize: 28, opacity: 0.5 }}>🧪</div>
+              <div style={{ fontFamily: heading, fontSize: 15, fontWeight: 700,
+                            color: COLORS.text }}>
+                No comparable experiments yet
+              </div>
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                            lineHeight: 1.5, maxWidth: 440 }}>
+                You have <span style={{ color: COLORS.purple }}>{totalInStore}</span> in
+                the store, but none are in a comparable state yet (a run must
+                be <span style={{ color: COLORS.accent }}>complete</span> with
+                valid metrics). Wait for the current backtest to finish, or
+                re-run it from the BACKTEST tab if it failed.
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 36, opacity: 0.6 }}>🧪</div>
+              <div style={{ fontFamily: heading, fontSize: 16, fontWeight: 700,
+                            color: COLORS.text }}>
+                You don't have any experiments yet
+              </div>
+              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                            lineHeight: 1.5, maxWidth: 420 }}>
+                Compare needs at least two completed backtests. Head to the
+                BACKTEST tab, submit a run (or two), then come back here to
+                rank them side-by-side.
+              </div>
+              {onGoToBacktest && (
+                <button
+                  onClick={onGoToBacktest}
+                  style={{ padding: "10px 18px", fontSize: 13, fontFamily: mono,
+                           fontWeight: 700, letterSpacing: "0.1em",
+                           textTransform: "uppercase",
+                           background: COLORS.blue, color: "#0a0a0f",
+                           border: `1px solid ${COLORS.blue}`, borderRadius: 4,
+                           cursor: "pointer", outline: "none",
+                           boxShadow: `0 0 12px ${COLORS.blue}50` }}
+                >
+                  Go to Backtest Tab →
+                </button>
+              )}
+            </>
+          )}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4,
-                      maxHeight: 420, overflowY: "auto" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5,
+                      flex: 1, minHeight: 0, overflowY: "auto",
+                      scrollbarGutter: "stable" }}>
+          {/* Column legend — placed INSIDE the scroll container as a sticky
+              header so its horizontal bounds match the rows (same scrollbar
+              gutter, same effective width). Eliminates the "black inner
+              panel offset" where legend and rows drifted by the scrollbar
+              width. */}
+          <div style={{ display: "grid",
+                        gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
+                        gap: 6, padding: "0 10px 6px",
+                        fontFamily: mono, fontSize: 11, color: COLORS.textDim,
+                        textTransform: "uppercase", letterSpacing: "0.08em",
+                        fontWeight: 600,
+                        position: "sticky", top: 0, zIndex: 1,
+                        background: COLORS.panel }}>
+            <span />
+            <span>Name / ID</span>
+            <span style={{ textAlign: "right" }}>Status</span>
+            <span style={{ textAlign: "right" }}>Trades</span>
+            <span style={{ textAlign: "right" }}>Return</span>
+            <span style={{ textAlign: "right" }}>Sharpe</span>
+            <span style={{ textAlign: "right" }}>Max DD</span>
+            <span />
+          </div>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
             const canSelect = selected || selCount < maxSelect;
@@ -1066,12 +1504,12 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 onClick={() => canSelect && onToggleSelect(e.id)}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
+                  gridTemplateColumns: "24px 1fr 100px 72px 80px 72px 80px 24px",
                   gap: 6, alignItems: "center",
-                  padding: "6px 10px",
+                  padding: "8px 10px",
                   background: selected ? `${COLORS.purple}12` : COLORS.bg,
                   border: `1px solid ${selected ? COLORS.purple + "60" : COLORS.panelBorder}`,
-                  borderRadius: 4, fontFamily: mono, fontSize: 10,
+                  borderRadius: 4, fontFamily: mono, fontSize: 12,
                   cursor: canSelect ? "pointer" : "not-allowed",
                   opacity: canSelect ? 1 : 0.5,
                 }}
@@ -1086,12 +1524,18 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 />
                 <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   <span style={{ color: COLORS.text, fontWeight: 600 }}>{e.name}</span>
-                  <span style={{ color: COLORS.textMuted, marginLeft: 8 }}>{e.id.slice(0, 8)}</span>
+                  <span style={{ color: COLORS.textMuted, marginLeft: 8, fontSize: 11 }}
+                        title={`Experiment id: ${e.id}`}>
+                    <span style={{ marginRight: 3, filter: "saturate(0.85)" }}>🧪</span>
+                    {e.id.slice(0, 8)}
+                  </span>
                   {e.base_preset && (
-                    <span style={{ color: COLORS.blue, marginLeft: 6 }}>[{e.base_preset}]</span>
+                    <span style={{ color: COLORS.blue, marginLeft: 6, fontSize: 11 }}>
+                      [{e.base_preset}]
+                    </span>
                   )}
                 </div>
-                <span style={{ color: statusColor, textAlign: "right",
+                <span style={{ color: statusColor, textAlign: "right", fontSize: 11,
                                textTransform: "uppercase", letterSpacing: "0.05em" }}>
                   {e.status}
                 </span>
@@ -1112,7 +1556,8 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
                 <button
                   onClick={(ev) => { ev.stopPropagation(); onView(e.id); }}
                   style={{ background: "transparent", border: "none", color: COLORS.textDim,
-                           cursor: "pointer", fontSize: 11, padding: 0, fontFamily: mono }}
+                           cursor: "pointer", fontSize: 14, padding: 0, fontFamily: mono,
+                           lineHeight: 1 }}
                   title="View details"
                 >
                   ›
@@ -1122,28 +1567,11 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
           })}
         </div>
       )}
-
-      {/* Column legend */}
-      {count > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 100px 72px 72px 72px 72px 24px",
-                      gap: 6, marginTop: 6, padding: "0 10px",
-                      fontFamily: mono, fontSize: 9, color: COLORS.textMuted,
-                      textTransform: "uppercase", letterSpacing: "0.08em" }}>
-          <span />
-          <span>Name / ID</span>
-          <span style={{ textAlign: "right" }}>Status</span>
-          <span style={{ textAlign: "right" }}>Trades</span>
-          <span style={{ textAlign: "right" }}>Return</span>
-          <span style={{ textAlign: "right" }}>Sharpe</span>
-          <span style={{ textAlign: "right" }}>Max DD</span>
-          <span />
-        </div>
-      )}
     </div>
   );
 }
 
-function CompareResults({ report, experimentsById }) {
+function CompareResults({ report, experimentsById, onDismiss }) {
   if (!report || !Array.isArray(report.rows) || report.rows.length === 0) return null;
   const winners = report.winner_per_metric || {};
   const metrics = [
@@ -1154,27 +1582,47 @@ function CompareResults({ report, experimentsById }) {
   ];
 
   return (
+    // With the library hidden while results are displayed, this panel fills
+    // remaining vertical space (flex: 1 + minHeight: 0) and scrolls its own
+    // contents if the comparison is tall.
     <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 16, marginTop: 12 }}>
-      <div style={{ fontSize: 13, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                    marginBottom: 10 }}>
-        Comparison
+                  borderRadius: 8, padding: 16, marginTop: 12,
+                  flex: 1, minHeight: 0,
+                  overflowY: "auto", overflowX: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                    marginBottom: 12 }}>
+        <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text }}>
+          Comparison
+        </div>
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            title="Dismiss these results and return to the experiment library to pick a different set."
+            style={{ padding: "6px 12px", fontSize: 11, fontFamily: mono, fontWeight: 700,
+                     letterSpacing: "0.1em", textTransform: "uppercase",
+                     background: "transparent", color: COLORS.textDim,
+                     border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4,
+                     cursor: "pointer", outline: "none" }}
+          >
+            ← Change Selection
+          </button>
+        )}
       </div>
 
       {/* Ranked table */}
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 11 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 12 }}>
           <thead>
-            <tr style={{ color: COLORS.textDim, fontSize: 9, textTransform: "uppercase",
-                         letterSpacing: "0.08em" }}>
-              <th style={{ textAlign: "left",  padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+            <tr style={{ color: COLORS.textDim, fontSize: 11, textTransform: "uppercase",
+                         letterSpacing: "0.08em", fontWeight: 600 }}>
+              <th style={{ textAlign: "left",  padding: "10px 8px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                 Experiment
               </th>
-              <th style={{ textAlign: "right", padding: "8px 6px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
+              <th style={{ textAlign: "right", padding: "10px 8px", borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                 Trades
               </th>
               {metrics.map(m => (
-                <th key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                <th key={m.key} style={{ textAlign: "right", padding: "10px 8px",
                                           borderBottom: `1px solid ${COLORS.panelBorder}` }}>
                   {m.label}
                 </th>
@@ -1182,16 +1630,19 @@ function CompareResults({ report, experimentsById }) {
             </tr>
           </thead>
           <tbody>
-            {report.rows.map((row) => (
+            {report.rows.map((row, idx) => (
               <tr key={row.experiment_id}
-                  style={{ borderBottom: `1px solid ${COLORS.bg}` }}>
-                <td style={{ padding: "8px 6px", minWidth: 160 }}>
+                  style={{ borderBottom: idx < report.rows.length - 1
+                             ? `1px solid ${COLORS.panelBorder}`
+                             : "none",
+                           background: idx % 2 === 1 ? `${COLORS.bg}50` : "transparent" }}>
+                <td style={{ padding: "10px 8px", minWidth: 160 }}>
                   <div style={{ color: COLORS.text, fontWeight: 600 }}>{row.name}</div>
-                  <div style={{ color: COLORS.textMuted, fontSize: 9 }}>
+                  <div style={{ color: COLORS.textMuted, fontSize: 11 }}>
                     {row.experiment_id.slice(0, 16)}
                   </div>
                 </td>
-                <td style={{ textAlign: "right", padding: "8px 6px", color: COLORS.text }}>
+                <td style={{ textAlign: "right", padding: "10px 8px", color: COLORS.text }}>
                   {row.total_trades}
                 </td>
                 {metrics.map(m => {
@@ -1200,13 +1651,13 @@ function CompareResults({ report, experimentsById }) {
                   const good = m.higherBetter ? (val > 0) : (val < 10);
                   const color = isWinner ? COLORS.accent : (good ? COLORS.text : COLORS.textDim);
                   return (
-                    <td key={m.key} style={{ textAlign: "right", padding: "8px 6px",
+                    <td key={m.key} style={{ textAlign: "right", padding: "10px 8px",
                                               color, fontWeight: isWinner ? 700 : 400 }}>
                       {val != null && Number.isFinite(val)
                         ? `${m.higherBetter && val > 0 ? "+" : ""}${val.toFixed(2)}${m.suffix}`
                         : "—"}
                       {isWinner && (
-                        <span style={{ marginLeft: 4, fontSize: 9, color: COLORS.accent }}>★</span>
+                        <span style={{ marginLeft: 4, fontSize: 11, color: COLORS.accent }}>★</span>
                       )}
                     </td>
                   );
@@ -1218,22 +1669,22 @@ function CompareResults({ report, experimentsById }) {
       </div>
 
       {/* Per-metric winners */}
-      <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}`,
-                    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.panelBorder}`,
+                    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
         {metrics.map(m => {
           const winnerId = winners[m.key];
           const winner = winnerId
             ? (report.rows.find(r => r.experiment_id === winnerId) || experimentsById?.[winnerId])
             : null;
           return (
-            <div key={m.key} style={{ background: COLORS.bg, padding: "8px 10px",
+            <div key={m.key} style={{ background: COLORS.bg, padding: "10px 12px",
                                        border: `1px solid ${COLORS.panelBorder}`, borderRadius: 4 }}>
-              <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
-                            letterSpacing: "0.1em", fontFamily: mono }}>
+              <div style={{ fontSize: 11, color: COLORS.textDim, textTransform: "uppercase",
+                            letterSpacing: "0.1em", fontFamily: mono, fontWeight: 600 }}>
                 {m.label} winner
               </div>
-              <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.accent,
-                            marginTop: 4, whiteSpace: "nowrap", overflow: "hidden",
+              <div style={{ fontSize: 13, fontFamily: mono, color: COLORS.accent, fontWeight: 700,
+                            marginTop: 5, whiteSpace: "nowrap", overflow: "hidden",
                             textOverflow: "ellipsis" }}>
                 {winner ? (winner.name || winner.id?.slice(0, 12) || "—") : "—"}
               </div>
@@ -1242,32 +1693,41 @@ function CompareResults({ report, experimentsById }) {
         })}
       </div>
 
-      {/* Pairwise p-values (significance). "__" is the key separator. */}
+      {/* Pairwise p-values (significance). "__" is the key separator.
+          Resolve short IDs back to experiment names so chips are readable. */}
       {report.pairwise_sharpe_p_values && Object.keys(report.pairwise_sharpe_p_values).length > 0 && (
-        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-          <div style={{ fontSize: 9, color: COLORS.textDim, textTransform: "uppercase",
-                        letterSpacing: "0.1em", fontFamily: mono, marginBottom: 6 }}>
-            Paired bootstrap p-values (per-tick return diffs)
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.panelBorder}` }}>
+          <div style={{ fontSize: 11, color: COLORS.textDim, textTransform: "uppercase",
+                        letterSpacing: "0.1em", fontFamily: mono, marginBottom: 8, fontWeight: 600 }}>
+            Paired bootstrap p-values · per-tick return diffs
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {Object.entries(report.pairwise_sharpe_p_values).map(([key, p]) => {
               const [a, b] = key.split("__");
               const significant = p < 0.05;
+              const nameFor = (id) =>
+                report.rows.find(r => r.experiment_id === id || r.experiment_id?.startsWith(id))?.name
+                || experimentsById?.[id]?.name
+                || id.slice(0, 8);
               return (
-                <div key={key} style={{ fontFamily: mono, fontSize: 10,
-                                         padding: "4px 8px",
+                <div key={key} style={{ fontFamily: mono, fontSize: 12,
+                                         padding: "6px 10px",
                                          background: significant ? `${COLORS.accent}12` : COLORS.bg,
                                          border: `1px solid ${significant ? COLORS.accent : COLORS.panelBorder}`,
                                          borderRadius: 3,
                                          color: significant ? COLORS.accent : COLORS.textDim }}>
-                  {a.slice(0, 6)} vs {b.slice(0, 6)}: p={p.toFixed(3)}
-                  {significant && " ✓"}
+                  <span style={{ fontWeight: 600 }}>{nameFor(a)}</span>
+                  <span style={{ opacity: 0.6, margin: "0 6px" }}>vs</span>
+                  <span style={{ fontWeight: 600 }}>{nameFor(b)}</span>
+                  <span style={{ marginLeft: 8 }}>p={p.toFixed(3)}</span>
+                  {significant && <span style={{ marginLeft: 4 }}>✓</span>}
                 </div>
               );
             })}
           </div>
-          <div style={{ fontSize: 9, color: COLORS.textMuted, fontFamily: mono, marginTop: 6 }}>
-            ✓ = difference statistically significant at p&lt;0.05.
+          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, marginTop: 8 }}>
+            <span style={{ color: COLORS.accent }}>✓</span> = sharpe difference statistically
+            significant at p&lt;0.05 (not just noise from random variation).
           </div>
         </div>
       )}
@@ -1276,80 +1736,219 @@ function CompareResults({ report, experimentsById }) {
 }
 
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
-                       onView, onCompare, compareReport, loading, filters, onFilterChange,
-                       compareInFlight }) {
+                       onView, onCompare, compareReport, loading,
+                       compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
+  // Step 1's "do you have any experiments" check is against the full store,
+  // not the filtered subset, so active filters don't mask a populated library.
+  const expCount = totalInStore != null ? totalInStore : (experiments?.length || 0);
+  const hasEnoughForCompare = expCount >= 2;
+
+  // Derive the current step so the banner can highlight where the user is.
+  // 1 = need more backtests, 2 = browse/filter, 3 = select 2–8, 4 = click Compare
+  const currentStep = !hasEnoughForCompare ? 1
+                    : selectedIds.length < 2 ? 2
+                    : canCompare ? 3
+                    : 0;
+
+  const Step = ({ n, title, body, active, done }) => {
+    const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
+    return (
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
+                    padding: "8px 0",
+                    borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
+        <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
+                      background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
+                      border: `1px solid ${tone}`,
+                      color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
+                      display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {done ? "✓" : n}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
+                        color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
+                        marginBottom: 2 }}>
+            {title}
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                        lineHeight: 1.5 }}>
+            {body}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <div>
-      <ExperimentLibrary
-        experiments={experiments}
-        selectedIds={selectedIds}
-        onToggleSelect={onToggleSelect}
-        onClearSelection={onClearSelection}
-        onRefresh={onRefresh}
-        onView={onView}
-        filters={filters}
-        onFilterChange={onFilterChange}
-        loading={loading}
-      />
-
-      {/* Compare action row */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                    marginTop: 12, padding: "10px 16px",
-                    background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+    // Bound the whole CompareView to the viewport height (minus the top tab
+    // bar + page padding). With this, no element scrolls the window — the
+    // library's internal row list is the single flexible child and absorbs
+    // whatever vertical space remains. Kills the "vertical wobble" caused by
+    // multiple elements competing for page height.
+    <div style={{ display: "flex", flexDirection: "column",
+                   height: "calc(100vh - 160px)", minHeight: 0, gap: 0,
+                   overflow: "hidden" }}>
+      {/* How-it-works banner — spells out the COMPARE workflow as discrete,
+          left-justified steps so a first-time user knows what to do.
+          Stays visible even after running a comparison — the stepper doubles
+          as live status (completed step ticks, active step highlights). */}
+      <div style={{ marginBottom: 12, padding: "14px 18px",
+                    background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
                     borderRadius: 8 }}>
-        <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim }}>
-          {selectedIds.length === 0 ? (
-            "Select 2-8 experiments from the library above to compare."
-          ) : selectedIds.length === 1 ? (
-            <>1 selected — <span style={{ color: COLORS.warn }}>need at least 2 to compare</span></>
-          ) : (
-            <>
-              <span style={{ color: COLORS.purple }}>{selectedIds.length}</span> selected · ready to compare
-            </>
-          )}
+        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700,
+                      color: COLORS.purple, marginBottom: 4, letterSpacing: "0.02em" }}>
+          Compare Past Backtests
         </div>
-        <button
-          onClick={onCompare}
-          disabled={!canCompare}
-          style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, fontFamily: mono,
-                   textTransform: "uppercase", letterSpacing: "0.1em",
-                   background: canCompare ? COLORS.purple : COLORS.panelBorder,
-                   color: canCompare ? "#0a0a0f" : COLORS.textMuted,
-                   border: `1px solid ${canCompare ? COLORS.purple : COLORS.panelBorder}`,
-                   borderRadius: 4, cursor: canCompare ? "pointer" : "not-allowed",
-                   outline: "none",
-                   boxShadow: canCompare ? `0 0 10px ${COLORS.purple}40` : "none" }}
-        >
-          {compareInFlight ? "Comparing…" : "Compare →"}
-        </button>
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                      lineHeight: 1.55, marginBottom: 10 }}>
+          Rank two or more completed backtests side-by-side on Return, Sharpe,
+          Max DD, and Profit Factor — and see which Sharpe differences are real
+          signal vs. noise via paired-bootstrap p-values.
+        </div>
+
+        <Step
+          n={1}
+          active={currentStep === 1}
+          done={currentStep > 1}
+          title="Run some backtests first"
+          body={
+            hasEnoughForCompare ? (
+              <>
+                <span style={{ color: COLORS.accent }}>{expCount}</span>{" "}
+                experiment{expCount === 1 ? "" : "s"} available in the library below.
+              </>
+            ) : (
+              <>
+                You need at least 2 completed runs before you can compare.
+                Head to the <span style={{ color: COLORS.blue, fontWeight: 700 }}>BACKTEST</span> tab,
+                submit a run, wait for it to finish, then come back here.
+                Currently: <span style={{ color: COLORS.warn }}>{expCount}</span> in the library.
+              </>
+            )
+          }
+        />
+        <Step
+          n={2}
+          active={currentStep === 2}
+          done={currentStep > 2}
+          title="Filter and find the experiments you want"
+          body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
+        />
+        <Step
+          n={3}
+          active={currentStep === 3}
+          done={compareReport?.success}
+          title="Select 2–8 and click Compare"
+          body={
+            selectedIds.length === 0 ? (
+              "Tick the checkbox on each row you want to include. Maximum 8."
+            ) : selectedIds.length === 1 ? (
+              <>
+                <span style={{ color: COLORS.warn }}>1 selected</span> — pick at least one more.
+              </>
+            ) : (
+              <>
+                <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
+                {" "}selected · hit the <span style={{ color: COLORS.purple, fontWeight: 700 }}>Compare →</span>
+                {" "}button under the library to run the analysis.
+              </>
+            )
+          }
+        />
       </div>
+
+      {/* Hide the library when a successful comparison is on screen —
+          the results panel is the focus; user can hit Change Selection to
+          bring the library back. Failed reports keep the library visible
+          so the user can adjust their selection without losing the grid. */}
+      {!(compareReport && compareReport.success) && (
+        <ExperimentLibrary
+          experiments={experiments}
+          selectedIds={selectedIds}
+          onToggleSelect={onToggleSelect}
+          onClearSelection={onClearSelection}
+          onRefresh={onRefresh}
+          onView={onView}
+          loading={loading}
+          onCompare={onCompare}
+          canCompare={canCompare}
+          compareInFlight={compareInFlight}
+          onGoToBacktest={onGoToBacktest}
+          totalInStore={totalInStore}
+          compact={!!compareReport}
+        />
+      )}
+
+      {/* Compare action row removed — the inline Compare button in the
+          library header + the selection chip bar + the guided stepper Step 3
+          already cover both the action and the "N selected · ready" status,
+          so the separate action-row panel was just eating vertical room. */}
 
       {compareReport && compareReport.success ? (
         <CompareResults report={compareReport}
-                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))} />
+                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))}
+                        onDismiss={onDismissReport} />
       ) : compareReport && !compareReport.success ? (
-        <div style={{ marginTop: 12, padding: 16, background: COLORS.panel,
-                      border: `1px solid ${COLORS.danger}40`, borderRadius: 8,
-                      color: COLORS.danger, fontFamily: mono, fontSize: 11 }}>
-          Compare failed: {compareReport.error}
-          {compareReport.missing_ids && (
-            <div style={{ fontSize: 10, color: COLORS.textDim, marginTop: 4 }}>
-              Missing: {compareReport.missing_ids.join(", ")}
+        <div style={{ marginTop: 10, padding: "12px 16px", background: COLORS.panel,
+                      border: `1px solid ${COLORS.warn}60`, borderRadius: 6,
+                      fontFamily: mono, fontSize: 12, lineHeight: 1.5,
+                      display: "flex", gap: 12, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 18, lineHeight: 1 }}>⚠</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: COLORS.warn, fontWeight: 700, marginBottom: 4 }}>
+              Comparison couldn't be computed
             </div>
-          )}
+            <div style={{ color: COLORS.textDim }}>
+              {compareReport.missing_ids && compareReport.missing_ids.length > 0 ? (
+                <>
+                  One or more of the selected experiments are no longer in the
+                  store. Click <span style={{ color: COLORS.blue, fontWeight: 700 }}>Refresh</span>{" "}
+                  on the library header to resync, then re-select.
+                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
+                    Missing: {compareReport.missing_ids.join(", ")}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {compareReport.error || "Unknown error."}
+                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6,
+                                lineHeight: 1.5 }}>
+                    This almost always means one of the selected experiments
+                    is a <b>legacy run</b> from before the metrics-sanitiser fix
+                    — its on-disk metrics contain non-finite values that compare()
+                    can't rank. Try:
+                    <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                      <li>Pick a different pair of experiments, or</li>
+                      <li>Re-run one of them from the BACKTEST tab to refresh
+                          it with the fixed sanitiser.</li>
+                    </ul>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClearSelection}
+            style={{ background: "transparent", border: "none", color: COLORS.textDim,
+                     cursor: "pointer", fontFamily: mono, fontSize: 11,
+                     letterSpacing: "0.08em", textTransform: "uppercase",
+                     padding: "4px 8px" }}
+            title="Clear the current selection to pick a different set."
+          >
+            Reset
+          </button>
         </div>
       ) : null}
 
-      {/* Tip */}
+      {/* Tip — reading guide for first-time users once a comparison is pending */}
       {!compareReport && (
-        <div style={{ marginTop: 12, padding: "10px 14px",
+        <div style={{ marginTop: 12, padding: "12px 16px",
                       background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 6, fontSize: 10, fontFamily: mono, color: COLORS.textDim,
-                      lineHeight: 1.5 }}>
-          Per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
-          Pairwise p-values use paired bootstrap over per-tick return diffs —
+                      borderRadius: 6, fontSize: 12, fontFamily: mono, color: COLORS.textDim,
+                      lineHeight: 1.55 }}>
+          <span style={{ color: COLORS.text, fontWeight: 600 }}>How to read results:</span>{" "}
+          per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
+          Pairwise p-values use a paired bootstrap on per-tick return diffs —
           <span style={{ color: COLORS.accent }}> p&lt;0.05</span> means the sharpe gap isn't just noise.
         </div>
       )}
@@ -1358,16 +1957,23 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
 }
 
 function ConnectionStatus({ connected, tick }) {
+  // The colored, optionally-pulsing dot conveys the live/disconnected state
+  // visually. The text redundantly saying "LIVE" on top of that competes
+  // with the LIVE tab label and the AI/engine pill, so we drop it and show
+  // just the tick count — the thing the user actually can't infer from
+  // anywhere else.
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}
+         title={connected ? "Connected to the agent. Tick number increments each engine tick." : "Disconnected — the agent isn't running or the WebSocket dropped."}>
       <div style={{
         width: 8, height: 8, borderRadius: "50%",
         background: connected ? COLORS.accent : COLORS.danger,
         boxShadow: `0 0 8px ${connected ? COLORS.accent : COLORS.danger}80`,
         animation: connected ? "none" : "pulse 1.5s infinite",
       }} />
-      <span style={{ fontSize: 11, fontFamily: mono, color: connected ? COLORS.accent : COLORS.danger }}>
-        {connected ? `LIVE | Tick #${tick}` : "DISCONNECTED"}
+      <span style={{ fontSize: 11, fontFamily: mono, color: connected ? COLORS.accent : COLORS.danger,
+                     letterSpacing: "0.04em" }}>
+        {connected ? `Tick #${tick}` : "DISCONNECTED"}
       </span>
     </div>
   );
@@ -1393,7 +1999,6 @@ export default function App() {
   const [observerClosed, setObserverClosed] = useState(false); // user dismissed → hide until a new run
   // Phase 10: experiment library + compare state
   const [libExperiments, setLibExperiments] = useState([]);    // full list from WS
-  const [libFilters, setLibFilters] = useState({});            // {status, triggered_by, tag}
   const [libLoading, setLibLoading] = useState(false);
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
@@ -1469,6 +2074,17 @@ export default function App() {
               return;
             case "backtest_result":
               setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              // Auto-refresh the library so the freshly-completed run is
+              // present when the user next opens the COMPARE tab — without
+              // this, the library only refreshes on tab-switch or manual
+              // Refresh, which made completed runs look "missing".
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                try {
+                  wsRef.current.send(JSON.stringify({
+                    type: "experiment_list_request", limit: 100,
+                  }));
+                } catch { /* swallow — next tab switch will refetch */ }
+              }
               return;
             case "backtest_review":
               setBtReviews((prev) => ({ ...prev, [msg.experiment_id]: msg.review }));
@@ -1556,12 +2172,25 @@ export default function App() {
   }, [sendMessage]);
 
   const toggleSelectExperiment = useCallback((id) => {
+    if (!id) return;
     setCompareSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(0, 8)
     );
   }, []);
 
   const clearSelection = useCallback(() => setCompareSelected([]), []);
+
+  // Prune stale/ghost IDs from the selection whenever the library updates.
+  // Prevents a pre-selected experiment_id (from "Compare this run →") that
+  // hasn't landed in the server's list yet from occupying a slot silently.
+  useEffect(() => {
+    if (!Array.isArray(libExperiments) || libExperiments.length === 0) return;
+    const known = new Set(libExperiments.map((e) => e.id));
+    setCompareSelected((prev) => {
+      const kept = prev.filter((id) => known.has(id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [libExperiments]);
 
   // Debounce for compare and detail-fetch to prevent a trigger-happy user
   // from flooding the backend with duplicate requests before the ack lands.
@@ -1589,14 +2218,18 @@ export default function App() {
     if (activeTab === "COMPARE" && connected) fetchLibrary();
   }, [activeTab, connected, fetchLibrary]);
 
-  // Apply client-side filters on top of the server's list response.
-  // Server currently sends everything; filters stay cheap + interactive.
+  // Compare only works on experiments that are in a comparable state —
+  // the run must be "complete" AND have at least one non-null primary metric.
+  // Any other state (running, pending, failed, cancelled, or complete-but-
+  // missing-metrics) would either reject server-side or produce a nonsense
+  // row, so hide them from the library UI entirely.
   const filteredExperiments = (libExperiments || []).filter((e) => {
-    if (libFilters.status && e.status !== libFilters.status) return false;
-    if (libFilters.triggered_by
-        && !(e.triggered_by || "").includes(libFilters.triggered_by)) return false;
-    if (libFilters.tag && !(e.tags || []).some((t) => t.includes(libFilters.tag))) return false;
-    return true;
+    if (e.status !== "complete") return false;
+    const m = e.metrics;
+    if (!m) return false;
+    // At least one primary metric must be a number (null is the
+    // sanitiser's "non-finite" marker). If all are null the row is dead.
+    return m.total_return_pct != null || m.sharpe != null || m.max_drawdown_pct != null;
   });
 
   useEffect(() => {
@@ -1671,8 +2304,27 @@ export default function App() {
             onChange={setActiveTab}
             backtestRunning={Object.values(btProgress).some(p => p?.stage === "running")}
           />
-          <div style={{ padding: "4px 12px", borderRadius: 4, fontSize: 11, fontWeight: 700, fontFamily: mono, background: aiBrain ? `${COLORS.blue}20` : `${COLORS.danger}20`, color: aiBrain ? COLORS.blue : COLORS.danger, border: `1px solid ${aiBrain ? COLORS.blue : COLORS.danger}40`, textTransform: "uppercase", letterSpacing: "0.1em" }}>
-            {aiBrain ? "AI LIVE" : "LIVE TRADING"}
+          {/* Mode pill — indicates whether the AI brain is attached on top of
+              the engine. Prior copy was "AI LIVE" / "LIVE TRADING" which
+              collided with the LIVE tab and the connection indicator. */}
+          {/* Pill dimensions (padding + fontSize + letterSpacing) match the
+              TabSwitcher buttons so the whole header reads as one consistent
+              row of controls. QuantumIcon uses COLORS.text (near-white) when
+              the brain is active so it pops cleanly against the blue-tinted
+              pill background instead of blending with the blue border/text. */}
+          <div title={aiBrain
+                ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
+                : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
+               style={{ padding: "0 14px", minHeight: 38, borderRadius: 4,
+                        fontSize: 12, fontWeight: 700, fontFamily: mono,
+                        display: "inline-flex", alignItems: "center", gap: 8,
+                        background: aiBrain ? `${COLORS.blue}18` : "transparent",
+                        color: aiBrain ? COLORS.blue : COLORS.textDim,
+                        border: `1px solid ${aiBrain ? `${COLORS.blue}60` : COLORS.panelBorder}`,
+                        textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            <QuantumIcon active={!!aiBrain} size={22}
+                         color={aiBrain ? COLORS.text : COLORS.textDim} />
+            {aiBrain ? "AI Brain" : "Engine Only"}
           </div>
           <ConnectionStatus connected={connected} tick={tick} />
           {elapsed > 0 && (
@@ -1723,23 +2375,33 @@ export default function App() {
                   observerEquity={obsEquity}
                   observerTotalTicks={totalTicks}
                   onObserverClose={() => setObserverClosed(true)}
+                  onCompareThisRun={(expId) => {
+                    // Jump to COMPARE, refresh the library so the fresh run
+                    // is present, and pre-select it so the user only needs
+                    // to pick one more to comparison against.
+                    setCompareSelected((prev) =>
+                      prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
+                    );
+                    setActiveTab("COMPARE");
+                    fetchLibrary();
+                  }}
                 />
               </div>
             )}
             {activeTab === "COMPARE" && (
               <div style={{ padding: "16px 24px" }}>
                 {viewingExpId && (
-                  <div style={{ marginBottom: 10, padding: "8px 14px",
+                  <div style={{ marginBottom: 12, padding: "10px 16px",
                                 background: `${COLORS.blue}10`,
                                 border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                fontFamily: mono, fontSize: 10, color: COLORS.blue,
+                                fontFamily: mono, fontSize: 12, color: COLORS.blue,
                                 display: "flex", justifyContent: "space-between",
                                 alignItems: "center" }}>
                     <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
                     <button onClick={() => setViewingExpId(null)}
                             style={{ background: "transparent", border: "none",
                                      color: COLORS.blue, cursor: "pointer",
-                                     fontFamily: mono, fontSize: 10 }}>
+                                     fontFamily: mono, fontSize: 12 }}>
                       dismiss
                     </button>
                   </div>
@@ -1754,9 +2416,16 @@ export default function App() {
                   onCompare={runCompare}
                   compareReport={compareReport}
                   loading={libLoading}
-                  filters={libFilters}
-                  onFilterChange={setLibFilters}
                   compareInFlight={compareInFlight}
+                  onGoToBacktest={() => setActiveTab("BACKTEST")}
+                  totalInStore={libExperiments.length}
+                  onDismissReport={() => {
+                    // "Change Selection" path: clear the last result so the
+                    // library reappears and the user can pick a different
+                    // set. Selection itself is kept — likely the user wants
+                    // to swap one row, not start from scratch.
+                    setCompareReport(null);
+                  }}
                 />
               </div>
             )}
@@ -2145,7 +2814,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.10.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.10.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
