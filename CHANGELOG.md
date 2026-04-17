@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.11.1] — 2026-04-17
+
+Dashboard polish — Strategy Matrix panel restyle.
+
+### Changed
+
+- **Strategy Matrix (LIVE tab, right sidebar)** — replaced single-line
+  rows with pressed-in bezel cavities, one per regime, tinted by the
+  regime's category color. Active pairs render as colored pill chips
+  on a second line inside the cavity. Emoji strategy icons removed;
+  arrow separator dropped; `opacity: 0.35` ghost rows replaced by
+  color-graded active/inactive states (dim regime tint + hollow-ring
+  dot when inactive, strong tint + filled glowing dot when active).
+  Cavity effect via stacked `inset` box-shadows on `COLORS.bg`: top-edge
+  shadow for the debossed feel, inner regime-colored glow, 1px regime
+  rim, plus a subtle bottom accent on active rows.
+
+### Fixed
+
+- **`HYDRA_VERSION` drift** (hydra_backtest.py) — constant was stuck
+  at `2.10.1` despite main sitting at `2.11.0`. Every `BacktestResult`
+  was stamping a stale version. Bumped in lockstep to `2.11.1` per the
+  CLAUDE.md lockstep invariant.
+
+---
+
 ## [2.11.0] — 2026-04-17
 
 SOL/BTC phantom-balance fix — thesis-driven confluence architecture.

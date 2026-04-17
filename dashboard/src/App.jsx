@@ -3616,28 +3616,59 @@ export default function App() {
               {/* Strategy Matrix */}
               <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 12 }}>
                 <div style={{ fontSize: 10, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontFamily: mono }}>Strategy Matrix</div>
-                {[
-                  { regime: "TREND_UP", strategy: "MOMENTUM" },
-                  { regime: "TREND_DOWN", strategy: "DEFENSIVE" },
-                  { regime: "RANGING", strategy: "MEAN_REVERSION" },
-                  { regime: "VOLATILE", strategy: "GRID" },
-                ].map(({ regime, strategy }) => {
-                  const activeForPairs = pairNames.filter(p => pairs[p]?.regime === regime);
-                  const active = activeForPairs.length > 0;
-                  return (
-                    <div key={regime} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", opacity: active ? 1 : 0.35, fontFamily: mono }}>
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: regimeColor(regime), boxShadow: active ? `0 0 8px ${regimeColor(regime)}` : "none" }} />
-                      <span style={{ fontSize: 10, color: regimeColor(regime), width: 75 }}>{regime.replace("_", " ")}</span>
-                      <span style={{ fontSize: 10, color: COLORS.textDim }}>{"\u2192"}</span>
-                      <span style={{ fontSize: 10, color: COLORS.text }}>{strategyIcon(strategy)} {strategy.replace("_", " ")}</span>
-                      {active && (
-                        <span style={{ fontSize: 8, color: regimeColor(regime), marginLeft: "auto" }}>
-                          {activeForPairs.join(", ")}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {[
+                    { regime: "TREND_UP", strategy: "MOMENTUM" },
+                    { regime: "TREND_DOWN", strategy: "DEFENSIVE" },
+                    { regime: "RANGING", strategy: "MEAN_REVERSION" },
+                    { regime: "VOLATILE", strategy: "GRID" },
+                  ].map(({ regime, strategy }) => {
+                    const activeForPairs = pairNames.filter(p => pairs[p]?.regime === regime);
+                    const active = activeForPairs.length > 0;
+                    const rc = regimeColor(regime);
+                    return (
+                      <div key={regime} style={{
+                        background: COLORS.bg,
+                        boxShadow: active
+                          ? `inset 0 1px 3px rgba(0,0,0,0.65), inset 0 -1px 0 ${rc}1A, inset 0 0 14px ${rc}22, inset 0 0 0 1px ${rc}45`
+                          : `inset 0 1px 2px rgba(0,0,0,0.5), inset 0 0 10px ${rc}0C, inset 0 0 0 1px ${rc}20`,
+                        borderRadius: 6,
+                        padding: "8px 10px",
+                        fontFamily: mono,
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{
+                            width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+                            background: active ? rc : "transparent",
+                            border: `1px solid ${active ? rc : COLORS.textMuted}`,
+                            boxShadow: active ? `0 0 6px ${rc}` : "none"
+                          }} />
+                          <span style={{ fontSize: 10, color: active ? rc : COLORS.textDim, fontWeight: active ? 700 : 400, letterSpacing: "0.04em" }}>
+                            {regime.replace("_", " ")}
+                          </span>
+                          <span style={{ fontSize: 10, color: active ? COLORS.textDim : COLORS.textMuted, marginLeft: "auto" }}>
+                            {strategy.replace("_", " ")}
+                          </span>
+                        </div>
+                        {active && (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                            {activeForPairs.map(p => (
+                              <span key={p} style={{
+                                fontSize: 9, fontFamily: mono, fontWeight: 700,
+                                color: rc,
+                                background: `${rc}1A`,
+                                border: `1px solid ${rc}50`,
+                                padding: "2px 6px",
+                                borderRadius: 3,
+                                letterSpacing: "0.04em"
+                              }}>{p}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Per-Pair Stats */}
@@ -3759,7 +3790,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.11.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.11.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
