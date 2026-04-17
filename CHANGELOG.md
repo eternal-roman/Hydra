@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.6] — 2026-04-17
+
+Companion **Phase 3** — live single-trade execution. Gated by
+`HYDRA_COMPANION_LIVE_EXECUTION=1` on top of Phases 1 + 2.
+
+### Added
+- `hydra_companions/live_executor.py`: LiveExecutor places real limit
+  post-only orders via `KrakenCLI.order_buy/sell`, tagged with a
+  numeric userref (int31 SHA-256 prefix of proposal_id). Existing
+  ExecutionStream lifecycle handles fills unchanged.
+- Coordinator now enforces per-companion daily trade cap at confirm
+  time when live execution is on (mock mode still counts for
+  observability). Placement failures broadcast
+  `companion.trade.failed`.
+- 6 new tests (userref stability, order path, failure broadcast,
+  ladder distinct userrefs, daily-cap delegation). 46 companion tests
+  green.
+
+---
+
 ## [2.10.5] — 2026-04-17
 
 Companion **Phase 2** — proposals + TradeCard/LadderCard UI with

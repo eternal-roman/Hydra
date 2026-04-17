@@ -3546,7 +3546,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.10.5 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.10.6 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
