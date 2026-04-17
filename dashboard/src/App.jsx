@@ -1509,7 +1509,7 @@ function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 5,
-                      maxHeight: compact ? "min(140px, 13vh)" : "min(360px, 32vh)",
+                      maxHeight: compact ? "min(100px, 10vh)" : "min(320px, 28vh)",
                       overflowY: "auto" }}>
           {experiments.map((e) => {
             const selected = selectedIds.includes(e.id);
