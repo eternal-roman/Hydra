@@ -6,6 +6,62 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.10.2] — 2026-04-16
+
+Dashboard UX patch — no engine / agent / backtest-server behaviour
+changes. Full BACKTEST and COMPARE tab rework plus a handful of
+defensive fixes for legacy-run metrics.
+
+### Dashboard
+
+- **BACKTEST tab layout:** tri-panel (`Last Result | Backtest Status |
+  Rigor Gates`) above the Observer chart; chart flex-fills down to
+  the control panel's bottom; clarified synthetic data source
+  ("Synthetic Candles ⓘ", "Experiment Seed ⓘ") with tooltips.
+- **Rigor Gates:** live pass/fail pills with plain-English labels
+  (Sample Size, MC Confidence, Walk-Forward, OOS Gap, Signal vs.
+  Noise, Cross-Pair, Regime Spread) driven by the review's
+  `gates_passed` dict. Grey / green / red states + hover tooltips.
+- **Run Status panel:** rewritten as explicit submission lifecycle
+  (idle / queued / running / complete / rejected) with plain-English
+  body copy per state and a purple "Compare this run →" button that
+  jumps to COMPARE with the just-finished experiment pre-selected.
+- **COMPARE tab:** state-aware 3-step guided banner; collapsed
+  advanced filters removed; library shows only comparable
+  experiments (status=complete with non-null metrics); selection
+  chip bar with per-chip deselect; inline "Compare N →" button in
+  the library header; library auto-hides when results are on screen
+  with a "← Change Selection" dismiss; animated quantum atom icon
+  on the AI Brain pill.
+- **Typography unified** across both tabs (titles 14 / data 12 /
+  captions 11); header controls share one 38px height; LIVE /
+  BACKTEST / COMPARE tabs + AI Brain / Engine Only pill all render
+  at the same footprint with equal spacing.
+
+### Fixed
+
+- **fix(backtest):** emit finite sentinel `999.0` for
+  `profit_factor` / Sortino when denominators are zero, instead of
+  `math.inf`. `_sanitize_json` was converting inf → None on disk,
+  and `compare()` then crashed with "must be real number, not
+  NoneType" when ranking reloaded experiments.
+- **fix(compare):** None-safe `_flatten_equity` / `_rets` — legacy
+  equity curves with null-sanitised ticks no longer blow up the
+  paired-bootstrap p-value pass.
+- **fix(compare):** server handler wraps `compare()` in try/except
+  and returns a readable, actionable error message on corrupt
+  legacy data (pointing the user at re-running the experiment).
+- **fix(dashboard):** auto-refresh the library on every
+  `backtest_result` message so freshly-completed runs are
+  comparable without manual refresh or tab-switch.
+
+### Tests
+
+- `test_sortino_no_downside_handled` loosened to accept the `999.0`
+  sentinel alongside `math.inf` / `0.0`.
+- 762+ tests pass across engine / streams / backtest / reviewer /
+  live-harness smoke.
+
 ## [2.10.1] — 2026-04-16
 
 Bug-fix release: audit-driven profit-leak fixes across the brain, agent,
