@@ -1012,15 +1012,25 @@ class BookStream(BaseStream):
             if not pair:
                 continue
             # Convert WS format {price, qty} dicts to REST format [price, qty, 0]
-            # so OrderBookAnalyzer works unchanged.
+            # so OrderBookAnalyzer works unchanged. Skip malformed levels rather
+            # than crash the reader thread on a single bad row.
+            def _as_level(d):
+                try:
+                    return [float(d.get("price", 0)), float(d.get("qty", 0)), 0]
+                except (TypeError, ValueError):
+                    return None
             bids = []
             for b in entry.get("bids", []):
                 if isinstance(b, dict):
-                    bids.append([float(b.get("price", 0)), float(b.get("qty", 0)), 0])
+                    lv = _as_level(b)
+                    if lv is not None:
+                        bids.append(lv)
             asks = []
             for a in entry.get("asks", []):
                 if isinstance(a, dict):
-                    asks.append([float(a.get("price", 0)), float(a.get("qty", 0)), 0])
+                    lv = _as_level(a)
+                    if lv is not None:
+                        asks.append(lv)
             with self._lock:
                 self._latest[pair] = {"bids": bids, "asks": asks}
 
@@ -1079,8 +1089,13 @@ class BalanceStream(BaseStream):
             if not asset or balance is None:
                 continue
             normalized = KrakenCLI._normalize_asset(asset)
-            with self._lock:
+            try:
                 bal = float(balance)
+            except (TypeError, ValueError):
+                # Malformed balance value — skip this entry rather than crash
+                # the reader thread (which would force a stream restart).
+                continue
+            with self._lock:
                 if bal > 0:
                     self._balances[normalized] = bal
                 else:
@@ -1764,6 +1779,20 @@ class HydraAgent:
         # Track previous regime for cross-pair swap triggers
         self.prev_regimes: Dict[str, str] = {}
 
+        # Sweep stale .tmp siblings of state files (left over from a crash
+        # mid os.replace). The .replace is atomic so the main file is intact;
+        # the .tmp is just orphan garbage and could mislead future debugging.
+        try:
+            import glob as _glob
+            for stale in _glob.glob(os.path.join(self._snapshot_dir, "*.json.tmp")):
+                try:
+                    os.remove(stale)
+                    print(f"  [STARTUP] removed stale tmp: {os.path.basename(stale)}")
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
         # Run the one-shot legacy trade_log -> order_journal migration
         # before touching any on-disk state. Idempotent; no-op after the
         # first run. Lives in hydra_journal_migrator so it can be invoked
@@ -1893,6 +1922,10 @@ class HydraAgent:
         try:
             with open(path, "r") as f:
                 snapshot = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            print(f"  [SNAPSHOT] Load failed for {path}: {type(e).__name__}: {e} — starting fresh.")
+            return
+        try:
             if snapshot.get("version") != 1:
                 print(f"  [SNAPSHOT] Unknown version {snapshot.get('version')}, skipping.")
                 return
@@ -1926,7 +1959,7 @@ class HydraAgent:
                 thesis_attr.restore(snapshot.get("thesis_state"))
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
-            print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
+            print(f"  [SNAPSHOT] Restore failed for {path}: {type(e).__name__}: {e} — starting fresh.")
 
     # ─── Thesis journal helpers (v2.13.1, Phase B) ────────────────────
 
@@ -4669,7 +4702,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.4",
+            "version": "2.13.5",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

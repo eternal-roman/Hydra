@@ -27,7 +27,12 @@ class RouteDecision:
 class Router:
     def __init__(self, config_path: Optional[Path] = None):
         path = config_path or ROUTING_CONFIG
-        self._cfg = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            self._cfg = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"Router: failed to load {path}: {type(e).__name__}: {e}"
+            ) from e
         self._routing = self._cfg["routing"]
         self._intents = self._cfg["intents"]
         self._fallbacks = self._cfg.get("fallbacks", {})

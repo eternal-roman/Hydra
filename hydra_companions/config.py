@@ -18,9 +18,14 @@ from pathlib import Path
 
 # Defensive: if the parent agent hasn't loaded .env yet, do it here so
 # companions can reach ANTHROPIC_API_KEY / XAI_API_KEY on standalone
-# imports (tests, repl, etc.). Idempotent \u2014 won't overwrite
-# anything already in os.environ.
+# imports (tests, repl, etc.). Idempotent — won't overwrite anything
+# already in os.environ. Test harnesses that need a hermetic env can
+# set HYDRA_NO_DOTENV=1 to skip this entirely; otherwise the lazy
+# import that pulls in this module would re-pollute env vars the
+# harness just popped.
 def _load_env_once():
+    if os.environ.get("HYDRA_NO_DOTENV") == "1":
+        return
     root = Path(__file__).resolve().parent.parent
     env = root / ".env"
     if not env.exists():

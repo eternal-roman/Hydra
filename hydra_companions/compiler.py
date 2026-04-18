@@ -403,16 +403,26 @@ def compile_soul(soul: dict) -> CompiledSoul:
 
 
 def load_soul(soul_id: str, souls_dir: Optional[Path] = None) -> CompiledSoul:
-    path = (souls_dir or SOULS_DIR) / f"{soul_id}.soul.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    base = Path(souls_dir) if souls_dir is not None else SOULS_DIR
+    path = base / f"{soul_id}.soul.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            f"load_soul({soul_id!r}): failed to read {path}: {type(e).__name__}: {e}"
+        ) from e
     return compile_soul(data)
 
 
 def load_all_souls(souls_dir: Optional[Path] = None) -> dict:
-    d = souls_dir or SOULS_DIR
+    d = Path(souls_dir) if souls_dir is not None else SOULS_DIR
     out = {}
     for p in sorted(d.glob("*.soul.json")):
-        data = json.loads(p.read_text(encoding="utf-8"))
-        compiled = compile_soul(data)
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            compiled = compile_soul(data)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"  [COMPANION] skipping soul {p.name}: {type(e).__name__}: {e}")
+            continue
         out[compiled.id] = compiled
     return out
