@@ -297,6 +297,100 @@ def test_tool_registry_has_v11_tools():
     assert "get_chart_summary" in t.TOOL_REGISTRY
 
 
+# ───────────────────────────────────────────────────────────────
+# v2.12.5 — journal-visibility patch
+# ───────────────────────────────────────────────────────────────
+
+def test_compose_blob_uses_enforce_tool_access_on_denial():
+    """Denied soul must not leak chart or journal into the blob.
+    Enforcement path is via enforce_tool_access (not advisory check)."""
+    a = _agent()
+    denied = {"id": "stranger", "capabilities": {"tool_access": []}}
+    blob = t.compose_context_blob(
+        a, pair="BTC/USDC", soul=denied,
+        include_chart=True, include_journal_tail=True,
+    )
+    assert "[chart" not in blob
+    assert "recent trades" not in blob
+    assert "[journal:" not in blob  # denied soul gets no journal marker at all
+
+
+def test_compose_blob_emits_zero_entries_marker_when_journal_empty():
+    """Granted soul + empty journal must produce an explicit zero-entries
+    line so the companion cannot hallucinate 'journal empty' from
+    silence. This is the core fix for the journal-visibility bug."""
+    empty_state = {"tick": 1, "mode": "paper", "pairs": {}, "order_journal": []}
+    a = FakeAgent(empty_state, {})
+    granted = {"id": "apex", "capabilities": {"tool_access": ["get_order_journal"]}}
+    # Force empty disk fallback so this test is deterministic regardless
+    # of whatever happens to live on disk in the dev checkout.
+    orig_loader = t._load_journal_from_disk
+    t._load_journal_from_disk = lambda: []
+    try:
+        blob = t.compose_context_blob(
+            a, soul=granted,
+            include_chart=False, include_journal_tail=True,
+        )
+    finally:
+        t._load_journal_from_disk = orig_loader
+    assert "[journal: 0 entries" in blob, f"missing zero-entries marker in blob: {blob!r}"
+
+
+def test_compose_blob_includes_journal_when_granted_and_populated():
+    a = _agent()
+    granted = {"id": "apex", "capabilities": {"tool_access": [
+        "get_order_journal", "get_chart_snapshot",
+    ]}}
+    blob = t.compose_context_blob(
+        a, pair="BTC/USDC", soul=granted,
+        include_chart=False, include_journal_tail=True,
+    )
+    assert "recent trades" in blob
+    assert "source=memory" in blob
+
+
+def test_companion_respond_includes_journal_on_market_state_query():
+    """Integration: market_state_query intent now injects the journal
+    into the LIVE CONTEXT blob so companions can answer 'can you see
+    my journal?' truthfully."""
+    from hydra_companions.companion import Companion
+    from hydra_companions.compiler import load_all_souls
+
+    class _StubProvider:
+        def __init__(self):
+            self.last_messages = None
+        def call(self, *, provider, model_id, system, messages, max_tokens, temperature):
+            self.last_messages = messages
+            from hydra_companions.providers import ProviderResponse
+            return ProviderResponse(
+                provider=provider, model_id=model_id,
+                text="ok", tokens_in=1, tokens_out=1, cost_usd=0.0, error=None,
+            )
+
+    class _StubClassifier:
+        def classify(self, text):
+            from hydra_companions.intent_classifier import IntentResult
+            return IntentResult(intent="market_state_query", confidence=0.9, method="heuristic")
+
+    from hydra_companions.router import Router
+    souls = load_all_souls()
+    comp = Companion(
+        soul=souls["apex"], agent=_agent(),
+        router=Router(), classifier=_StubClassifier(),
+        provider=_StubProvider(), user_id="test_journal_visibility",
+    )
+    comp.respond("can you see my order journal?")
+    last_user_msg = comp.provider.last_messages[-1]["content"]
+    assert "LIVE CONTEXT" in last_user_msg
+    assert "recent trades" in last_user_msg or "[journal:" in last_user_msg, \
+        f"journal section missing from market_state_query blob: {last_user_msg!r}"
+    # Clean up the transcript file this test creates.
+    try:
+        comp._transcript_path.unlink()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

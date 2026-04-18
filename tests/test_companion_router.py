@@ -149,6 +149,32 @@ def test_v11_intent_classifier_has_chart_analysis_heuristic():
     assert "chart_analysis" in intents
 
 
+# ───────────────────────────────────────────────────────────────
+# v2.12.5 — journal-visibility patch (classifier coverage)
+# ───────────────────────────────────────────────────────────────
+
+def test_v125_journal_queries_route_to_market_state_query():
+    """Journal/history-style prompts must classify as market_state_query
+    (previously fell to small_talk or the question fallback, which
+    excluded the journal from the context blob)."""
+    from hydra_companions.intent_classifier import IntentClassifier
+    ic = IntentClassifier()
+    phrases = [
+        "can you see my order journal?",
+        "look at my prior trades in the journal",
+        "show me my recent fills",
+        "what did I trade today",
+        "pull up my trade history",
+        "order history please",
+    ]
+    for p in phrases:
+        r = ic.classify(p)
+        assert r.intent == "market_state_query", \
+            f"{p!r} classified as {r.intent} (expected market_state_query)"
+        assert r.method == "heuristic", \
+            f"{p!r} fell to {r.method} instead of a heuristic match"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

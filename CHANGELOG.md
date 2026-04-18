@@ -6,6 +6,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.5] — 2026-04-18
+
+Patch fixing a journal-visibility bug in the companion runtime. Apex
+(and by symmetry Athena/Broski) would confidently report "journal
+empty" when asked to review prior trades, because (a) journal/history
+phrasing missed every classifier heuristic and fell to small_talk or
+the question fallback, and (b) `include_journal` in the context-blob
+builder was gated to `chart_analysis` / `trade_proposal` only — so
+even an intent that *did* build a blob excluded the journal. The
+companion read the absence of a journal section as evidence of an
+empty journal and confabulated.
+
+### Fixes
+- Classifier: `market_state_query` regex extended to match journal,
+  my trades/orders/fills, prior/past trades, trade/order history, and
+  "look at my …" / "what did I trade" phrasings. New test
+  `test_v125_journal_queries_route_to_market_state_query` pins six
+  representative prompts.
+- `Companion.respond()`: `include_journal` widened to
+  `{chart_analysis, trade_proposal, ladder_proposal, market_state_query,
+  idle_proactive_nudge}`. Journal tails are cheap (~5 entries × ~120 B)
+  and now reach every intent that talks about trades.
+- `tools_readonly.compose_context_blob`: when the journal is requested
+  and the allowlist grants access but the journal is empty, emit an
+  explicit `[journal: 0 entries (source=…)]` marker so the LLM sees
+  evidence of absence instead of absence of evidence.
+- `tools_readonly.compose_context_blob`: gate replaced from the
+  advisory `check_tool_access` to the enforcing `enforce_tool_access`
+  (wrapped in `try/except ToolAccessDenied`). `enforce_tool_access` is
+  now load-bearing on the one runtime path that gates tool data,
+  closing the "defined but never called" gap noted in the v2.12.4
+  audit.
+
+### Tests
+- 930 → 935 tests passing.
+- 4 new apex/tools tests: denial path via `enforce_tool_access`, empty
+  journal marker, populated journal on granted soul, and an
+  integration test proving `market_state_query` injects the journal
+  into the user message sent to the provider.
+
+### Not in scope (intentionally deferred)
+Automatic memory writes, CBP read-at-turn, and wiring
+`TOOL_REGISTRY` into a real Anthropic/xAI tool-use loop remain Phase
+2 work. The Phase 1 context-blob injection model is unchanged.
+
+---
+
 ## [2.12.4] — 2026-04-18
 
 Companion soul schema bumped from 1.0 → 1.1. Additive-only CBP-hybrid
