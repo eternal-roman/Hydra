@@ -28,6 +28,92 @@ This file provides context for Claude Code and other AI agents working on this r
 
 HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market conditions (trending, ranging, volatile) and switches between four strategies (Momentum, Mean Reversion, Grid, Defensive) to execute limit post-only orders on SOL/USDC, SOL/BTC, and BTC/USDC.
 
+## Verification Discipline
+
+- Always stop running agents/processes before editing journals, snapshots, or state files (they will be overwritten)
+- After any fix, verify with actual commands (git tag -v, test runs) rather than claiming success
+- Run the full test suite AND typecheck/lint before declaring work complete
+- When a fix touches multi-file state (journal + snapshot + config), explicitly enumerate all files to update
+
+**Hydra-specific:**
+- Stop `hydra_agent.py` and the `start_hydra.bat` watchdog before editing
+  `hydra_session_snapshot.json`, `hydra_order_journal.json`,
+  `hydra_params_*.json`, or `hydra_errors.log` — the live agent rewrites them.
+  See §Operating Rules → Rule 2 for the binding form.
+- Verification commands: the CI invocation pattern in `.github/workflows/ci.yml`
+  (individual `python tests/test_*.py` runs), `python tests/live_harness/harness.py --mode mock`,
+  and `python hydra_engine.py` (synthetic demo). See §Operating Rules → Rule 3.
+- Multi-file state for a typical engine change: snapshot + journal +
+  `hydra_params_<pair>.json` (one per traded pair) + `hydra_errors.log`.
+- The `.claude/hooks/post-edit.sh` hook runs a path-scoped verification step
+  after every Edit/Write tool use. Set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to
+  silence it during heavy refactors. Hook failures are advisory only.
+
+## Operating Rules
+
+These rules are binding on any agent operating in this repo. Each was
+earned through a documented past failure and is non-negotiable.
+
+### Rule 1 — Parallel Task agents for any audit > 20 files
+
+Past failure: single-pass review missed 7+ bugs that parallel-agent audits caught (10-agent and 6-agent sessions both surfaced findings the orchestrator alone missed).
+
+> Use N parallel Task agents to audit this codebase. Split by directory or
+> module group (see §Audit Workflow for Hydra's 7-way partition). Each agent
+> returns HIGH/MED/LOW findings. Then synthesize.
+
+Default: 7 agents on the partitions in §Audit Workflow. Scale up to 10+ if file count justifies.
+
+### Rule 2 — Stop processes before editing their state
+
+Past failure: in a journal-reconciliation session, the agent edited
+`hydra_order_journal.json` multiple times while `hydra_agent.py` was running.
+Each edit was overwritten on the next tick.
+
+> Before editing any state file (journal, snapshot, db), check if a process
+> is actively writing to it. If yes: stop the process first, make the edit,
+> verify it persisted, then restart. Always clean the snapshot AND the
+> journal together — they must stay in sync.
+
+Hydra state-file owners: `hydra_agent.py` owns
+`hydra_session_snapshot.json`, `hydra_order_journal.json`,
+`hydra_params_*.json`, `hydra_errors.log`. The CBP sidecar
+(`cbp-runner/state/`) is owned by `cbp-runner/supervisor.py` — see
+[HYDRA_MEMORY.md](HYDRA_MEMORY.md) for kill switches.
+
+### Rule 3 — Verify claims with actual commands
+
+Past failure: agent claimed a git tag was verified without running
+`git tag -v`; another session claimed a fix worked without re-running
+the failing test.
+
+> When you claim something is 'verified', 'passing', or 'fixed', you
+> must run the actual verification command (pytest, git tag -v, curl,
+> etc.) in the same turn and paste the output. No claims without evidence.
+
+### Rule 4 — Two-phase self-audit on new code
+
+Past failure: a single-pass review of new code missed bugs that a
+self-audit caught. The journal-maintenance-tool session had the agent
+find 7 bugs in its own code across two self-audit rounds.
+
+> After you finish writing this, do a self-audit pass looking for: unused
+> imports, dead code, unhandled exceptions, null/empty crashes, deprecated
+> API usage, misleading error messages, false-positive checks. Fix
+> everything found, then do a second self-audit pass. Only then declare done.
+
+### Rule 5 — Enumerate all version-bump locations upfront
+
+Past failure: v2.6.0 release bumped version in some files but missed
+others, requiring a follow-up correction commit.
+
+> Before bumping version to X.Y.Z, run:
+> `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'`
+> and list every location. Update all of them in one commit.
+
+Hydra's canonical 7-site list is in §Version Management. The grep is the
+safety net for sites added since that list was last updated.
+
 ## Repository Structure
 
 ```
@@ -293,6 +379,28 @@ be consulted before modifying `HydraEngine` snapshot fields.
 
 See AUDIT.md for the full verification checklist.
 
+## Release & PR Workflow
+
+- For every feature/fix: create branch → tests pass → PR → verify CI green → merge → tag version
+- Bump version in ALL locations (check package.json, __init__.py, README, docs, etc. — grep for current version)
+- Use signed tags for releases
+- Never merge with red or pending CI
+
+**Hydra-specific:**
+- "Tests pass" means both CI jobs green per `.github/workflows/ci.yml`:
+  `engine-tests` (all individual `python tests/test_*.py` invocations
+  + live harness `--mode smoke` + `--mode mock` + module import smoke)
+  and `dashboard-build` (`npm run build`). The `mock` harness is the
+  mandatory gate for any PR touching the execution path.
+- "ALL locations" is the 7-site list in §Version Management below. Always
+  run `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'` BEFORE bumping, per
+  §Operating Rules → Rule 5.
+- Signed tag command: `git tag -s vX.Y.Z -m "vX.Y.Z"`. Verify with
+  `git tag -v vX.Y.Z` per §Operating Rules → Rule 3.
+- Use the `/release` skill (`.claude/skills/release/SKILL.md`) to drive
+  the full cycle — it codifies steps 1–7 with the Hydra-specific
+  expansions inline.
+
 ## Version Management
 
 When bumping the version, **all seven locations must be updated in lockstep**:
@@ -306,6 +414,30 @@ When bumping the version, **all seven locations must be updated in lockstep**:
 7. Git tag — `git tag vX.Y.Z` after merge to main
 
 Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new features, architectural changes). Bug fixes and doc tweaks use **patch** increments (e.g. 2.8.0 → 2.8.1).
+
+## Windows/WSL Gotchas
+
+- Use UTF-8 explicitly; cp1252 will crash on Unicode (emoji, special chars)
+- time.time() has low resolution on Windows — use time.perf_counter() for timing
+- Escape parentheses in .bat files, especially inside if-blocks
+- Watch for Vite/dev-server silently switching ports; verify the actual bound port
+
+**Hydra-specific:**
+- The dashboard renders regime emoji (📈 ⚠️ etc.) and the console writes
+  the portfolio block under the same theme — both will crash on cp1252.
+- `time.time()` has ~15 ms Windows resolution; using it in `BaseStream`
+  heartbeat checks or `RESTART_COOLDOWN_S=30s` accounting silently
+  miscounts. Use `time.perf_counter()`.
+- `start_hydra.bat` and `start_all.bat` use nested `if`-blocks around
+  `--resume` and the CBP sidecar launch — escape parens or the cmd
+  parser drops branches silently.
+- WSL: kraken-cli runs via
+  `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ..."`.
+  If the distro is named `Ubuntu-22.04` instead of `Ubuntu`, the
+  invocation silently routes nowhere — verify with `wsl -l -v`.
+- Vite dev server in `dashboard/` falls off `:5173` to the next free
+  port if it's taken; the dashboard WS proxy assumes `:5173`. Verify
+  the bound port in Vite's startup log before assuming hot-reload works.
 
 ## Common Pitfalls
 
@@ -323,3 +455,33 @@ Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new fe
 - Companion live execution requires explicit opt-in: `HYDRA_COMPANION_LIVE_EXECUTION=1`. Without it, companion proposals are paper/advisory only — confirm this env var is unset before any live debugging.
 - CBP sidecar failures are silent by design (Hydra falls through to JSONL). If memory writes seem to vanish, check `cbp-runner/state/ready.json` exists and `cbp-runner/state/_disabled` does NOT exist.
 - `kraken-cli` is an external dep installed in WSL Ubuntu (`source ~/.cargo/env && kraken`). The dashboard footer (`dashboard/src/App.jsx`) pins the current expected version. Check there before debugging schema errors from `--validate`.
+
+## Audit Workflow
+
+- For codebase audits, spawn parallel Task agents across file groups (pattern used successfully with 6-10 agents)
+- Categorize findings as HIGH/MED/LOW and fix in that order
+- Re-audit your own fixes before declaring done (self-audit has caught 7+ bugs in past sessions)
+
+**Hydra-specific:**
+- Natural file-group partitions for parallel agents (see §Operating Rules → Rule 1):
+  1. Engine + tuner: `hydra_engine.py`, `hydra_tuner.py`
+  2. Agent + streams: `hydra_agent.py` (contains `BaseStream` and its
+     `ExecutionStream` / `CandleStream` / `TickerStream` / `BalanceStream` /
+     `BookStream` subclasses)
+  3. AI layer: `hydra_brain.py`, `hydra_reviewer.py`, `hydra_shadow_validator.py`
+  4. Backtest platform: `hydra_backtest*.py`, `hydra_experiments.py`
+  5. Companion subsystem: `hydra_companions/` package
+  6. Dashboard: `dashboard/src/App.jsx`
+  7. Tests: `tests/` + `tests/live_harness/`
+- HIGH severity: any violation of safety invariants I1–I12
+  (see §Backtesting & Experimentation), the limit-post-only rule,
+  the 2 s rate-limit floor, the 15 % circuit breaker, the Wilder-EMA
+  RSI/ATR specification, or the companion `HYDRA_COMPANION_LIVE_EXECUTION`
+  default-off contract.
+- Two-phase self-audit is mandatory per §Operating Rules → Rule 4: after
+  fixing HIGH/MED items, re-run the partition sweep against your own diff,
+  then re-run the full §Testing block AND
+  `python tests/live_harness/harness.py --mode mock`. Only declare done
+  when phase 2 is clean.
+- Use the `/audit` skill (`.claude/skills/audit/SKILL.md`) to drive
+  the full cycle.
