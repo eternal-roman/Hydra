@@ -500,9 +500,12 @@ def compose_context_blob(agent, *, pair: Optional[str] = None,
     if bal.get("total_usd") is not None:
         parts.append(f"balance_usd=${bal.get('total_usd'):.2f}")
 
-    # Chart snapshot — gated on allowlist
-    if include_chart and pair and soul is not None and check_tool_access(soul, "get_chart_snapshot"):
+    # Chart snapshot — gated on allowlist via enforce_tool_access.
+    # ToolAccessDenied is the genuine enforcement path; other exceptions
+    # are swallowed so a transient tool fault doesn't break the blob.
+    if include_chart and pair and soul is not None:
         try:
+            enforce_tool_access(soul, "get_chart_snapshot")
             cs = get_chart_snapshot(agent, pair)
             if "error" not in cs:
                 st = cs.get("structure") or {}
@@ -512,21 +515,33 @@ def compose_context_blob(agent, *, pair: Optional[str] = None,
                     f"bb_lower_touch_ago={st.get('last_bb_lower_touch_candles_ago')} "
                     f"bb_upper_touch_ago={st.get('last_bb_upper_touch_candles_ago')}"
                 )
+        except ToolAccessDenied:
+            pass
         except Exception:
             pass
 
-    # Journal tail — gated on allowlist
-    if include_journal_tail and soul is not None and check_tool_access(soul, "get_order_journal"):
+    # Journal tail — gated on allowlist via enforce_tool_access. When
+    # access is granted but the journal is empty, emit an explicit
+    # zero-entries line so the companion cannot hallucinate "journal
+    # empty" from mere absence of a section (prior bug: Apex confidently
+    # reported an empty journal when journal wasn't injected at all).
+    if include_journal_tail and soul is not None:
         try:
+            enforce_tool_access(soul, "get_order_journal")
             jr = get_order_journal(agent, pair=pair, limit=5)
             trades = jr.get("trades") or []
+            src = jr.get("source") or "memory"
             if trades:
-                parts.append(f"[recent trades (asc chronological, n={len(trades)})]")
+                parts.append(f"[recent trades (asc chronological, n={len(trades)}, source={src})]")
                 for t in trades:
                     parts.append(
                         f"  {t.get('placed_at')} {t.get('side')} {t.get('amount')} @ "
                         f"{t.get('limit_price')} state={t.get('state')} conf={t.get('confidence')}"
                     )
+            else:
+                parts.append(f"[journal: 0 entries (source={src})]")
+        except ToolAccessDenied:
+            pass
         except Exception:
             pass
 

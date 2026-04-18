@@ -205,7 +205,7 @@
       { "intent": "trade_proposal", "match": ["/\\b(buy|sell|enter|short|long|open|close)\\b.*\\b(sol|btc|eth)\\b/i"] },
       { "intent": "ladder_proposal", "match": ["/\\b(ladder|scale in|scale out|rungs|dca)\\b/i"] },
       { "intent": "teaching_explanation", "match": ["/\\b(explain|how does|what is|teach me|why does|help me understand)\\b/i"] },
-      { "intent": "market_state_query", "match": ["/\\b(what's (happening|going on)|how's|tape|regime|current state|show me|positions|balance)\\b/i"] },
+      { "intent": "market_state_query", "match": ["/\\b(what's (happening|going on)|how's|tape|regime|current state|show me|positions|balance|journal|my (trades|orders|fills)|prior trades|past trades|trade history|order history|look at my (trades|orders|journal)|recent (trades|fills|orders)|what (have|did) i (trade|trad))\\b/i"] },
       { "intent": "chart_analysis", "match": ["/\\b(chart|candles|tape read|15m|1h|daily|read the chart|how does it look on|what's the setup|structural read|bb touch|rsi (range|reading|now)|atr expansion|swing (high|low))\\b/i"] },
       { "intent": "banter_humor", "match": ["/\\b(lol|lmao|bruh|bro|fam|dude|haha|😂|💀)\\b/i"] }
     ],

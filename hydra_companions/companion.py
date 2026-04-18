@@ -126,7 +126,8 @@ class Companion:
             "chart_analysis", "trade_proposal", "ladder_proposal",
         }
         include_journal = intent_result.intent in {
-            "chart_analysis", "trade_proposal",
+            "chart_analysis", "trade_proposal", "ladder_proposal",
+            "market_state_query", "idle_proactive_nudge",
         }
         soul_for_gate = {
             "id": self.soul.id,
