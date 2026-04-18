@@ -838,6 +838,260 @@ class ThesisTracker:
         self.save()
         return True
 
+    # ─── Document + proposal handling (Phase C) ───────────────────
+
+    def _pending_dir(self) -> str:
+        return os.path.join(self._save_dir, PENDING_DIRNAME)
+
+    def _documents_dir(self) -> str:
+        return os.path.join(self._save_dir, DOCUMENTS_DIRNAME)
+
+    def upload_document(
+        self,
+        filename: str,
+        content: str,
+        doc_type: str = "other",
+    ) -> Optional[Dict[str, Any]]:
+        """Save a document to hydra_thesis_documents/ and append a
+        DocumentRef to the library. Returns the DocumentRef dict on
+        success, None on failure or disabled."""
+        if self._disabled:
+            return None
+        if not content or not isinstance(content, str):
+            return None
+        safe_name = (filename or "note.md").replace("/", "_").replace("\\", "_")[:120]
+        doc_id = _ulid()
+        # Persist the raw content to disk so a processor worker can pick
+        # it up later if it's offline at upload time.
+        docs_dir = self._documents_dir()
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except OSError as e:
+            print(f"  [THESIS] documents dir create failed: {type(e).__name__}: {e}")
+            return None
+        file_path = os.path.join(docs_dir, f"{doc_id}__{safe_name}")
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError as e:
+            print(f"  [THESIS] document save failed: {type(e).__name__}: {e}")
+            return None
+        ref = asdict(DocumentRef(
+            doc_id=doc_id,
+            filename=safe_name,
+            uploaded_at=_iso_now(),
+            file_path=file_path,
+            doc_type=str(doc_type or "other")[:64],
+        ))
+        library = list(self._state.get("document_library", []) or [])
+        library.append(ref)
+        self._state["document_library"] = library
+        self.save()
+        return dict(ref)
+
+    def write_pending_proposal(self, proposal: Dict[str, Any]) -> Optional[str]:
+        """Persist a ProposedThesisUpdate-shape dict to hydra_thesis_pending/.
+        Called by the processor worker via its on_proposal callback. Returns
+        the file path on success. Safe when disabled (no-op)."""
+        if self._disabled or not isinstance(proposal, dict):
+            return None
+        pending_dir = self._pending_dir()
+        try:
+            os.makedirs(pending_dir, exist_ok=True)
+        except OSError as e:
+            print(f"  [THESIS] pending dir create failed: {type(e).__name__}: {e}")
+            return None
+        pid = proposal.get("proposal_id") or _ulid()
+        proposal["proposal_id"] = pid
+        path = os.path.join(pending_dir, f"{pid}.json")
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(proposal, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"  [THESIS] pending proposal write failed: {type(e).__name__}: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return None
+        return path
+
+    def list_pending_proposals(self) -> List[Dict[str, Any]]:
+        """Read all proposals in hydra_thesis_pending/. Returns empty when
+        disabled OR no directory exists yet. Caps at MAX_PROPOSAL_RETAIN."""
+        if self._disabled:
+            return []
+        pending_dir = self._pending_dir()
+        if not os.path.isdir(pending_dir):
+            return []
+        out: List[Dict[str, Any]] = []
+        try:
+            names = sorted(os.listdir(pending_dir))
+        except OSError:
+            return []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(pending_dir, name), "r", encoding="utf-8") as f:
+                    out.append(json.load(f))
+            except Exception:
+                continue
+        return out[-200:]
+
+    def approve_proposal(
+        self, proposal_id: str, user_notes: Optional[str] = None,
+    ) -> bool:
+        """Apply a pending proposal to the thesis state and archive the file.
+        Returns True on success, False when the proposal is missing,
+        malformed, disabled, or violates a hard rule (see _apply_proposal)."""
+        if self._disabled or not proposal_id:
+            return False
+        path = os.path.join(self._pending_dir(), f"{proposal_id}.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                proposal = json.load(f)
+        except Exception as e:
+            print(f"  [THESIS] approve load failed ({type(e).__name__}: {e})")
+            return False
+        applied = self._apply_proposal(proposal)
+        if not applied:
+            return False
+        proposal["status"] = "approved"
+        proposal["user_decision_at"] = _iso_now()
+        proposal["user_notes"] = user_notes
+        # Atomic move: write archived version, remove pending
+        self._archive_proposal(proposal_id, proposal)
+        self.save()
+        return True
+
+    def reject_proposal(
+        self, proposal_id: str, user_notes: Optional[str] = None,
+    ) -> bool:
+        """Archive a pending proposal WITHOUT applying it."""
+        if self._disabled or not proposal_id:
+            return False
+        path = os.path.join(self._pending_dir(), f"{proposal_id}.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                proposal = json.load(f)
+        except Exception:
+            proposal = {"proposal_id": proposal_id, "status": "rejected"}
+        proposal["status"] = "rejected"
+        proposal["user_decision_at"] = _iso_now()
+        proposal["user_notes"] = user_notes
+        self._archive_proposal(proposal_id, proposal)
+        return True
+
+    def _archive_proposal(self, proposal_id: str, proposal: Dict[str, Any]) -> None:
+        """Remove from hydra_thesis_pending/ — for Phase C we keep things
+        simple and just delete the pending file. A future phase can move
+        it under a processed/ sibling for audit retention."""
+        path = os.path.join(self._pending_dir(), f"{proposal_id}.json")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def _apply_proposal(self, proposal: Dict[str, Any]) -> bool:
+        """Merge a proposal's fields into the thesis state.
+
+        Contract:
+        - posterior_shift replaces the entire Posterior object
+        - checklist_updates merge by key (dict.update semantics)
+        - proposed_intents each go through add_intent (which applies the
+          knob cap + clamps)
+        - new_evidence appended to evidence_log (bounded)
+        - posture_recommendation applied ONLY when user approves — this
+          approval IS the explicit human action required for transitions
+        - Hard rules are NEVER mutated by a proposal — ledger_shield_btc,
+          no_altcoin_gate, tax_friction_min_realized_pnl_usd are read-only
+          to Grok. Any attempt is silently dropped.
+        """
+        if not isinstance(proposal, dict):
+            return False
+        try:
+            shift = proposal.get("posterior_shift")
+            if isinstance(shift, dict):
+                reg = shift.get("regime")
+                conf = shift.get("confidence")
+                if reg:
+                    post = self._state.get("posterior") or asdict(Posterior())
+                    post["regime"] = str(reg)
+                    if conf is not None:
+                        try:
+                            post["confidence"] = _clamp(float(conf), 0.0, 1.0)
+                        except (TypeError, ValueError):
+                            pass
+                    self._state["posterior"] = post
+
+            cu = proposal.get("checklist_updates") or {}
+            if isinstance(cu, dict):
+                cl = self._state.get("checklist") or {}
+                for k, v in cu.items():
+                    if not isinstance(v, dict):
+                        continue
+                    existing = cl.get(k) or asdict(ChecklistItem(key=str(k)))
+                    status = v.get("status")
+                    if status in (s.value for s in ChecklistItemStatus):
+                        existing["status"] = status
+                    notes = v.get("notes")
+                    if isinstance(notes, str):
+                        existing["notes"] = notes[:500]
+                    existing["last_movement"] = _iso_now()
+                    cl[k] = existing
+                self._state["checklist"] = cl
+
+            intents = proposal.get("proposed_intents") or []
+            if isinstance(intents, list):
+                for i in intents:
+                    if not isinstance(i, dict):
+                        continue
+                    self.add_intent(
+                        prompt_text=i.get("prompt_text", ""),
+                        pair_scope=i.get("pair_scope"),
+                        priority=i.get("priority", 3),
+                        expires_at=i.get("expires_at"),
+                        author="thesis_processor:grok",
+                    )
+
+            ev_in = proposal.get("new_evidence") or []
+            if isinstance(ev_in, list):
+                ev_log = list(self._state.get("evidence_log", []) or [])
+                for e in ev_in:
+                    if not isinstance(e, dict):
+                        continue
+                    ev_log.append(asdict(Evidence(
+                        evidence_id=_ulid(),
+                        timestamp=_iso_now(),
+                        category=str(e.get("category", "MACRO"))[:32],
+                        source=str(e.get("source", "grok_proposal"))[:128],
+                        description=str(e.get("description", ""))[:500],
+                        direction=str(e.get("direction", "neutral"))[:16],
+                        magnitude=_clamp(float(e.get("magnitude", 0.0) or 0.0), 0.0, 1.0),
+                    )))
+                # Bound in-memory log
+                if len(ev_log) > EVIDENCE_LOG_MAX_IN_MEMORY:
+                    ev_log = ev_log[-EVIDENCE_LOG_MAX_IN_MEMORY:]
+                self._state["evidence_log"] = ev_log
+
+            posture_rec = proposal.get("posture_recommendation")
+            if posture_rec in (p.value for p in Posture):
+                self._state["posture"] = posture_rec
+
+            return True
+        except Exception as e:
+            print(f"  [THESIS] _apply_proposal failed ({type(e).__name__}: {e})")
+            return False
+
     def update_intent(self, intent_id: str, patch: Dict[str, Any]) -> bool:
         """Edit an existing intent. Only prompt_text, pair_scope, priority,
         expires_at are mutable — intent_id, created_at, author are frozen."""

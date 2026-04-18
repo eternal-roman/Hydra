@@ -6,6 +6,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.2] — 2026-04-18
+
+**Golden Unicorn Phase C** — Grok 4 reasoning document processor. Users
+can now paste research artifacts (Cowen memos, FOMC minutes, custom
+analyses) into the THESIS tab and Grok synthesizes each into a structured
+`ProposedThesisUpdate` awaiting human approval. Nothing auto-applies;
+every proposal lands in `hydra_thesis_pending/` and the user explicitly
+approves or rejects from the dashboard.
+
+Default-safe: the processor starts only when `XAI_API_KEY` is set AND
+`HYDRA_THESIS_PROCESSOR_DISABLED != 1` AND the thesis layer is enabled.
+Budget cap defaults to $5/day (independent of the $10/day brain live
+budget so experimentation never stalls live trading).
+
+### Added
+- `hydra_thesis_processor.py` — `ThesisProcessorWorker` daemon class with
+  bounded queue, UTC-daily cost accounting, $10/day disclosure, failure
+  isolation. Tolerant JSON parser strips markdown fences. A defensive
+  gate forces `requires_human = true` whenever posterior-shift confidence
+  deviates > 0.30 from the 0.5 baseline — regime-change claims never
+  auto-apply regardless of knob state.
+- `ThesisTracker.upload_document / write_pending_proposal /
+  list_pending_proposals / approve_proposal / reject_proposal` —
+  the full document ingestion + proposal-approval workflow. Approved
+  proposals update posterior, checklist, intents, evidence, and posture
+  atomically. Hard rules (ledger shield, tax floor, no-altcoin) are
+  NEVER mutated by a proposal — the Grok system prompt forbids it and
+  `_apply_proposal` ignores any `hard_rules` field regardless.
+- Four new WS routes: `thesis_upload_document`, `thesis_list_proposals`,
+  `thesis_approve_proposal`, `thesis_reject_proposal`. Each broadcasts
+  an updated `thesis_state`. The processor worker pushes
+  `thesis_proposal_pending` as soon as Grok returns a parsed JSON.
+- Dashboard: the THESIS tab's **Document Library** panel is now a
+  functional composer (filename + doc_type + paste area) wired to the
+  upload route. The **Pending Proposals** panel renders Grok's reasoning
+  verbatim with approve/reject buttons and a `REQUIRES HUMAN` badge for
+  big-shift proposals.
+- `tests/test_thesis_phase_c.py` (19 tests) — document upload, proposal
+  write/list, approve applies each update class, reject archives without
+  applying, hard-rule immutability, unparseable response → failed
+  proposal stub, budget-cap blocking, and an end-to-end worker run with
+  a scripted xAI client. No network traffic in tests.
+
+### Changed
+- `HydraAgent.__init__` spawns `ThesisProcessorWorker` alongside the
+  tracker when keys and env flags allow. Worker lifecycle is fully
+  isolated — any construction or runtime failure leaves the live agent
+  untouched (daemon thread, all exceptions swallowed + logged).
+- Footer `HYDRA v2.13.1` → `HYDRA v2.13.2`;
+  `hydra_backtest.HYDRA_VERSION` → `2.13.2`.
+
+### Safety
+- Posterior shifts whose confidence deviates > 0.30 from 0.5 force
+  `requires_human = true` regardless of the model's self-report. The
+  gate is in `_force_human_gate_on_big_shift` — defensive, not
+  prompt-dependent.
+- Hard rules are read-only to Grok. `_apply_proposal` processes only
+  posterior_shift, checklist_updates, proposed_intents, new_evidence,
+  and posture_recommendation — any `hard_rules` key on the proposal is
+  silently dropped (test `test_proposal_cannot_mutate_hard_rules`).
+- Per-document byte cap (`MAX_DOC_TEXT_BYTES = 64 KB`) prevents prompt
+  inflation from a large paste.
+- Processor runs on a separate cost ledger from the live brain so
+  experimentation here cannot trigger the brain's $10/day enforcement.
+
+---
+
 ## [2.13.1] — 2026-04-18
 
 **Golden Unicorn Phase B** — brain augmentation. The analyst now reads the

@@ -78,6 +78,9 @@ jobs:
       - name: Run Thesis Phase B brain integration (v2.13.1)
         run: python tests/test_thesis_phase_b.py
 
+      - name: Run Thesis Phase C processor + proposal workflow (v2.13.2)
+        run: python tests/test_thesis_phase_c.py
+
       - name: Run live-execution harness (smoke + mock)
         run: |
           python tests/live_harness/harness.py --mode smoke
@@ -92,6 +95,7 @@ jobs:
           python -c "import hydra_tuner; print('hydra_tuner OK')"
           python -c "import hydra_brain; print('hydra_brain OK')"
           python -c "import hydra_thesis; print('hydra_thesis OK')"
+          python -c "import hydra_thesis_processor; print('hydra_thesis_processor OK')"
           python -c "import hydra_agent; print('hydra_agent OK')"
 
   dashboard-build:

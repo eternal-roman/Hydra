@@ -137,6 +137,9 @@ hydra_shadow_validator.py  — Single-slot FIFO live-parallel validation before 
 hydra_thesis.py            — Thesis layer (v2.13.0+): ThesisTracker, Ladder, IntentPrompt,
                              Evidence dataclasses. Golden Unicorn initiative — slow-moving
                              persistent worldview + user-authored intent. See §Thesis Layer.
+hydra_thesis_processor.py  — Grok 4 reasoning document processor (v2.13.2+). Daemon worker
+                             that consumes user-uploaded research and produces pending
+                             ProposedThesisUpdate JSONs awaiting human approval.
 journal_maintenance.py     — Order journal compaction / rotation
 hydra_journal_migrator.py  — One-shot legacy hydra_trades_live.json → hydra_order_journal.json migration
 dashboard/src/App.jsx      — React dashboard (single-file, all inline styles)
@@ -207,6 +210,16 @@ that makes the brain smarter, not more restrictive.
   enforced via FIFO eviction. `on_tick` sweeps expired prompts once per
   tick. Three WS routes wired: `thesis_create_intent`, `thesis_delete_intent`,
   `thesis_update_intent`.
+- Document processor (v2.13.2, Phase C): `hydra_thesis_processor.py` +
+  `ThesisProcessorWorker` (daemon). Pulls uploaded research from a
+  bounded queue, calls **Grok 4 reasoning** (xAI) to synthesize
+  `ProposedThesisUpdate` JSON, writes to `hydra_thesis_pending/`. Nothing
+  auto-applies. Budget cap: `knobs.grok_processing_budget_usd_per_day`
+  (default $5). Enabled only when `XAI_API_KEY` set AND
+  `HYDRA_THESIS_PROCESSOR_DISABLED != 1`. Big-shift proposals
+  (|posterior_shift.confidence − 0.5| > 0.30) force `requires_human = true`
+  in code — defensive, not prompt-dependent. Hard rules NEVER mutated
+  by a proposal (`_apply_proposal` drops any `hard_rules` key).
 - Snapshot integration: `_save_snapshot` writes `thesis_state`;
   `_load_snapshot` calls `thesis.restore(...)`. Missing key is fail-soft.
 - WS routes: `thesis_get_state`, `thesis_update_knobs`,
@@ -385,6 +398,7 @@ Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumula
 - `HYDRA_BACKTEST_DISABLED=1` — kill switch. Disables worker pool, WS handlers reject backtest messages.
 - `HYDRA_BRAIN_TOOLS_ENABLED=1` — enables Anthropic tool-use for Analyst + Risk Manager (Grok stays text-only). Off by default; when on, per-agent quotas apply.
 - `HYDRA_THESIS_DISABLED=1` — kill switch for the thesis layer (§Thesis Layer). Tracker returns inert defaults and `save()` is a no-op; `tests/test_thesis_drift.py` enforces v2.12.5 bit-identical behavior on every commit.
+- `HYDRA_THESIS_PROCESSOR_DISABLED=1` — disable Grok 4 document processor (v2.13.2+). Worker never starts; upload routes still persist the document to `hydra_thesis_documents/` but no proposal is generated.
 
 ### Dashboard
 `dashboard/src/App.jsx` gained tab switcher (LIVE / BACKTEST / COMPARE), `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, and `ReviewPanel`. Shared primitives `RegimeBadge` and `SignalChip` prevent drift between LIVE and observer regime/signal styling. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU-ish) to prevent long-session memory growth. Typed-message fallback to `applyLiveState` is gated on absence of a `type` field AND presence of a `LIVE_STATE_KEYS` member — a malformed typed message can't corrupt LIVE. `compareInFlight` + `viewInFlight` states debounce repeat clicks. `DashboardBroadcaster` in `hydra_agent.py` refactored with `compat_mode=True` dual-emit (raw state + `{type, data}` wrapper) for one-release backward compatibility.
