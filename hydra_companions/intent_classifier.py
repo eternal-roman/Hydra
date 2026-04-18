@@ -26,7 +26,12 @@ class IntentResult:
 class IntentClassifier:
     def __init__(self, config_path: Optional[Path] = None):
         path = config_path or ROUTING_CONFIG
-        cfg = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"IntentClassifier: failed to load {path}: {type(e).__name__}: {e}"
+            ) from e
         classifier_cfg = cfg.get("intent_classifier", {})
         self._rules = self._compile_rules(classifier_cfg.get("heuristic_rules", []))
         self._default_intent = "small_talk"

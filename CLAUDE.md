@@ -2,27 +2,18 @@
 
 > **AGENT HARD REQUIREMENT — CLAUDE.md MAINTENANCE**
 >
-> This file is load-bearing. Any agent (Claude Code, Cursor, etc.) that
-> modifies the codebase MUST update this file in the same change when:
-> - A module is added, removed, renamed, or split (Repository Structure)
-> - A launcher script is added or removed (Build & Run)
+> Load-bearing. Any agent modifying the codebase MUST update this file in the same change when:
+> - A module is added/removed/renamed/split (Repository Structure)
+> - A launcher script is added/removed (Build & Run)
 > - A version-bump site is added/removed (Version Management)
-> - A new env var, kill switch, or opt-in flag is introduced (Companion
->   Subsystem / Common Pitfalls)
-> - A subsystem changes ownership of state files (Verification Discipline)
+> - A new env var, kill switch, or opt-in flag is introduced (Companion / Common Pitfalls)
+> - A subsystem changes state-file ownership (Verification Discipline)
 > - A safety invariant or hard rule changes (Common Pitfalls / Audit Workflow)
 > - The CI gate changes (Testing / Release & PR Workflow)
 >
-> If you cannot update this file in the same commit, leave a `TODO(claude-md):`
-> marker in the relevant code change AND a matching `<!-- TODO(claude-md): -->`
-> comment in this file. Stale CLAUDE.md is treated as a CI failure waiting
-> to happen — do not let drift accumulate.
+> If not updatable in the same commit, leave a `TODO(claude-md):` marker in code AND a matching `<!-- TODO(claude-md): -->` here. Stale CLAUDE.md is treated as a CI failure waiting to happen.
 >
-> Companion specs (`docs/COMPANION_SPEC.md`, `HYDRA_MEMORY.md`,
-> `docs/BACKTEST_SPEC.md`) are the authoritative deep references. CLAUDE.md
-> is the agent-facing index — it must point at them, not duplicate them.
-
-This file provides context for Claude Code and other AI agents working on this repository.
+> Deep references live in `docs/COMPANION_SPEC.md`, `HYDRA_MEMORY.md`, `docs/BACKTEST_SPEC.md`. CLAUDE.md is the agent-facing index — point, don't duplicate.
 
 ## Project Overview
 
@@ -36,18 +27,10 @@ HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market co
 - When a fix touches multi-file state (journal + snapshot + config), explicitly enumerate all files to update
 
 **Hydra-specific:**
-- Stop `hydra_agent.py` and the `start_hydra.bat` watchdog before editing
-  `hydra_session_snapshot.json`, `hydra_order_journal.json`,
-  `hydra_params_*.json`, or `hydra_errors.log` — the live agent rewrites them.
-  See §Operating Rules → Rule 2 for the binding form.
-- Verification commands: the CI invocation pattern in `.github/workflows/ci.yml`
-  (individual `python tests/test_*.py` runs), `python tests/live_harness/harness.py --mode mock`,
-  and `python hydra_engine.py` (synthetic demo). See §Operating Rules → Rule 3.
-- Multi-file state for a typical engine change: snapshot + journal +
-  `hydra_params_<pair>.json` (one per traded pair) + `hydra_errors.log`.
-- The `.claude/hooks/post-edit.sh` hook runs a path-scoped verification step
-  after every Edit/Write tool use. Set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to
-  silence it during heavy refactors. Hook failures are advisory only.
+- Stop `hydra_agent.py` + `start_hydra.bat` watchdog before editing `hydra_session_snapshot.json`, `hydra_order_journal.json`, `hydra_params_*.json`, or `hydra_errors.log` (live agent rewrites). See Rule 2 for binding form.
+- Verification commands: CI invocation in `.github/workflows/ci.yml` (individual `python tests/test_*.py`), `python tests/live_harness/harness.py --mode mock`, `python hydra_engine.py` (synthetic demo). See Rule 3.
+- Typical engine-change state surface: snapshot + journal + `hydra_params_<pair>.json` (per pair) + `hydra_errors.log`.
+- `.claude/hooks/post-edit.sh` runs path-scoped verification after every Edit/Write. Silence with `HYDRA_POSTEDIT_HOOK_DISABLED=1` during heavy refactors. Hook failures advisory only.
 
 ## Operating Rules
 
@@ -56,38 +39,28 @@ earned through a documented past failure and is non-negotiable.
 
 ### Rule 1 — Parallel Task agents for any audit > 20 files
 
-Past failure: single-pass review missed 7+ bugs that parallel-agent audits caught (10-agent and 6-agent sessions both surfaced findings the orchestrator alone missed).
+Past failure: single-pass review missed 7+ bugs that parallel-agent audits caught.
 
 > Use N parallel Task agents to audit this codebase. Split by directory or
 > module group (see §Audit Workflow for Hydra's 7-way partition). Each agent
 > returns HIGH/MED/LOW findings. Then synthesize.
 
-Default: 7 agents on the partitions in §Audit Workflow. Scale up to 10+ if file count justifies.
+Default: 7 agents on §Audit Workflow partitions. Scale to 10+ if file count justifies.
 
 ### Rule 2 — Stop processes before editing their state
 
-Past failure: in a journal-reconciliation session, the agent edited
-`hydra_order_journal.json` multiple times while `hydra_agent.py` was running.
-Each edit was overwritten on the next tick.
+Past failure: agent edited `hydra_order_journal.json` repeatedly while `hydra_agent.py` was running; each edit was overwritten on next tick.
 
 > Before editing any state file (journal, snapshot, db), check if a process
 > is actively writing to it. If yes: stop the process first, make the edit,
 > verify it persisted, then restart. Always clean the snapshot AND the
 > journal together — they must stay in sync.
 
-Hydra state-file owners: `hydra_agent.py` owns
-`hydra_session_snapshot.json`, `hydra_order_journal.json`,
-`hydra_params_*.json`, `hydra_errors.log`, `hydra_thesis.json`,
-`hydra_thesis_documents/`, `hydra_thesis_processed/`,
-`hydra_thesis_pending/`, `hydra_thesis_evidence_archive/`. The CBP sidecar
-(`cbp-runner/state/`) is owned by `cbp-runner/supervisor.py` — see
-[HYDRA_MEMORY.md](HYDRA_MEMORY.md) for kill switches.
+State-file owners: `hydra_agent.py` owns `hydra_session_snapshot.json`, `hydra_order_journal.json`, `hydra_params_*.json`, `hydra_errors.log`, `hydra_thesis.json`, `hydra_thesis_{documents,processed,pending,evidence_archive}/`. CBP sidecar (`cbp-runner/state/`) is owned by `cbp-runner/supervisor.py` — kill switches in [HYDRA_MEMORY.md](HYDRA_MEMORY.md).
 
 ### Rule 3 — Verify claims with actual commands
 
-Past failure: agent claimed a git tag was verified without running
-`git tag -v`; another session claimed a fix worked without re-running
-the failing test.
+Past failure: agent claimed a git tag was verified without running `git tag -v`; another claimed a fix worked without re-running the failing test.
 
 > When you claim something is 'verified', 'passing', or 'fixed', you
 > must run the actual verification command (pytest, git tag -v, curl,
@@ -95,9 +68,7 @@ the failing test.
 
 ### Rule 4 — Two-phase self-audit on new code
 
-Past failure: a single-pass review of new code missed bugs that a
-self-audit caught. The journal-maintenance-tool session had the agent
-find 7 bugs in its own code across two self-audit rounds.
+Past failure: single-pass review missed 7+ bugs across two self-audit rounds in the journal-maintenance-tool session.
 
 > After you finish writing this, do a self-audit pass looking for: unused
 > imports, dead code, unhandled exceptions, null/empty crashes, deprecated
@@ -106,15 +77,13 @@ find 7 bugs in its own code across two self-audit rounds.
 
 ### Rule 5 — Enumerate all version-bump locations upfront
 
-Past failure: v2.6.0 release bumped version in some files but missed
-others, requiring a follow-up correction commit.
+Past failure: v2.6.0 bumped version in some files but missed others, requiring a follow-up commit.
 
 > Before bumping version to X.Y.Z, run:
 > `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'`
 > and list every location. Update all of them in one commit.
 
-Hydra's canonical 7-site list is in §Version Management. The grep is the
-safety net for sites added since that list was last updated.
+Canonical 7-site list in §Version Management; the grep is the safety net for sites added since.
 
 ## Repository Structure
 
@@ -124,9 +93,8 @@ hydra_agent.py             — Live agent (Kraken CLI via WSL, WebSocket broadca
                              order reconciler, session snapshot + --resume)
 hydra_brain.py             — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
 hydra_tuner.py             — Self-tuning parameters via exponential smoothing of regime/signal thresholds
-hydra_companions/          — Companion subsystem package (chat, proposals, nudges, ladder watcher,
-                             live executor, CBP memory client, soul JSONs under souls/).
-                             Module count not pinned — see docs/COMPANION_SPEC.md.
+hydra_companions/          — Companion subsystem (chat, proposals, nudges, ladder watcher, live
+                             executor, CBP client, souls/). See docs/COMPANION_SPEC.md.
 hydra_backtest.py          — Core replay engine (see Backtesting & Experimentation section)
 hydra_backtest_metrics.py  — Bootstrap CI, walk-forward, Monte Carlo, regime-conditioned P&L
 hydra_backtest_server.py   — BacktestWorkerPool + WS message handlers
@@ -134,12 +102,10 @@ hydra_backtest_tool.py     — Anthropic tool-use schemas + dispatcher + quota t
 hydra_experiments.py       — Experiment dataclass + ExperimentStore + presets + sweep/compare
 hydra_reviewer.py          — AI Reviewer (7 code-enforced rigor gates, PR-draft only)
 hydra_shadow_validator.py  — Single-slot FIFO live-parallel validation before param writes
-hydra_thesis.py            — Thesis layer (v2.13.0+): ThesisTracker, Ladder, IntentPrompt,
-                             Evidence dataclasses. Golden Unicorn initiative — slow-moving
-                             persistent worldview + user-authored intent. See §Thesis Layer.
-hydra_thesis_processor.py  — Grok 4 reasoning document processor (v2.13.2+). Daemon worker
-                             that consumes user-uploaded research and produces pending
-                             ProposedThesisUpdate JSONs awaiting human approval.
+hydra_thesis.py            — Thesis layer (v2.13.0+): ThesisTracker, Ladder, IntentPrompt, Evidence.
+                             Golden Unicorn — persistent worldview + user intent. See §Thesis Layer.
+hydra_thesis_processor.py  — Grok 4 reasoning document processor (v2.13.2+). Daemon: ingests
+                             user research → ProposedThesisUpdate JSON awaiting human approval.
 journal_maintenance.py     — Order journal compaction / rotation
 hydra_journal_migrator.py  — One-shot legacy hydra_trades_live.json → hydra_order_journal.json migration
 dashboard/src/App.jsx      — React dashboard (single-file, all inline styles)
@@ -171,12 +137,11 @@ Per-user `.claude/settings.local.json` and runtime `.claude/scheduled_tasks.lock
 
 ## Thesis Layer (v2.13.0+, Golden Unicorn)
 
-Slow-moving persistent worldview + user-authored intent that sits *above*
-the per-tick engine and the stateless 3-agent brain. Phase A (this
-release) ships the foundational surface; Phases B–E extend brain context,
-add Grok 4 reasoning document processing, the Ladder primitive, and
-opt-in posture enforcement. Module: `hydra_thesis.py`. Plan file:
+Slow-moving persistent worldview + user-authored intent above the per-tick
+engine and the stateless 3-agent brain. Shipped A→E across v2.13.0–v2.13.4.
+Modules: `hydra_thesis.py` + `hydra_thesis_processor.py`. Plan file:
 `~/.claude/plans/athena-shared-some-interesting-sleepy-seal.md`.
+Authoritative design spec: `docs/THESIS_SPEC.md`. User runbook: `docs/THESIS.md`.
 
 Design stance — **Hydra is the flywheel, not the shield.** The thesis
 layer augments brain reasoning and surfaces user intent. It does not
@@ -185,83 +150,23 @@ ledger shield (0.20 BTC, user's long-term hold), tax friction floor
 ($50 realized gain), no-altcoin gate. Everything else is advisory context
 that makes the brain smarter, not more restrictive.
 
-- State file: `hydra_thesis.json` (atomic `.tmp` → `os.replace()` writes
-  mirroring `_save_snapshot`). Gitignored. Subdirs
-  `hydra_thesis_documents/` / `hydra_thesis_processed/` /
-  `hydra_thesis_pending/` / `hydra_thesis_evidence_archive/` are lazy,
-  also gitignored.
-- Schema version: `THESIS_SCHEMA_VERSION = "1.0.0"` in `hydra_thesis.py`;
-  bump independently when `ThesisState` JSON schema changes.
-- Brain wiring (v2.13.1, Phase B): `HydraAgent._apply_brain` injects
-  `state["thesis_context"]` → `HydraBrain._format_thesis_context` prepends
-  a THESIS CONTEXT block to `ANALYST_PROMPT`. Active intent prompts are
-  surfaced priority-ranked and scoped by pair. `BrainDecision.thesis_alignment`
-  carries `{in_thesis, intent_prompts_consulted, evidence_delta,
-  posterior_shift_request}` back to the agent; stamped onto journal entries
-  as `decision.thesis_alignment` alongside `decision.thesis_posture` and
-  `decision.thesis_intents_active`.
-- Size multiplier (v2.13.1): `thesis.size_hint_for(pair, signal)` returns
-  1.0 under default advisory enforcement — the brain's `size_multiplier`
-  flows to Kelly unchanged. Only `posture_enforcement == "binding"`
-  (Phase E, opt-in) derives a non-unity hint from `knobs.size_hint_range`
-  × posture. Final product is clamped `[0.0, 1.5]` in `_apply_brain`.
-- Intent prompts (v2.13.1): `ThesisTracker.add_intent / remove_intent /
-  update_intent / list_intents`. `intent_prompt_max_active` (default 5)
-  enforced via FIFO eviction. `on_tick` sweeps expired prompts once per
-  tick. Three WS routes wired: `thesis_create_intent`, `thesis_delete_intent`,
-  `thesis_update_intent`.
-- Posture enforcement (v2.13.4, Phase E — opt-in via `knobs.posture_enforcement = "binding"`):
-  per-posture daily entry caps via `knobs.max_daily_entries_by_posture`
-  (defaults PRESERVATION=2, TRANSITION=4, ACCUMULATION=None). When
-  binding, the agent calls `thesis.check_posture_restriction(pair, side)`
-  before execute_signal; a false `allow` SKIPs (not BLOCKs) the trade,
-  logs, broadcasts `thesis_posture_restriction`, and lets the tick
-  continue. No journal entry for a skipped placement. SKIP ≠ BLOCK —
-  BLOCK stays reserved for hard rules. Counter is per-pair per-UTC-day;
-  `record_entry` prunes yesterday on every call so state stays bounded.
-- Ladder primitive (v2.13.3, Phase D — feature-flagged via `HYDRA_THESIS_LADDERS=1`):
-  `ThesisTracker.create_ladder / list_ladders / cancel_ladder /
-  match_rung / record_rung_placement / record_rung_fill /
-  check_stop_loss`. Per-pair cap via `knobs.max_active_ladders_per_pair`.
-  Rung match uses 0.5% price tolerance; `_place_order` calls
-  `_journal_ladder_stamp(pair, side, price)` to stamp
-  `decision.ladder_id / rung_idx / adhoc` on every placement. Stop-loss
-  is ADVISORY: on breach with any FILLED rung the ladder flips to
-  STOPPED_OUT, pending rungs CANCELLED; filled positions are NOT
-  auto-sold (deliberate non-goal). Expiry sweep runs per-tick when
-  the flag is set; `convert_to_market` variant is logged + treated as
-  cancel in Phase D. Two WS routes: `thesis_create_ladder`,
-  `thesis_cancel_ladder`.
-- Document processor (v2.13.2, Phase C): `hydra_thesis_processor.py` +
-  `ThesisProcessorWorker` (daemon). Pulls uploaded research from a
-  bounded queue, calls **Grok 4 reasoning** (xAI) to synthesize
-  `ProposedThesisUpdate` JSON, writes to `hydra_thesis_pending/`. Nothing
-  auto-applies. Budget cap: `knobs.grok_processing_budget_usd_per_day`
-  (default $5). Enabled only when `XAI_API_KEY` set AND
-  `HYDRA_THESIS_PROCESSOR_DISABLED != 1`. Big-shift proposals
-  (|posterior_shift.confidence − 0.5| > 0.30) force `requires_human = true`
-  in code — defensive, not prompt-dependent. Hard rules NEVER mutated
-  by a proposal (`_apply_proposal` drops any `hard_rules` key).
-- Snapshot integration: `_save_snapshot` writes `thesis_state`;
-  `_load_snapshot` calls `thesis.restore(...)`. Missing key is fail-soft.
-- WS routes: `thesis_get_state`, `thesis_update_knobs`,
-  `thesis_update_posture`, `thesis_update_hard_rules`. All handlers
-  broadcast the new `thesis_state` message so every client stays in sync.
-- Dashboard: new **THESIS** tab sibling to LIVE / BACKTEST / COMPARE.
-  Phase A is functional for posture + knobs + hard rules + deadline;
-  Phase B–E sub-panels are scaffolded placeholders.
-- Kill switch: `HYDRA_THESIS_DISABLED=1` (see §Env flags).
-- Hard-rule floor enforcement: `ledger_shield_btc` cannot be lowered
-  below 0.20 BTC via the API — a dashboard typo or malicious WS payload
-  cannot reduce the protected BTC. Test in `test_thesis_tracker.py`.
-- Drift invariant: `tests/test_thesis_drift.py` enforces that
-  `context_for` returns `None` and `size_hint_for` returns `1.0` in both
-  disabled and default-enabled modes in Phase A. Any future phase that
-  begins influencing the tick MUST preserve this for the disabled case.
+- State: `hydra_thesis.json` (atomic `.tmp` → `os.replace()`, mirrors `_save_snapshot`). Subdirs `hydra_thesis_{documents,processed,pending,evidence_archive}/` are lazy. All gitignored. Schema version `THESIS_SCHEMA_VERSION` in `hydra_thesis.py`; bump independently of `HYDRA_VERSION` on `ThesisState` schema changes.
+- Brain wiring: `HydraAgent._apply_brain` injects `state["thesis_context"]` → `HydraBrain._format_thesis_context` prepends THESIS CONTEXT to `ANALYST_PROMPT`. Active intent prompts surfaced priority-ranked, scoped by pair. `BrainDecision.thesis_alignment` (`in_thesis`, `intent_prompts_consulted`, `evidence_delta`, `posterior_shift_request`) is stamped onto journal entries alongside `decision.thesis_posture` and `decision.thesis_intents_active`.
+- Size multiplier: `thesis.size_hint_for(pair, signal)` returns 1.0 under default advisory mode — brain's `size_multiplier` flows to Kelly unchanged. Only `posture_enforcement == "binding"` derives a non-unity hint from `knobs.size_hint_range` × posture. Final product clamped `[0.0, 1.5]` in `_apply_brain`.
+- Intent prompts: `ThesisTracker.add_intent / remove_intent / update_intent / list_intents`. `intent_prompt_max_active` (default 5) enforced via FIFO eviction. `on_tick` sweeps expired prompts. WS routes: `thesis_{create,delete,update}_intent`.
+- Posture enforcement (opt-in via `knobs.posture_enforcement="binding"`): per-posture daily entry caps via `knobs.max_daily_entries_by_posture` (defaults PRESERVATION=2, TRANSITION=4, ACCUMULATION=None). Agent calls `thesis.check_posture_restriction(pair, side)` before execute_signal; false `allow` SKIPs (not BLOCKs) the trade, logs, broadcasts `thesis_posture_restriction`, lets tick continue. No journal entry for skipped placements. SKIP ≠ BLOCK — BLOCK reserved for hard rules. Counter per-pair per-UTC-day; `record_entry` prunes yesterday each call.
+- Ladder primitive (feature-flagged `HYDRA_THESIS_LADDERS=1`): `ThesisTracker.create_ladder / list_ladders / cancel_ladder / match_rung / record_rung_{placement,fill} / check_stop_loss`. Per-pair cap via `knobs.max_active_ladders_per_pair`. Rung match: 0.5% price tolerance. `_place_order` calls `_journal_ladder_stamp(pair, side, price)` → stamps `decision.{ladder_id,rung_idx,adhoc}` on every placement. Stop-loss is ADVISORY — on breach with any FILLED rung the ladder flips to STOPPED_OUT, pending rungs CANCELLED, filled positions NOT auto-sold (deliberate non-goal). Per-tick expiry sweep when flag set; `convert_to_market` variant logged + treated as cancel. WS routes: `thesis_{create,cancel}_ladder`.
+- Document processor: `hydra_thesis_processor.py` + `ThesisProcessorWorker` (daemon). Bounded queue of uploaded research → **Grok 4 reasoning** (xAI) → `ProposedThesisUpdate` JSON written to `hydra_thesis_pending/`. Nothing auto-applies. Budget cap: `knobs.grok_processing_budget_usd_per_day` (default $5). Requires `XAI_API_KEY` (kill switch in Env flags below). Big-shift proposals (|posterior_shift.confidence − 0.5| > 0.30) force `requires_human=true` in code — defensive, not prompt-dependent. `_apply_proposal` drops any `hard_rules` key — hard rules NEVER mutated by a proposal.
+- Snapshot integration: `_save_snapshot` writes `thesis_state`; `_load_snapshot` calls `thesis.restore(...)`. Missing key fail-soft.
+- WS routes (state mutators): `thesis_get_state`, `thesis_update_{knobs,posture,hard_rules}`. All handlers broadcast updated `thesis_state` so every client stays in sync.
+- Dashboard: **THESIS** tab sibling to LIVE / BACKTEST / COMPARE. Phase A panels (posture / knobs / hard rules / deadline) functional; Phase B–E sub-panels scaffolded.
+- Hard-rule floor: `ledger_shield_btc` cannot be lowered below 0.20 BTC via API — dashboard typo or malicious WS payload cannot reduce protected BTC. Test in `test_thesis_tracker.py`.
+- Drift invariant: `tests/test_thesis_drift.py` enforces `context_for → None` and `size_hint_for → 1.0` in both disabled and default-enabled modes. Any future phase influencing the tick MUST preserve this for the disabled case.
 
-Authoritative design spec: `docs/THESIS_SPEC.md` (arrives with Phase B
-when brain integration lands). User runbook: `docs/THESIS.md`
-(same timeline).
+Env flags (thesis layer):
+- `HYDRA_THESIS_DISABLED=1` — full kill switch. Tracker returns inert defaults, `save()` is a no-op; `tests/test_thesis_drift.py` enforces v2.12.5 bit-identical behavior on every commit.
+- `HYDRA_THESIS_PROCESSOR_DISABLED=1` — disable Grok 4 document processor (v2.13.2+). Worker never starts; upload routes still persist documents to `hydra_thesis_documents/` but no proposal is generated.
+- `HYDRA_THESIS_LADDERS=1` — opt in to Ladder primitive journal-schema fields (v2.13.3+). Without it, ladder CRUD still works but `match_rung` is a no-op and `_place_order` writes v2.13.2-shaped journal entries.
 
 ## Companion Subsystem
 
@@ -334,20 +239,16 @@ Windows launchers:
 - Confidence threshold: 0.65 both modes. Applied to both BUY and SELL signals — SELL is gated by the same min_confidence check as BUY. Signals below 0.65 (< 15% Kelly edge) are filtered as negative-EV after costs.
 - Position sizing: quarter-Kelly conservative, half-Kelly competition (`(confidence*2 - 1) * multiplier * balance`)
 - Order minimums: pair-aware — Kraken `ordermin` per base asset (0.02 SOL, 0.00005 BTC), `costmin` per quote (0.5 USDC, 0.00002 BTC). Enforced on both buy and sell paths. Partial sells below ordermin force full position close to prevent dust.
-- Price precision: `KrakenCLI._format_price(pair, price)` rounds to the pair's native decimals before the `.8f` format. Any code that computes a derived price MUST use this — raw `f"{price:.8f}"` will be rejected by Kraken on low-precision pairs (SOL/USDC=2, BTC/USDC=2, SOL/BTC=7). Hardcoded `PRICE_DECIMALS` remain as fallbacks; at startup `KrakenCLI.load_pair_constants()` dynamically loads the true values from `kraken pairs` and patches them via `apply_pair_constants()`.
-- Dynamic pair constants: at startup (live mode), the agent calls `kraken pairs` to load `pair_decimals`, `ordermin`, and `costmin` for each traded pair. These override the hardcoded `PRICE_DECIMALS`, `MIN_ORDER_SIZE`, and `MIN_COST` class-level dicts. If the API call fails, hardcoded fallbacks are used — no degradation in behavior.
-- System status gate: each tick (live mode) checks `kraken status` before doing any work. If Kraken reports `"maintenance"` or `"cancel_only"`, the tick is skipped with a log message. `"post_only"` is treated as normal (we only place post-only orders). API errors degrade gracefully to `"online"`. Status transitions are logged once per change, not every tick.
+- Price precision & dynamic pair constants: `KrakenCLI._format_price(pair, price)` rounds to native decimals before `.8f`. Any code computing a derived price MUST use this — raw `f"{price:.8f}"` is rejected on low-precision pairs (SOL/USDC=2, BTC/USDC=2, SOL/BTC=7). At startup (live), `KrakenCLI.load_pair_constants()` queries `kraken pairs` for `pair_decimals` / `ordermin` / `costmin` per pair, then `apply_pair_constants()` patches `PRICE_DECIMALS` / `MIN_ORDER_SIZE` / `MIN_COST`. API failure falls back to hardcoded constants — no degradation.
+- System status gate: each tick (live) checks `kraken status` before any work. `"maintenance"` / `"cancel_only"` → skip tick with log. `"post_only"` treated as normal (we only post-only). API errors degrade to `"online"`. Status transitions logged once per change.
 - Circuit breaker: 15% max drawdown halts the engine permanently for the session. Both `tick()` and `_maybe_execute` check the halt flag.
-- Rate limiting: 2-second minimum between every Kraken API call — do not remove or reduce
-- Order journal persistence: `order_journal` is snapshotted immediately after any tick that appends (not just on the periodic N-tick cadence), so a subsequent crash cannot lose entries since the last successful tick. The rolling file `hydra_order_journal.json` is merged on startup so restarts preserve full history.
-- Execution stream: lifecycle finalization flows from `kraken ws executions` via the `ExecutionStream` class — push-based, not polling. Placement stays REST (`KrakenCLI.order_buy/sell` with `--userref` for correlation); WS events drive entries from `PLACED` to `FILLED` / `PARTIALLY_FILLED` / `CANCELLED_UNFILLED` / `REJECTED` and handle engine rollback on non-fills. All fill-detection uses the shared `_is_fully_filled()` helper with 1% tolerance.
-- Execution stream restart-gap reconciliation: when the stream auto-restarts, `reconcile_restart_gap()` queries `kraken query-orders` for all in-flight orders to detect fills/cancels that occurred while the stream was down. Terminal events are injected into `drain_events()` so the agent processes them in the same tick the stream recovers. Orders still open on the exchange remain in `_known_orders` for the new stream to finalize normally.
-- Resume reconciliation: on `--resume`, `_reconcile_stale_placed()` scans the journal for PLACED entries from the previous session and queries the exchange. Terminal orders (closed/canceled/expired) have their journal lifecycle updated directly. Still-open orders are re-registered with the ExecutionStream so WS events finalize them. Engine rollback is not possible for previous-session entries (no `pre_trade_snapshot` persisted) — a warning is logged if an unfilled order is found.
-- BaseStream superclass: `ExecutionStream`, `CandleStream`, `TickerStream`, `BalanceStream`, and `BookStream` all inherit from `BaseStream` which provides subprocess spawn/stop, reader/stderr threads, heartbeat-based health checks, and auto-restart with cooldown. Subclasses override `_build_cmd()`, `_on_message(msg)`, and `_stream_label()`.
-- Push-based market data: `CandleStream` (ws ohlc) and `TickerStream` (ws ticker) each subscribe to ALL traded pairs in one WS connection. `_fetch_and_tick()` uses the candle stream (zero REST calls, zero rate-limit sleep). Both streams are auto-restarted on failure via `ensure_healthy()` each tick. If a WS stream is unhealthy, the agent skips that data source until auto-restart recovers it. Order placement is blocked when TickerStream is unavailable.
-- Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy. If the stream is unhealthy, the agent skips balance updates until auto-restart recovers it. Asset names are normalized (XXBT→BTC, XBT→BTC) and equities/ETFs are filtered out.
-- Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Order book intelligence uses WS data when healthy. If the stream is unhealthy, the agent skips order book data until auto-restart recovers it. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
-- Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
+- Rate limiting: 2-second minimum between every Kraken **REST** call (`KrakenCLI._run`) — do not remove or reduce. Steady-state market/account data flows through WS streams which bypass this; REST is now narrow (warmup OHLC, per-tick `kraken status`, order placement, `query-orders`, balance fallback, pair constants).
+- Order journal persistence: `order_journal` snapshots immediately on any tick that appends (not just periodic N-tick cadence) — crash cannot lose entries since last successful tick. `hydra_order_journal.json` merged on startup so restarts preserve full history.
+- Execution stream: lifecycle finalization flows from `kraken ws executions` via `ExecutionStream` — push-based. Placement stays REST (`KrakenCLI.order_buy/sell` + `--userref` correlation); WS events drive `PLACED → FILLED / PARTIALLY_FILLED / CANCELLED_UNFILLED / REJECTED` and trigger engine rollback on non-fills. Fill detection uses shared `_is_fully_filled()` (1% tolerance).
+- Restart-gap reconciliation: on auto-restart, `reconcile_restart_gap()` queries `kraken query-orders` for in-flight orders to catch fills/cancels during downtime. Terminal events injected into `drain_events()` and processed same tick as recovery. Still-open orders remain in `_known_orders` for the new stream to finalize.
+- Resume reconciliation: on `--resume`, `_reconcile_stale_placed()` scans journal for previous-session PLACED entries + queries exchange. Terminal orders (closed/canceled/expired) update journal lifecycle directly. Still-open orders re-register with ExecutionStream for WS finalization. Engine rollback impossible for previous-session entries (no `pre_trade_snapshot` persisted) — warns if unfilled order found.
+- BaseStream superclass: `ExecutionStream / CandleStream / TickerStream / BalanceStream / BookStream` all inherit from `BaseStream` (subprocess spawn/stop, reader + stderr threads, heartbeat health, auto-restart with `RESTART_COOLDOWN_S=30s`). Subclasses override `_build_cmd()`, `_on_message(msg)`, `_stream_label()`. Heartbeat threshold 30s — accommodates kraken cold-start over WSL (5–10s to first heartbeat). Stderr-drain thread prevents pipe-buffer freeze. Per-tick `ensure_healthy()` auto-restarts; unhealthy streams cause that data source to be skipped until recovery. Tick warnings rate-limited to *transitions* (one print per distinct reason + one "healthy again" on recovery).
+- Per-stream specifics: **CandleStream** (`ws ohlc`) — drives `_fetch_and_tick()` (zero REST, zero rate-limit). **TickerStream** (`ws ticker`) — order placement BLOCKED when unavailable. Both subscribe to all pairs in one WS connection. **BalanceStream** (`ws balances`) — feeds `_build_dashboard_state()`; asset names normalized (XXBT/XBT → BTC), equities/ETFs filtered. **BookStream** (`ws book`, depth 10) — feeds order book intel; WS `{price,qty}` dicts converted to REST `[price,qty,ts]` arrays so `OrderBookAnalyzer` works unchanged. **ExecutionStream** — `health_status() → (healthy, reason)` identifies subprocess exit / reader crash / heartbeat stale.
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
 - FOREX session weighting: applies a confidence modifier based on UTC hour — London/NY overlap (12-16 UTC) +0.04, London (07-12) +0.02, NY (16-21) +0.02, Asian (00-07) -0.03, dead zone (21-00) -0.05. Subject to the same +0.15 total modifier cap as order book and cross-pair modifiers.
 
@@ -359,30 +260,29 @@ Windows launchers:
 
 ## AI Brain (hydra_brain.py)
 
-3-agent reasoning pipeline using Claude + Grok:
-- **Market Analyst** (Claude Sonnet) — evaluates engine signals, produces thesis + conviction
-- **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides trades, manages risk exposure via `size_multiplier` (0.0-1.5). Brain does NOT modify engine confidence — Kelly sizing uses engine confidence directly, brain controls position size via size_multiplier only.
-- **Strategic Advisor** (Grok 4 Reasoning) — called only on genuine disagreements: Risk Manager OVERRIDE, or analyst explicitly disagrees with engine at low conviction (< 0.50). Grok arbitrates the contested action only; conviction stays from analyst, sizing from risk manager.
-- Only fires on BUY/SELL signals with fresh candle data (HOLD is free, no API call — skip logic lives in the agent's `_apply_brain`). Per-pair candle-freshness gating ensures brain evaluates each pair exactly once per new candle, preventing duplicate evaluation on forming-candle updates.
-- Falls back to engine-only on API failure, budget exceeded, or missing key. Fallback does NOT mark the candle as evaluated, so the next tick retries.
-- Enable by setting `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and/or `XAI_API_KEY` in `.env`
-- Cost: ~$1-2/day with narrow Grok escalation on ~10-15% of signals
-- Do not change the JSON response format in system prompts — the parser depends on it
-- Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
+3-agent reasoning pipeline (Claude + Grok):
+- **Market Analyst** (Claude Sonnet) — evaluates engine signals, produces thesis + conviction.
+- **Risk Manager** (Claude Sonnet) — approves/adjusts/overrides via `size_multiplier` (0.0–1.5). Brain does NOT modify engine confidence — Kelly uses engine confidence directly; brain controls size only via `size_multiplier`.
+- **Strategic Advisor** (Grok 4 Reasoning) — called only on genuine disagreement: Risk Manager OVERRIDE, or analyst disagrees with engine at low conviction (<0.50). Arbitrates contested action only; conviction stays from analyst, sizing from risk manager.
+- Fires only on BUY/SELL with fresh candles (HOLD = no API call; skip in `_apply_brain`). Per-pair candle-freshness gating ensures one evaluation per new candle (no duplicates on forming-candle updates).
+- Falls back to engine-only on API failure / budget exceeded / missing key. Fallback does NOT mark candle evaluated → next tick retries.
+- Enable via `.env`: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and/or `XAI_API_KEY`. Cost: ~$1–2/day with narrow Grok escalation (~10–15% of signals).
+- Do not change the JSON response format in system prompts — parser depends on it.
+- Strategist always uses `self.strategist_client` (xAI) — do not route through primary client.
 
 ## Backtesting & Experimentation
 
 Strictly-additive platform layered on top of the live agent. Default behavior with no opt-in flag is identical to v2.9.x. Full user runbook: `docs/BACKTEST.md`. Authoritative design spec: `docs/BACKTEST_SPEC.md`.
 
 ### Module map
-- `hydra_backtest.py` — core replay engine (`BacktestConfig`, `BacktestRunner`, `CandleSource` hierarchy, `SimulatedFiller`). Reuses `HydraEngine` verbatim — zero logic drift guaranteed by `tests/test_backtest_drift.py` (invariant I7).
+- `hydra_backtest.py` — replay engine (`BacktestConfig`, `BacktestRunner`, `CandleSource`, `SimulatedFiller`). Reuses `HydraEngine` verbatim — drift gated by `tests/test_backtest_drift.py` (I7).
 - `hydra_backtest_metrics.py` — bootstrap CI, walk-forward, Monte Carlo, regime-conditioned P&L, parameter sensitivity.
-- `hydra_experiments.py` — `Experiment` dataclass, `ExperimentStore` (threading.RLock — NOT Lock; delete → audit_log re-enters), 8 presets in `hydra_backtest_presets.json`, `sweep_experiment`, `compare`.
-- `hydra_backtest_tool.py` — 8 Anthropic tool-use schemas (`BACKTEST_TOOLS`) + `BacktestToolDispatcher` + `QuotaTracker` (per_caller_daily=10, concurrent=3, global_daily=50; UTC midnight reset).
-- `hydra_backtest_server.py` — `BacktestWorkerPool` (max_workers=2, daemon, queue=20) + WS message handlers mounted via `mount_backtest_routes`.
-- `hydra_reviewer.py` — AI Reviewer with **7 code-enforced rigor gates** (not prompt). Tunable thresholds in `hydra_reviewer_config.json`.
+- `hydra_experiments.py` — `Experiment` + `ExperimentStore` (uses `threading.RLock`; `Lock` deadlocks `delete → audit_log` re-entry), 8 presets in `hydra_backtest_presets.json`, `sweep_experiment`, `compare`.
+- `hydra_backtest_tool.py` — 8 Anthropic tool schemas (`BACKTEST_TOOLS`) + `BacktestToolDispatcher` + `QuotaTracker` (per-caller=10/d, concurrent=3, global=50/d, UTC reset).
+- `hydra_backtest_server.py` — `BacktestWorkerPool` (max=2, daemon, queue=20) + WS handlers via `mount_backtest_routes`.
+- `hydra_reviewer.py` — Reviewer with **7 code-enforced rigor gates**. Thresholds in `hydra_reviewer_config.json`.
 - `hydra_shadow_validator.py` — single-slot FIFO live-parallel validation before param writes.
-- `hydra_tuner.py` — added `apply_external_param_update()` + `rollback_to_previous()` (depth=1 history deque) alongside existing observation-driven update loop.
+- `hydra_tuner.py` — `apply_external_param_update()` + `rollback_to_previous()` (depth=1 deque) alongside the observation-driven update loop.
 
 ### Safety invariants (I1–I12)
 1. Live tick cadence unaffected (measured pre/post deploy).
@@ -402,38 +302,33 @@ Strictly-additive platform layered on top of the live agent. Default behavior wi
 Before any `PARAM_TWEAK` is auto-apply eligible, all 7 must pass: `min_trades_50`, `mc_ci_lower_positive`, `wf_majority_improved`, `oos_gap_acceptable`, `improvement_above_2se`, `cross_pair_majority`, `regime_not_concentrated`. Regime-only failure downgrades verdict to a scoped `CODE_REVIEW` via **set-equality** check on the failed-gate list (order-independent). See `_assemble_decision` in `hydra_reviewer.py`.
 
 ### Reviewer tool-use (read_source_file)
-Reviewer runs an Anthropic tool-use loop (`REVIEWER_TOOLS`) so `CODE_REVIEW` verdicts are grounded in real source. Allow-list: `hydra_*.py` at repo root + `tests/**/*.py`. Deny-list: path substrings `.env`, `config.json`, `credentials`, `secret`, `token`. Per-review: 6 reads, 16 KB per file, 6 loop iterations. Paths resolve against `ResultReviewer.source_root` and reject absolute paths, `..`, and symlinks escaping the repo. The read list lands on `ReviewDecision.source_files_read`.
+Anthropic tool-use loop (`REVIEWER_TOOLS`) grounds `CODE_REVIEW` verdicts in real source. Allow: `hydra_*.py` at repo root + `tests/**/*.py`. Deny substrings: `.env`, `config.json`, `credentials`, `secret`, `token`. Per review: 6 reads, 16 KB/file, 6 loop iterations. Paths resolve against `ResultReviewer.source_root`; absolute paths, `..`, and escaping symlinks rejected. Reads land on `ReviewDecision.source_files_read`.
 
 ### Reviewer PR drafts (I8)
-Every `CODE_REVIEW` verdict emits `.hydra-experiments/pr_drafts/{exp_id}_{timestamp}.md` via `write_pr_draft()`. Includes verdict, proposed_changes table, rigor-gate results, evidence snapshot, risk_flags, consulted source files. Never touches source files. Advisory only — open a real PR from the draft.
+`CODE_REVIEW` verdicts emit `.hydra-experiments/pr_drafts/{exp_id}_{timestamp}.md` via `write_pr_draft()` — verdict + proposed_changes table + rigor-gate results + evidence snapshot + risk_flags + consulted source files. Never touches source. Advisory only — open a real PR from the draft.
 
 ### Retrospective accuracy + confidence decay
-`ResultReviewer.self_retrospective(lookback_days=30)` joins `review_history.jsonl` (reviewer output) against `shadow_outcomes.jsonl` (shadow validator terminal records) by `experiment_id` and computes `reviewer_accuracy_score = approved / evaluated`. `_recent_accuracy()` caches this for 5 min. If recent accuracy drops below `0.5` with ≥5 evaluated samples, new `HIGH`-confidence verdicts are decayed to `MEDIUM` and a `confidence_decayed:...` risk_flag is appended.
+`ResultReviewer.self_retrospective(lookback_days=30)` joins `review_history.jsonl` against `shadow_outcomes.jsonl` by `experiment_id`, computes `reviewer_accuracy_score = approved / evaluated`. `_recent_accuracy()` cached 5 min. Below 0.5 with ≥5 samples → new HIGH verdicts decayed to MEDIUM + `confidence_decayed:...` risk_flag appended.
 
 ### Cost disclosure ($10/day threshold)
-Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumulative daily cost crosses `COST_ALERT_USD=10.0`, a log line prints and a `cost_alert` WS message broadcasts (`{component, daily_cost_usd, threshold_usd, day_key, enforce_budget}`). **Independent of `enforce_budget`** — a reviewer with `enforce_budget=False` (backtest mode) still alerts. Dashboard renders as a banner.
+Brain + reviewer one-shot per-UTC-day: cumulative cost crosses `COST_ALERT_USD=10.0` → log line + `cost_alert` WS broadcast (`{component, daily_cost_usd, threshold_usd, day_key, enforce_budget}`). **Independent of `enforce_budget`** — backtest reviewers (`enforce_budget=False`) still alert. Dashboard renders as banner.
 
 ### Budget policy: live vs backtest
-`HydraBrain` and `ResultReviewer` both take an `enforce_budget=True` kwarg. Live call sites keep default. Backtest-triggered instances pass `enforce_budget=False` so experiments don't stall behind the live `max_daily_cost` cap. Disclosure ($10/day) still fires regardless.
+`HydraBrain` + `ResultReviewer` take `enforce_budget=True` (default). Backtest-triggered instances pass `False` to avoid stalling on live `max_daily_cost` cap. $10/day disclosure fires regardless.
 
 ### Env flags
 - `HYDRA_BACKTEST_DISABLED=1` — kill switch. Disables worker pool, WS handlers reject backtest messages.
 - `HYDRA_BRAIN_TOOLS_ENABLED=1` — enables Anthropic tool-use for Analyst + Risk Manager (Grok stays text-only). Off by default; when on, per-agent quotas apply.
-- `HYDRA_THESIS_DISABLED=1` — kill switch for the thesis layer (§Thesis Layer). Tracker returns inert defaults and `save()` is a no-op; `tests/test_thesis_drift.py` enforces v2.12.5 bit-identical behavior on every commit.
-- `HYDRA_THESIS_PROCESSOR_DISABLED=1` — disable Grok 4 document processor (v2.13.2+). Worker never starts; upload routes still persist the document to `hydra_thesis_documents/` but no proposal is generated.
-- `HYDRA_THESIS_LADDERS=1` — opt in to Ladder primitive journal-schema fields (v2.13.3+). Without it, ladder CRUD still works but `match_rung` is a no-op and `_place_order` writes v2.13.2-shaped journal entries. Opt in once you're ready for `decision.ladder_id / rung_idx / adhoc` to land on every placement.
+- Thesis kill switches (`HYDRA_THESIS_DISABLED`, `HYDRA_THESIS_PROCESSOR_DISABLED`, `HYDRA_THESIS_LADDERS`) — see §Thesis Layer.
 
 ### Dashboard
-`dashboard/src/App.jsx` gained tab switcher (LIVE / BACKTEST / COMPARE), `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, and `ReviewPanel`. Shared primitives `RegimeBadge` and `SignalChip` prevent drift between LIVE and observer regime/signal styling. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU-ish) to prevent long-session memory growth. Typed-message fallback to `applyLiveState` is gated on absence of a `type` field AND presence of a `LIVE_STATE_KEYS` member — a malformed typed message can't corrupt LIVE. `compareInFlight` + `viewInFlight` states debounce repeat clicks. `DashboardBroadcaster` in `hydra_agent.py` refactored with `compat_mode=True` dual-emit (raw state + `{type, data}` wrapper) for one-release backward compatibility.
+`dashboard/src/App.jsx`: tab switcher (LIVE/BACKTEST/COMPARE) + `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, `ReviewPanel`. Shared `RegimeBadge` + `SignalChip` prevent LIVE/observer drift. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU). Typed-message → `applyLiveState` fallback gated on absence of `type` AND presence of `LIVE_STATE_KEYS` member (malformed typed messages can't corrupt LIVE). `compareInFlight` + `viewInFlight` debounce repeat clicks. `DashboardBroadcaster` (`hydra_agent.py`) dual-emits via `compat_mode=True` (raw state + `{type,data}` wrapper) for one-release back-compat.
 
 ### Brain tool-use
-`HydraBrain.__init__` gained `tool_dispatcher`, `enable_tool_use`, `enforce_budget`, `broadcaster`, and `tool_iterations_cap` kwargs. `_call_llm_with_tools()` implements the Anthropic stop_reason loop with the **injectable iteration cap** (default 4) and an 8 KB result cap that truncates via a structured JSON envelope (not a naive byte-slice) so the LLM sees a `truncated:true` signal instead of malformed JSON. `max_tokens` stop with pending `tool_use` blocks is logged rather than silently dropped. Analyst + Risk Manager branch on `_tool_use_enabled`; `_call_llm` unchanged for fallback and Grok path.
+`HydraBrain.__init__` kwargs: `tool_dispatcher`, `enable_tool_use`, `enforce_budget`, `broadcaster`, `tool_iterations_cap`. `_call_llm_with_tools()` runs the Anthropic stop_reason loop with **injectable iteration cap** (default 4) + 8 KB result cap that truncates via structured JSON envelope (LLM sees `truncated:true`, not malformed JSON). `max_tokens` stop with pending `tool_use` blocks is logged, not silently dropped. Analyst + Risk Manager branch on `_tool_use_enabled`; `_call_llm` unchanged for fallback + Grok path.
 
 ### Tests
-The full suite lives under `tests/` and `tests/live_harness/`. The CI gate
-is `.github/workflows/ci.yml` (`engine-tests` + `dashboard-build` jobs);
-that workflow is the authoritative list of what must pass on every PR.
-Run the backtest-platform subset locally as:
+Backtest-platform subset (see §Testing for the full CI gate):
 
 ```bash
 python -m pytest tests/test_backtest_engine.py tests/test_backtest_drift.py
@@ -467,15 +362,7 @@ snapshot/restore, `PositionSizer`, or any order-journal write site).
 
 ### Live-execution test harness
 
-`tests/live_harness/` drives `HydraAgent._place_order` across 33+ scenarios
-(happy paths, failure modes, rollback completeness, schema validation,
-historical regressions, WS execution stream lifecycle transitions, and real
-Kraken). It is the canonical validation tool for any change to `_place_order`,
-`ExecutionStream`, `snapshot_position`/`restore_position`, `PositionSizer`, or
-any order-journal write site. Snapshot fields include `gross_profit` and
-`gross_loss` for per-engine P&L tracking across restarts. A `FakeExecutionStream` test double lets mock
-scenarios drive lifecycle transitions via `inject_event(...)` without spawning
-the real `kraken ws executions` subprocess.
+`tests/live_harness/` drives `HydraAgent._place_order` across 33+ scenarios (happy paths, failure modes, rollback completeness, schema validation, historical regressions, WS execution-stream lifecycle transitions, real Kraken). Canonical validation for any change to `_place_order`, `ExecutionStream`, `snapshot_position`/`restore_position`, `PositionSizer`, or any order-journal write site. Snapshot includes `gross_profit` + `gross_loss` for per-engine P&L across restarts. `FakeExecutionStream` test double drives lifecycle transitions via `inject_event(...)` without spawning real `kraken ws executions` subprocess.
 
 ```bash
 python tests/live_harness/harness.py --mode smoke    # import + agent construction
@@ -500,19 +387,10 @@ See AUDIT.md for the full verification checklist.
 - Never merge with red or pending CI
 
 **Hydra-specific:**
-- "Tests pass" means both CI jobs green per `.github/workflows/ci.yml`:
-  `engine-tests` (all individual `python tests/test_*.py` invocations
-  + live harness `--mode smoke` + `--mode mock` + module import smoke)
-  and `dashboard-build` (`npm run build`). The `mock` harness is the
-  mandatory gate for any PR touching the execution path.
-- "ALL locations" is the 7-site list in §Version Management below. Always
-  run `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'` BEFORE bumping, per
-  §Operating Rules → Rule 5.
-- Signed tag command: `git tag -s vX.Y.Z -m "vX.Y.Z"`. Verify with
-  `git tag -v vX.Y.Z` per §Operating Rules → Rule 3.
-- Use the `/release` skill (`.claude/skills/release/SKILL.md`) to drive
-  the full cycle — it codifies steps 1–7 with the Hydra-specific
-  expansions inline.
+- "Tests pass" = both CI jobs green per `.github/workflows/ci.yml`: `engine-tests` (all `python tests/test_*.py` + live harness `--mode smoke` + `--mode mock` + module import smoke) + `dashboard-build` (`npm run build`). `mock` harness is mandatory for any PR touching the execution path.
+- "ALL locations" = the 7-site list in §Version Management. Run `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'` BEFORE bumping (Rule 5).
+- Signed tag: `git tag -s vX.Y.Z -m "vX.Y.Z"`. Verify with `git tag -v vX.Y.Z` (Rule 3).
+- Drive full cycle via the `/release` skill — codifies steps 1–7 with Hydra-specific expansions inline.
 
 ## Version Management
 
@@ -536,21 +414,11 @@ Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new fe
 - Watch for Vite/dev-server silently switching ports; verify the actual bound port
 
 **Hydra-specific:**
-- The dashboard renders regime emoji (📈 ⚠️ etc.) and the console writes
-  the portfolio block under the same theme — both will crash on cp1252.
-- `time.time()` has ~15 ms Windows resolution; using it in `BaseStream`
-  heartbeat checks or `RESTART_COOLDOWN_S=30s` accounting silently
-  miscounts. Use `time.perf_counter()`.
-- `start_hydra.bat` and `start_all.bat` use nested `if`-blocks around
-  `--resume` and the CBP sidecar launch — escape parens or the cmd
-  parser drops branches silently.
-- WSL: kraken-cli runs via
-  `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ..."`.
-  If the distro is named `Ubuntu-22.04` instead of `Ubuntu`, the
-  invocation silently routes nowhere — verify with `wsl -l -v`.
-- Vite dev server in `dashboard/` falls off `:5173` to the next free
-  port if it's taken; the dashboard WS proxy assumes `:5173`. Verify
-  the bound port in Vite's startup log before assuming hot-reload works.
+- Dashboard regime emoji (📈 ⚠️) + console portfolio block use the same theme — both crash on cp1252.
+- `time.time()` has ~15 ms Windows resolution; in `BaseStream` heartbeat or `RESTART_COOLDOWN_S=30s` accounting it silently miscounts. Use `time.perf_counter()`.
+- `start_hydra.bat` + `start_all.bat` use nested `if`-blocks around `--resume` and CBP sidecar launch — escape parens or cmd parser drops branches silently.
+- WSL: kraken-cli runs via `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ..."`. If distro is `Ubuntu-22.04` instead of `Ubuntu`, invocation silently routes nowhere — verify with `wsl -l -v`.
+- Vite dev server falls off `:5173` to next free port if taken; dashboard WS proxy assumes `:5173`. Verify bound port in Vite startup log.
 
 ## Common Pitfalls
 
@@ -564,10 +432,10 @@ Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new fe
 - `hydra_session_snapshot.json` is the session snapshot for `--resume` — it's gitignored
 - On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this
 - `start_hydra.bat` uses `--mode competition --resume` for production — do not remove these flags
-- **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) and Rule 3 (coordinated swap SELL) can theoretically conflict if BTC is TREND_UP + SOL TREND_DOWN + SOL/BTC TREND_UP simultaneously — Rule 3 overwrites Rule 2. Current behavior favors the safer SELL. Future work: add explicit priority or merge logic.
-- Companion live execution requires explicit opt-in: `HYDRA_COMPANION_LIVE_EXECUTION=1`. Without it, companion proposals are paper/advisory only — confirm this env var is unset before any live debugging.
-- CBP sidecar failures are silent by design (Hydra falls through to JSONL). If memory writes seem to vanish, check `cbp-runner/state/ready.json` exists and `cbp-runner/state/_disabled` does NOT exist.
-- `kraken-cli` is an external dep installed in WSL Ubuntu (`source ~/.cargo/env && kraken`). The dashboard footer (`dashboard/src/App.jsx`) pins the current expected version. Check there before debugging schema errors from `--validate`.
+- **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) + Rule 3 (coordinated swap SELL) can conflict when BTC TREND_UP + SOL TREND_DOWN + SOL/BTC TREND_UP — Rule 3 overwrites Rule 2 (favors safer SELL). Future: explicit priority or merge logic.
+- Companion live execution opt-in: `HYDRA_COMPANION_LIVE_EXECUTION=1`. Without it, proposals are paper/advisory — confirm unset before live debugging.
+- CBP sidecar failures silent by design (falls through to JSONL). If memory writes vanish, check `cbp-runner/state/ready.json` exists and `state/_disabled` does NOT.
+- `kraken-cli` is an external WSL Ubuntu dep (`source ~/.cargo/env && kraken`). Dashboard footer pins the expected version — check there before debugging `--validate` schema errors.
 
 ## Audit Workflow
 
@@ -576,25 +444,14 @@ Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new fe
 - Re-audit your own fixes before declaring done (self-audit has caught 7+ bugs in past sessions)
 
 **Hydra-specific:**
-- Natural file-group partitions for parallel agents (see §Operating Rules → Rule 1):
+- Natural 7-way partitions for parallel agents (Rule 1):
   1. Engine + tuner: `hydra_engine.py`, `hydra_tuner.py`
-  2. Agent + streams: `hydra_agent.py` (contains `BaseStream` and its
-     `ExecutionStream` / `CandleStream` / `TickerStream` / `BalanceStream` /
-     `BookStream` subclasses)
+  2. Agent + streams: `hydra_agent.py` (`BaseStream` + `ExecutionStream` / `CandleStream` / `TickerStream` / `BalanceStream` / `BookStream`)
   3. AI layer: `hydra_brain.py`, `hydra_reviewer.py`, `hydra_shadow_validator.py`
-  4. Backtest platform: `hydra_backtest*.py`, `hydra_experiments.py`
-  5. Companion subsystem: `hydra_companions/` package
+  4. Backtest: `hydra_backtest*.py`, `hydra_experiments.py`
+  5. Companion: `hydra_companions/`
   6. Dashboard: `dashboard/src/App.jsx`
   7. Tests: `tests/` + `tests/live_harness/`
-- HIGH severity: any violation of safety invariants I1–I12
-  (see §Backtesting & Experimentation), the limit-post-only rule,
-  the 2 s rate-limit floor, the 15 % circuit breaker, the Wilder-EMA
-  RSI/ATR specification, or the companion `HYDRA_COMPANION_LIVE_EXECUTION`
-  default-off contract.
-- Two-phase self-audit is mandatory per §Operating Rules → Rule 4: after
-  fixing HIGH/MED items, re-run the partition sweep against your own diff,
-  then re-run the full §Testing block AND
-  `python tests/live_harness/harness.py --mode mock`. Only declare done
-  when phase 2 is clean.
-- Use the `/audit` skill (`.claude/skills/audit/SKILL.md`) to drive
-  the full cycle.
+- HIGH severity: violations of I1–I12 (§Backtesting), limit-post-only rule, 2s rate-limit floor, 15% circuit breaker, Wilder-EMA RSI/ATR spec, or `HYDRA_COMPANION_LIVE_EXECUTION` default-off.
+- Two-phase self-audit (Rule 4): after fixing HIGH/MED, re-run partition sweep against your diff, then full §Testing block + `python tests/live_harness/harness.py --mode mock`. Declare done only when phase 2 is clean.
+- Drive full cycle via the `/audit` skill.

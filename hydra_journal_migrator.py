@@ -313,8 +313,13 @@ def migrate_legacy_trade_log_file(
             f"new journal already present at {os.path.basename(new_path)} — skipping rolling migration"
         )
     elif os.path.exists(legacy_path):
-        with open(legacy_path, "r", encoding="utf-8") as f:
-            legacy = json.load(f)
+        try:
+            with open(legacy_path, "r", encoding="utf-8") as f:
+                legacy = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"failed to read legacy journal {legacy_path}: {type(e).__name__}: {e}"
+            ) from e
         if not isinstance(legacy, list):
             raise ValueError(f"{legacy_path} is not a JSON list (got {type(legacy).__name__})")
         converted = migrate_trade_log_entries(legacy)
@@ -340,8 +345,13 @@ def migrate_legacy_trade_log_file(
 
     # ── Session snapshot ────────────────────────────────────────────
     if os.path.exists(snap_path):
-        with open(snap_path, "r", encoding="utf-8") as f:
-            snap = json.load(f)
+        try:
+            with open(snap_path, "r", encoding="utf-8") as f:
+                snap = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"failed to read session snapshot {snap_path}: {type(e).__name__}: {e}"
+            ) from e
         if not isinstance(snap, dict):
             report["actions"].append(f"{os.path.basename(snap_path)} is not a JSON object — skipping")
         elif "order_journal" in snap:

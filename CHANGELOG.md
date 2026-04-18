@@ -6,6 +6,93 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.5] — 2026-04-18
+
+**Audit hardening + CI gate expansion.** Patch release driven by a
+comprehensive 7-partition audit (see `AUDIT_2026-04-18.md`) and the
+fail-soft cleanup pass that preceded it. No new features, no behavior
+change for users who don't trip an error path.
+
+**Stream reader-thread crash protection** — `BalanceStream._on_message`
+and `BookStream._on_message` now coerce numeric WS fields under
+try/except. A single malformed level in a book snapshot or balance
+update no longer crashes the reader thread (which would force a stream
+restart cycle).
+
+**CI gate now runs all 47 test files** (previously 22). The omissions
+included `test_backtest_drift.py` — the I7 invariant gate explicitly
+named in CLAUDE.md §Backtesting safety invariants — and
+`test_partial_fill_reconcile.py` (HF-005 fix coverage). All three
+backtest-platform suites, both companion-subsystem suites, the AI
+reviewer + shadow validator suites, and the brain tool-use suite are
+now first-class CI steps with `-v` verbosity.
+
+**Mock harness env-isolation fixed** — pre-existing regression caught
+during Phase 1 self-audit. `hydra_companions/config._load_env_once()`
+re-populated `XAI_API_KEY` / `ANTHROPIC_API_KEY` from `.env` after the
+harness's `isolate_environment()` had popped them. Scenario #1 ran
+with a clean env; scenarios #2+ inherited the re-populated env, brain
+construction succeeded, and the per-scenario `assert agent.brain is
+None` failed. Result: 33/35 mock harness scenarios were silently
+failing on `main`. Fixed via `HYDRA_NO_DOTENV=1` sentinel honored by
+`_load_env_once`; harness sets it during isolation, restores prior
+value on exit. **Harness restored to 35/35 passing.**
+
+**Fail-soft JSON load paths** — added typed `RuntimeError` (with file
+path + exception type) to `Router.__init__`, `IntentClassifier.__init__`,
+`load_soul`, and `migrate_legacy_trade_log_file`. `load_all_souls` now
+skips a single corrupt soul JSON with a warning instead of killing the
+whole iteration. `BacktestRunner` candle cache refetches on read
+failure instead of crashing the worker. Agent startup sweeps stale
+`.json.tmp` orphans left over from prior crash-mid-`os.replace`.
+
+**Diagnostic improvements** — `_load_snapshot` and the migrator now
+include the offending file path + exception type in their error
+messages.
+
+**Test coverage added** — `tests/test_companion_compiler_errors.py` (6
+tests) and `tests/test_journal_migrator_errors.py` (4 tests) cover the
+new typed-error paths. Both files added to CI gate.
+
+**Docs** — CLAUDE.md compressed by ~700 tokens via dedup of stale
+phase-shipping framing in §Thesis Layer, the duplicate "Tests" /
+"CI gate" prose in §Backtesting, and the four near-identical
+`Push-based ___ stream` bullets in §Trading. Zero functional content
+removed.
+
+**Files touched**
+
+- `.github/workflows/ci.yml` — +25 new test steps
+- `hydra_agent.py` — BalanceStream / BookStream guards, stale `.tmp`
+  startup sweep, `_load_snapshot` diagnostic
+- `hydra_backtest.py` — cache refetch on read failure;
+  `HYDRA_VERSION = "2.13.5"`
+- `hydra_companions/compiler.py` — per-file try/except in
+  `load_all_souls`, typed `RuntimeError` in `load_soul`, `Path`/`str`
+  type handling
+- `hydra_companions/config.py` — `HYDRA_NO_DOTENV=1` sentinel
+- `hydra_companions/router.py`, `intent_classifier.py` — typed
+  `RuntimeError` on routing.json failure
+- `hydra_journal_migrator.py` — typed `RuntimeError` with file path
+- `tests/live_harness/harness.py` — set / restore `HYDRA_NO_DOTENV`
+- `tests/test_companion_compiler_errors.py` — new
+- `tests/test_journal_migrator_errors.py` — new
+- `CLAUDE.md` — section compression
+- `CHANGELOG.md` — this entry
+- `AUDIT_2026-04-18.md` — new (audit report)
+- `dashboard/package.json`, `package-lock.json`, `src/App.jsx` — version
+  bump only
+
+**Safety invariant impact:** none. I1–I12 unchanged. Limit-post-only,
+2 s rate-limit floor, 15 % circuit breaker, Wilder-EMA RSI/ATR all
+unchanged. Companion `HYDRA_COMPANION_LIVE_EXECUTION` default-off
+contract unchanged.
+
+**Tested:** full CI mirror locally — 23 legacy + 470 pytest + smoke +
+35/35 mock harness + engine demo + dashboard build, all green.
+
+---
+
 ## [2.13.4] — 2026-04-18
 
 **Golden Unicorn Phase E** — opt-in posture enforcement. The final phase

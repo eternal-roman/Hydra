@@ -48,7 +48,7 @@ from hydra_engine import (
     SignalAction,
 )
 
-HYDRA_VERSION = "2.13.4"
+HYDRA_VERSION = "2.13.5"
 
 # Reasonable defaults; enforced at config construction and runtime.
 DEFAULT_MAX_TICKS = 200_000
@@ -389,10 +389,15 @@ class KrakenHistoricalSource(CandleSource):
 
     def iter_candles(self, pair: str) -> Iterator[Candle]:
         path = self._cache_path(pair)
+        rows = None
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as fh:
-                rows = json.load(fh)
-        else:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    rows = json.load(fh)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+                print(f"  [BACKTEST] cache unreadable for {pair} ({type(e).__name__}: {e}); refetching")
+                rows = None
+        if rows is None:
             cli = self._kraken_cli
             if cli is None:
                 # Lazy import to avoid import-time dependency in backtest unit tests

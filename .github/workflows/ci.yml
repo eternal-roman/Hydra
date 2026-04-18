@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
-        run: pip install "anthropic>=0.40,<1.0" "openai>=1.50,<2.0"
+        run: pip install "anthropic>=0.40,<1.0" "openai>=1.50,<2.0" pytest
 
       - name: Run engine test suite
         run: python tests/test_engine.py
@@ -86,6 +86,84 @@ jobs:
 
       - name: Run Thesis Phase E posture enforcement (v2.13.4)
         run: python tests/test_thesis_phase_e.py
+
+      - name: Run partial-fill reconciliation tests (HF-005)
+        run: python tests/test_partial_fill_reconcile.py
+
+      - name: Run portfolio covariance tests
+        run: python tests/test_covariance.py
+
+      - name: Run backtest engine tests
+        run: python -m pytest tests/test_backtest_engine.py -v
+
+      - name: Run backtest drift regression (invariant I7)
+        run: python -m pytest tests/test_backtest_drift.py -v
+
+      - name: Run backtest metrics tests
+        run: python -m pytest tests/test_backtest_metrics.py -v
+
+      - name: Run backtest server tests
+        run: python -m pytest tests/test_backtest_server.py -v
+
+      - name: Run backtest tool-use dispatcher tests
+        run: python -m pytest tests/test_backtest_tool.py -v
+
+      - name: Run brain tool-use tests
+        run: python -m pytest tests/test_brain_tool_use.py -v
+
+      - name: Run experiment store tests
+        run: python -m pytest tests/test_experiments.py -v
+
+      - name: Run AI reviewer tests
+        run: python -m pytest tests/test_reviewer.py -v
+
+      - name: Run shadow validator tests
+        run: python -m pytest tests/test_shadow_validator.py -v
+
+      - name: Run companion compiler tests
+        run: python -m pytest tests/test_companion_compiler.py -v
+
+      - name: Run companion compiler error-path tests
+        run: python -m pytest tests/test_companion_compiler_errors.py -v
+
+      - name: Run journal migrator error-path tests
+        run: python -m pytest tests/test_journal_migrator_errors.py -v
+
+      - name: Run companion router tests
+        run: python -m pytest tests/test_companion_router.py -v
+
+      - name: Run companion intent classifier tests
+        run: python -m pytest tests/test_companion_classifier.py -v
+
+      - name: Run companion memory tests
+        run: python -m pytest tests/test_companion_memory.py -v
+
+      - name: Run companion proposal tests
+        run: python -m pytest tests/test_companion_proposals.py -v
+
+      - name: Run companion live executor tests
+        run: python -m pytest tests/test_companion_live_executor.py -v
+
+      - name: Run companion ladder watcher tests
+        run: python -m pytest tests/test_companion_ladder_watcher.py -v
+
+      - name: Run companion nudge scheduler tests
+        run: python -m pytest tests/test_companion_nudges.py -v
+
+      - name: Run companion rollover tests
+        run: python -m pytest tests/test_companion_rollover.py -v
+
+      - name: Run companion clear-transcript tests
+        run: python -m pytest tests/test_companion_clear_transcript.py -v
+
+      - name: Run companion read-only tools tests
+        run: python -m pytest tests/test_companion_tools_readonly.py -v
+
+      - name: Run apex tools tests
+        run: python -m pytest tests/test_apex_tools.py -v
+
+      - name: Run CBP client tests
+        run: python -m pytest tests/test_cbp_client.py -v
 
       - name: Run live-execution harness (smoke + mock)
         run: |

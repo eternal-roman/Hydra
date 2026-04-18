@@ -111,6 +111,16 @@ class Harness:
             if key in os.environ:
                 self._pre_harness_env[key] = os.environ.pop(key)
 
+        # Block hydra_companions.config._load_env_once from re-populating
+        # the env via .env on first lazy import (which happens during
+        # HydraAgent.__init__). Without this, scenario #1 sees a clean env
+        # but scenarios #2+ inherit a re-populated XAI/ANTHROPIC key from
+        # the operator's .env and HydraBrain construction succeeds — which
+        # the per-scenario `assert agent.brain is None` then catches as a
+        # failure. See Audit 2026-04-18.
+        self._set_no_dotenv_prev = os.environ.get("HYDRA_NO_DOTENV")
+        os.environ["HYDRA_NO_DOTENV"] = "1"
+
         # Stash real on-disk state files so they don't leak into the harness.
         # HydraAgent.__init__ runs the legacy journal migrator AND merges
         # the rolling order journal, either of which would otherwise pull
@@ -152,6 +162,12 @@ class Harness:
         for key, val in self._pre_harness_env.items():
             os.environ[key] = val
         self._pre_harness_env.clear()
+        # Restore HYDRA_NO_DOTENV to whatever it was before isolation.
+        prev = getattr(self, "_set_no_dotenv_prev", None)
+        if prev is None:
+            os.environ.pop("HYDRA_NO_DOTENV", None)
+        else:
+            os.environ["HYDRA_NO_DOTENV"] = prev
         # Restore real time.sleep if we patched it
         if hasattr(self, "_original_time_sleep"):
             time.sleep = self._original_time_sleep

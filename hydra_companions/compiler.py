@@ -285,12 +285,14 @@ def compile_soul(soul: dict) -> CompiledSoul:
     # Mode rules (Broski only)
     if mode_rules:
         triggers = mode_rules.get("triggers_for_serious_mode", [])
+        _default_transition = "ok for real real \u2014 "
+        _transition_phrase = mode_rules.get("transition_phrase", _default_transition)
         blocks.append(
             "## Two modes\n"
             f"You default to bro-vibes. You flip to **serious mode** the moment real risk is on the table. "
             f"Serious triggers: {', '.join(triggers)}. "
             f"In serious mode: no emoji, no bro phrases, short sentences, plain english. "
-            f"Use the transition phrase '{mode_rules.get('transition_phrase', 'ok for real real \u2014 ')}' when flipping. "
+            f"Use the transition phrase '{_transition_phrase}' when flipping. "
             f"Warm back up over 2-3 messages once the risk moment passes."
         )
 
@@ -403,16 +405,26 @@ def compile_soul(soul: dict) -> CompiledSoul:
 
 
 def load_soul(soul_id: str, souls_dir: Optional[Path] = None) -> CompiledSoul:
-    path = (souls_dir or SOULS_DIR) / f"{soul_id}.soul.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    base = Path(souls_dir) if souls_dir is not None else SOULS_DIR
+    path = base / f"{soul_id}.soul.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            f"load_soul({soul_id!r}): failed to read {path}: {type(e).__name__}: {e}"
+        ) from e
     return compile_soul(data)
 
 
 def load_all_souls(souls_dir: Optional[Path] = None) -> dict:
-    d = souls_dir or SOULS_DIR
+    d = Path(souls_dir) if souls_dir is not None else SOULS_DIR
     out = {}
     for p in sorted(d.glob("*.soul.json")):
-        data = json.loads(p.read_text(encoding="utf-8"))
-        compiled = compile_soul(data)
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            compiled = compile_soul(data)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"  [COMPANION] skipping soul {p.name}: {type(e).__name__}: {e}")
+            continue
         out[compiled.id] = compiled
     return out
