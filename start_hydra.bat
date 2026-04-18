@@ -12,7 +12,7 @@ echo.
 :: never block on the sidecar per cbp-runner/CLAUDE.md.
 if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=C:\Users\elamj\Dev\cbp-runner"
 if exist "%CBP_RUNNER_DIR%\supervisor.py" (
-    echo [%date% %time%] Starting CBP sidecar (detached) via %CBP_RUNNER_DIR%
+    echo [%date% %time%] Starting CBP sidecar ^(detached^) via %CBP_RUNNER_DIR%
     python "%CBP_RUNNER_DIR%\supervisor.py" --detach >nul 2>&1
 )
 
