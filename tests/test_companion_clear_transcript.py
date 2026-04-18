@@ -1,7 +1,10 @@
 """Transcript clear tests \u2014 /clear slash command."""
+import os
 import sys
 import pathlib
 import tempfile
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -12,6 +15,11 @@ from hydra_companions.providers import ProviderClient, ProviderResponse
 from hydra_companions.router import Router
 from hydra_companions.companion import Companion
 import hydra_companions.config as cfg
+
+
+_HAS_LLM_KEYS = bool(
+    os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("XAI_API_KEY")
+)
 
 
 class FakeBC:
@@ -71,6 +79,8 @@ def test_clear_isolates_per_companion():
         assert (tmp / "test_broski.jsonl").exists()
 
 
+@pytest.mark.skipif(not _HAS_LLM_KEYS,
+                    reason="needs ANTHROPIC_API_KEY/XAI_API_KEY for live respond()")
 def test_coordinator_clear_one():
     # integration-light: the coordinator's handler dispatches to the
     # right companion and returns removed count
@@ -92,6 +102,8 @@ def test_coordinator_clear_one():
         assert coord.get("apex").transcript == []
 
 
+@pytest.mark.skipif(not _HAS_LLM_KEYS,
+                    reason="needs ANTHROPIC_API_KEY/XAI_API_KEY for live respond()")
 def test_coordinator_clear_all():
     from hydra_companions.coordinator import CompanionCoordinator
     import hydra_companions.companion as comp_mod
