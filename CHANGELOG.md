@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.2] — 2026-04-17
+
+Patch for a latent Windows-only crash in the LIVE tick loop.
+
+### Fixed
+
+- **`hydra_agent.py` — stdout/stderr forced to UTF-8.** The `∞` glyph
+  printed on every tick header (when `--duration=0`, which is the
+  default for `start_hydra.bat`) crashed `sys.stdout.write` under
+  `cmd.exe`'s cp1252 codepage with a `UnicodeEncodeError`. The outer
+  tick-loop `try/except` caught the traceback and logged it to
+  `hydra_errors.log`, then advanced to the next tick — but because the
+  crash happened *before* `broadcaster.broadcast(...)`, the dashboard
+  never received a state update and sat on "offline". The bug was
+  latent since 2026-04-10 and only surfaced when the agent was
+  launched from bare `cmd.exe` (via `start_all.bat`) rather than a
+  UTF-8-capable terminal. Fix reconfigures both streams to
+  `encoding="utf-8", errors="replace"` at import time so future
+  non-ASCII prints can't kill the broadcast path.
+
 ## [2.12.1] — 2026-04-17
 
 Follow-up patch to v2.12.0.
