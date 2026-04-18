@@ -62,6 +62,16 @@ DEFAULT_SIZE_HINT_RANGE = (0.85, 1.15)
 SIZE_HINT_HARD_BOUNDS = (0.50, 1.50)
 DEFAULT_POSTURE_ENFORCEMENT = "advisory"  # off | advisory | binding
 DEFAULT_MAX_ACTIVE_LADDERS_PER_PAIR = 3
+
+# Phase E (binding enforcement, opt-in): daily entry caps per posture.
+# None = uncapped. PRESERVATION is the tightest — reflects user's
+# "slow money is real money" stance. ACCUMULATION uncapped by default
+# because by definition you're deploying capital actively.
+DEFAULT_MAX_DAILY_ENTRIES_BY_POSTURE: Dict[str, Optional[int]] = {
+    "PRESERVATION": 2,
+    "TRANSITION": 4,
+    "ACCUMULATION": None,
+}
 DEFAULT_LADDER_EXPIRY_HOURS = 24
 DEFAULT_LADDER_OFFSET_PCT = 0.003
 DEFAULT_GROK_BUDGET_USD_PER_DAY = 5.0
@@ -185,6 +195,12 @@ class ThesisKnobs:
     auto_apply_proposed_updates: bool = False
     grok_processing_budget_usd_per_day: float = DEFAULT_GROK_BUDGET_USD_PER_DAY
     intent_prompt_max_active: int = DEFAULT_INTENT_PROMPT_MAX_ACTIVE
+    # Phase E: per-posture daily entry caps. Consulted only when
+    # posture_enforcement == "binding". Field is a dict (not a tuple)
+    # so users can tune each posture independently from the dashboard.
+    max_daily_entries_by_posture: Dict[str, Optional[int]] = field(
+        default_factory=lambda: dict(DEFAULT_MAX_DAILY_ENTRIES_BY_POSTURE)
+    )
 
 
 @dataclass
@@ -547,6 +563,29 @@ class ThesisTracker:
                 if v is None:
                     continue
                 knobs[key] = max(0, min(20, v))
+            elif key == "max_daily_entries_by_posture":
+                # Phase E knob: dict {PRESERVATION: int|None, TRANSITION: int|None, ACCUMULATION: int|None}
+                if not isinstance(raw, dict):
+                    skipped.append(f"{key}:shape")
+                    continue
+                sanitized: Dict[str, Optional[int]] = {}
+                for k, val in raw.items():
+                    if k not in ("PRESERVATION", "TRANSITION", "ACCUMULATION"):
+                        continue
+                    if val is None:
+                        sanitized[k] = None
+                        continue
+                    try:
+                        n = int(val)
+                    except (TypeError, ValueError):
+                        skipped.append(f"{key}.{k}:coerce")
+                        continue
+                    sanitized[k] = max(0, min(100, n))
+                # Merge with defaults so missing keys retain their prior value
+                merged = dict(knobs.get("max_daily_entries_by_posture")
+                              or DEFAULT_MAX_DAILY_ENTRIES_BY_POSTURE)
+                merged.update(sanitized)
+                knobs[key] = merged
             # Unknown keys: silently dropped (forward-compat).
 
         self._state["knobs"] = knobs
@@ -838,6 +877,83 @@ class ThesisTracker:
         self._state["active_intents"] = new_intents
         self.save()
         return True
+
+    # ─── Posture enforcement (Phase E, opt-in) ────────────────────
+    #
+    # Only binding enforcement consults these gates. The check is soft —
+    # when the daily cap is reached, new entries are SKIPPED (not placed)
+    # and the agent broadcasts a restriction alert. The journal gets no
+    # entry for a skipped trade (there's no placed order to record).
+    # This preserves the "Hydra is the flywheel" stance: hard-rule BLOCK
+    # remains the only true veto; posture-cap SKIP is reversible (happens
+    # tomorrow) and transparent.
+
+    def _utc_day_key(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def daily_entries_for(self, pair: str) -> int:
+        """Count today's recorded entries for a pair. Rolls over at UTC
+        midnight; the map is kept bounded by pruning old days on access."""
+        if self._disabled:
+            return 0
+        de = self._state.get("daily_entries") or {}
+        today = self._utc_day_key()
+        day_bucket = de.get(today) or {}
+        return int(day_bucket.get(pair, 0))
+
+    def record_entry(self, pair: str) -> None:
+        """Increment today's entry counter for a pair. Called by the agent
+        after a trade successfully places. The counter is posture-agnostic
+        — the cap lookup at check time consults current posture."""
+        if self._disabled:
+            return
+        today = self._utc_day_key()
+        de = dict(self._state.get("daily_entries") or {})
+        # Prune any day keys older than today (keep today's bucket only).
+        # Phase E doesn't need historical counts — just "today".
+        de = {today: de.get(today) or {}}
+        bucket = dict(de[today])
+        bucket[pair] = int(bucket.get(pair, 0)) + 1
+        de[today] = bucket
+        self._state["daily_entries"] = de
+        self.save()
+
+    def check_posture_restriction(
+        self, pair: str, side: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return {"allow": bool, "reason": str, "entries_today": int, "cap": Optional[int]}.
+
+        Only binding enforcement restricts. Under "off" or "advisory" this
+        always allows — so default installs after upgrading to v2.13.4 see
+        zero behavior change.
+        """
+        if self._disabled:
+            return {"allow": True, "reason": "", "entries_today": 0, "cap": None}
+        knobs = self._state.get("knobs") or {}
+        enforcement = knobs.get("posture_enforcement", DEFAULT_POSTURE_ENFORCEMENT)
+        if enforcement != "binding":
+            return {"allow": True, "reason": "", "entries_today": 0, "cap": None}
+        posture = self._state.get("posture", Posture.PRESERVATION.value)
+        caps = knobs.get("max_daily_entries_by_posture") or DEFAULT_MAX_DAILY_ENTRIES_BY_POSTURE
+        cap = caps.get(posture)
+        if cap is None:
+            return {"allow": True, "reason": "", "entries_today": self.daily_entries_for(pair), "cap": None}
+        try:
+            cap_i = int(cap)
+        except (TypeError, ValueError):
+            return {"allow": True, "reason": "", "entries_today": self.daily_entries_for(pair), "cap": None}
+        count = self.daily_entries_for(pair)
+        if count >= cap_i:
+            return {
+                "allow": False,
+                "reason": f"posture_{posture.lower()}_daily_cap",
+                "entries_today": count,
+                "cap": cap_i,
+            }
+        return {
+            "allow": True, "reason": "",
+            "entries_today": count, "cap": cap_i,
+        }
 
     # ─── Ladder CRUD + journal-stamping match (Phase D) ──────────
     #

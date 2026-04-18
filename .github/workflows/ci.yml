@@ -84,6 +84,9 @@ jobs:
       - name: Run Thesis Phase D ladder primitive (v2.13.3)
         run: python tests/test_thesis_phase_d.py
 
+      - name: Run Thesis Phase E posture enforcement (v2.13.4)
+        run: python tests/test_thesis_phase_e.py
+
       - name: Run live-execution harness (smoke + mock)
         run: |
           python tests/live_harness/harness.py --mode smoke

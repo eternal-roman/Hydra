@@ -48,7 +48,7 @@ from hydra_engine import (
     SignalAction,
 )
 
-HYDRA_VERSION = "2.13.3"
+HYDRA_VERSION = "2.13.4"
 
 # Reasonable defaults; enforced at config construction and runtime.
 DEFAULT_MAX_TICKS = 200_000

@@ -6,6 +6,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.4] — 2026-04-18
+
+**Golden Unicorn Phase E** — opt-in posture enforcement. The final phase
+of the Golden Unicorn rollout. When the user sets
+`posture_enforcement = "binding"` in the Knobs panel, per-posture daily
+entry caps apply: PRESERVATION 2/day, TRANSITION 4/day, ACCUMULATION
+uncapped (all per-pair; all knob-customizable). Default enforcement
+stays `advisory` — upgrading to v2.13.4 produces zero behavior change
+for users who don't flip the switch.
+
+Posture restriction is a SKIP, not a BLOCK: when the cap is hit, the
+agent declines to place the trade (logged + broadcast via a new
+`thesis_posture_restriction` WS message) and the tick continues. The
+journal gets no entry for a skipped placement — the restriction is a
+"not today" signal, not a hard veto. True BLOCKs remain reserved for
+hard rules (ledger shield, tax floor, no-altcoin).
+
+This closes the A→E arc. Every piece of the Golden Unicorn plan is now
+live: persistence + UI (A), brain augmentation with intent prompts (B),
+Grok document processor with human-approved proposals (C), Ladder
+primitive with rung-aware journal stamping (D), opt-in posture
+enforcement (E). Hydra remains the flywheel — the thesis layer makes
+the brain smarter and the tape more honest without ever silently
+veto-ing a trade.
+
+### Added
+- `ThesisKnobs.max_daily_entries_by_posture` — per-posture cap dict.
+  Defaults: `{PRESERVATION: 2, TRANSITION: 4, ACCUMULATION: None}`.
+  Knobs panel accepts per-posture updates; unknown keys silently
+  dropped.
+- `ThesisTracker.daily_entries_for(pair)` + `.record_entry(pair)` —
+  per-UTC-day counter scoped per pair. `record_entry` prunes yesterday's
+  bucket on each call so state stays bounded.
+- `ThesisTracker.check_posture_restriction(pair, side)` — returns
+  `{allow, reason, entries_today, cap}`. Only consults caps when
+  `posture_enforcement == "binding"`; otherwise always allows.
+- `HydraAgent` now calls `check_posture_restriction` before every
+  execute_signal when signal is BUY/SELL. On a SKIP it logs, broadcasts
+  `thesis_posture_restriction` with payload `{pair, reason,
+  entries_today, cap}`, and continues the tick without placing.
+- `HydraAgent._place_order` calls `thesis.record_entry(pair)` on every
+  successful placement. Increments are harmless under advisory mode
+  (counter ignored by `check_posture_restriction`).
+- `tests/test_thesis_phase_e.py` (13 tests) — default-advisory allows,
+  binding PRESERVATION/TRANSITION caps, ACCUMULATION uncapped, per-pair
+  isolation, custom cap knob with None/unknown-key handling, counter
+  increments, UTC rollover pruning, kill-switch isolation, persistence.
+
+### Safety
+- Phase E cannot BLOCK — it only SKIPs. Skipping a trade is reversible
+  (try again tomorrow). True veto power stays with the hard-rule set.
+- The daily-entry counter is per-pair AND per-UTC-day — reaching the
+  cap on BTC/USDC does not restrict SOL/USDC or SOL/BTC.
+- Live harness `--mode mock` (35 scenarios) green after Phase E — the
+  restriction check short-circuits on advisory mode so the harness
+  (which doesn't opt into binding) sees no change in _place_order behavior.
+- Default advisory mode means the record_entry counter is written but
+  never consulted — a zero-impact observability surface even for users
+  who stay on the default.
+
+### Changed
+- Footer `HYDRA v2.13.3` → `HYDRA v2.13.4`;
+  `hydra_backtest.HYDRA_VERSION` → `2.13.4`.
+
+---
+
 ## [2.13.3] — 2026-04-18
 
 **Golden Unicorn Phase D** — the Ladder primitive. A user authors a

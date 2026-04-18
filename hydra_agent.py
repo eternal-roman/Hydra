@@ -2690,6 +2690,35 @@ class HydraAgent:
                                 print(f"  [THESIS] size_hint_for error ({type(te).__name__}: {te})")
                         _brain_mult = float(ai.get("size_multiplier", 1.0) or 1.0)
                         _final_mult = max(0.0, min(1.5, _brain_mult * _size_hint))
+
+                        # v2.13.4 (Phase E, opt-in): posture-binding daily
+                        # entry cap. Only fires when user has set
+                        # posture_enforcement=binding in the Knobs panel.
+                        # Default advisory mode → always allowed, zero
+                        # behavior change on upgrade. Skipped trades are
+                        # broadcast via thesis_posture_restriction so the
+                        # dashboard can surface the reason.
+                        if (thesis_attr is not None and not thesis_attr.disabled
+                                and sig.get("action") in ("BUY", "SELL")):
+                            try:
+                                restriction = thesis_attr.check_posture_restriction(
+                                    pair, sig.get("action"),
+                                )
+                                if not restriction["allow"]:
+                                    print(f"  [THESIS] posture restriction: "
+                                          f"skipping {sig['action']} on {pair} "
+                                          f"({restriction['reason']}, "
+                                          f"{restriction['entries_today']}/{restriction['cap']})")
+                                    try:
+                                        self.broadcaster.broadcast_message(
+                                            "thesis_posture_restriction",
+                                            {"pair": pair, **restriction},
+                                        )
+                                    except Exception:
+                                        pass
+                                    continue
+                            except Exception as te:
+                                print(f"  [THESIS] restriction check error ({type(te).__name__}: {te})")
                         trade = engine.execute_signal(
                             action=sig.get("action", "HOLD"),
                             confidence=sig.get("confidence", 0),
@@ -3475,6 +3504,18 @@ class HydraAgent:
         entry["order_ref"] = {"order_userref": userref, "order_id": order_id}
         self.order_journal.append(entry)
         journal_index = len(self.order_journal) - 1
+
+        # v2.13.4 (Phase E): record entry for daily-cap accounting. Called
+        # on every successful placement, not just posture-gated ones —
+        # check_posture_restriction only consults this when binding mode
+        # is enabled, so the counter is harmless when enforcement is off
+        # or advisory (the default).
+        t = getattr(self, "thesis", None)
+        if t is not None and not t.disabled:
+            try:
+                t.record_entry(pair)
+            except Exception as te:
+                print(f"  [THESIS] record_entry error ({type(te).__name__}: {te})")
 
         # Register with the execution stream so WS events can finalize this
         # order's lifecycle on subsequent ticks. Orders that come back as
@@ -4628,7 +4669,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.3",
+            "version": "2.13.4",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

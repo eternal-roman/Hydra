@@ -210,6 +210,15 @@ that makes the brain smarter, not more restrictive.
   enforced via FIFO eviction. `on_tick` sweeps expired prompts once per
   tick. Three WS routes wired: `thesis_create_intent`, `thesis_delete_intent`,
   `thesis_update_intent`.
+- Posture enforcement (v2.13.4, Phase E — opt-in via `knobs.posture_enforcement = "binding"`):
+  per-posture daily entry caps via `knobs.max_daily_entries_by_posture`
+  (defaults PRESERVATION=2, TRANSITION=4, ACCUMULATION=None). When
+  binding, the agent calls `thesis.check_posture_restriction(pair, side)`
+  before execute_signal; a false `allow` SKIPs (not BLOCKs) the trade,
+  logs, broadcasts `thesis_posture_restriction`, and lets the tick
+  continue. No journal entry for a skipped placement. SKIP ≠ BLOCK —
+  BLOCK stays reserved for hard rules. Counter is per-pair per-UTC-day;
+  `record_entry` prunes yesterday on every call so state stays bounded.
 - Ladder primitive (v2.13.3, Phase D — feature-flagged via `HYDRA_THESIS_LADDERS=1`):
   `ThesisTracker.create_ladder / list_ladders / cancel_ladder /
   match_rung / record_rung_placement / record_rung_fill /
