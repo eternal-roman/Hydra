@@ -189,6 +189,24 @@ that makes the brain smarter, not more restrictive.
   also gitignored.
 - Schema version: `THESIS_SCHEMA_VERSION = "1.0.0"` in `hydra_thesis.py`;
   bump independently when `ThesisState` JSON schema changes.
+- Brain wiring (v2.13.1, Phase B): `HydraAgent._apply_brain` injects
+  `state["thesis_context"]` → `HydraBrain._format_thesis_context` prepends
+  a THESIS CONTEXT block to `ANALYST_PROMPT`. Active intent prompts are
+  surfaced priority-ranked and scoped by pair. `BrainDecision.thesis_alignment`
+  carries `{in_thesis, intent_prompts_consulted, evidence_delta,
+  posterior_shift_request}` back to the agent; stamped onto journal entries
+  as `decision.thesis_alignment` alongside `decision.thesis_posture` and
+  `decision.thesis_intents_active`.
+- Size multiplier (v2.13.1): `thesis.size_hint_for(pair, signal)` returns
+  1.0 under default advisory enforcement — the brain's `size_multiplier`
+  flows to Kelly unchanged. Only `posture_enforcement == "binding"`
+  (Phase E, opt-in) derives a non-unity hint from `knobs.size_hint_range`
+  × posture. Final product is clamped `[0.0, 1.5]` in `_apply_brain`.
+- Intent prompts (v2.13.1): `ThesisTracker.add_intent / remove_intent /
+  update_intent / list_intents`. `intent_prompt_max_active` (default 5)
+  enforced via FIFO eviction. `on_tick` sweeps expired prompts once per
+  tick. Three WS routes wired: `thesis_create_intent`, `thesis_delete_intent`,
+  `thesis_update_intent`.
 - Snapshot integration: `_save_snapshot` writes `thesis_state`;
   `_load_snapshot` calls `thesis.restore(...)`. Missing key is fail-soft.
 - WS routes: `thesis_get_state`, `thesis_update_knobs`,

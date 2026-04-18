@@ -301,26 +301,166 @@ class TestKillSwitch:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 8. PHASE A INVARIANTS (context + size_hint are inert)
+# 8. CONTEXT + SIZE_HINT (Phase B contract)
 # ═══════════════════════════════════════════════════════════════
 
-class TestPhaseAInvariants:
-    """Phase A must not change any live behavior. These tests lock that in."""
+class TestContextAndSizeHint:
+    """Phase B: context_for returns real data; size_hint stays 1.0 under
+    the default advisory enforcement. Only binding mode can move sizing."""
 
-    def test_context_for_returns_none_in_phase_a(self):
+    def test_context_returns_none_when_disabled(self):
         with tempfile.TemporaryDirectory() as d:
-            t = ThesisTracker.load_or_default(save_dir=d)
+            t = ThesisTracker.load_or_default(save_dir=d, disabled=True)
             assert t.context_for("BTC/USDC", {"action": "BUY"}) is None
 
-    def test_size_hint_is_unity_in_phase_a(self):
+    def test_context_returns_real_object_when_enabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            ctx = t.context_for("BTC/USDC", {"action": "BUY"})
+            assert ctx is not None
+            assert ctx.posture == Posture.PRESERVATION.value
+            assert ctx.size_hint == 1.0  # advisory by default
+            assert "/" in ctx.checklist_summary  # e.g. "0/5 met"
+
+    def test_size_hint_unity_under_default_advisory(self):
         with tempfile.TemporaryDirectory() as d:
             t = ThesisTracker.load_or_default(save_dir=d)
             assert t.size_hint_for("BTC/USDC", {"action": "BUY"}) == 1.0
+
+    def test_size_hint_unity_under_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            t.update_knobs({"posture_enforcement": "off"})
+            assert t.size_hint_for("BTC/USDC", {"action": "BUY"}) == 1.0
+
+    def test_size_hint_moves_only_under_binding(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            t.update_knobs({"posture_enforcement": "binding",
+                            "size_hint_range": [0.80, 1.20]})
+            t.update_posture("PRESERVATION")
+            assert t.size_hint_for("BTC/USDC") == 0.80
+            t.update_posture("ACCUMULATION")
+            assert t.size_hint_for("BTC/USDC") == 1.20
+            t.update_posture("TRANSITION")
+            assert abs(t.size_hint_for("BTC/USDC") - 1.00) < 1e-9
 
     def test_on_tick_does_not_raise(self):
         with tempfile.TemporaryDirectory() as d:
             t = ThesisTracker.load_or_default(save_dir=d)
             t.on_tick(1_700_000_000.0)  # must not raise
+
+    def test_ledger_shield_warning_on_btc_sell(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            ctx = t.context_for("BTC/USDC", {"action": "SELL"})
+            assert any("ledger_shield" in w for w in ctx.hard_rule_warnings)
+
+    def test_no_ledger_warning_on_sol_sell(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            ctx = t.context_for("SOL/USDC", {"action": "SELL"})
+            assert not any("ledger_shield" in w for w in ctx.hard_rule_warnings)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 9. INTENT PROMPT CRUD (Phase B)
+# ═══════════════════════════════════════════════════════════════
+
+class TestIntentCRUD:
+    def test_add_intent(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            created = t.add_intent("lean defensive ahead of CPI", priority=4)
+            assert created is not None
+            assert created["prompt_text"] == "lean defensive ahead of CPI"
+            assert created["priority"] == 4
+            assert "intent_id" in created
+            assert t.list_intents()[0]["intent_id"] == created["intent_id"]
+
+    def test_add_intent_empty_text_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            assert t.add_intent("   ") is None
+            assert t.list_intents() == []
+
+    def test_add_intent_enforces_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            t.update_knobs({"intent_prompt_max_active": 2})
+            t.add_intent("first")
+            t.add_intent("second")
+            t.add_intent("third")  # should evict "first" FIFO
+            ids = [i["prompt_text"] for i in t.list_intents()]
+            assert ids == ["second", "third"]
+
+    def test_add_intent_priority_clamped(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            c = t.add_intent("foo", priority=99)
+            assert c["priority"] == 5
+            c = t.add_intent("bar", priority=-4)
+            assert c["priority"] == 1
+
+    def test_remove_intent(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            c = t.add_intent("to be removed")
+            assert t.remove_intent(c["intent_id"]) is True
+            assert t.list_intents() == []
+
+    def test_remove_intent_unknown_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            assert t.remove_intent("does_not_exist") is False
+
+    def test_update_intent_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            c = t.add_intent("original")
+            ok = t.update_intent(c["intent_id"], {"prompt_text": "edited"})
+            assert ok is True
+            assert t.list_intents()[0]["prompt_text"] == "edited"
+
+    def test_update_intent_priority(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            c = t.add_intent("foo", priority=2)
+            t.update_intent(c["intent_id"], {"priority": 5})
+            assert t.list_intents()[0]["priority"] == 5
+
+    def test_context_surfaces_intents_for_matching_pair(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            t.add_intent("BTC only", pair_scope=["BTC/USDC"], priority=5)
+            t.add_intent("universal", pair_scope=["*"], priority=3)
+            t.add_intent("SOL only", pair_scope=["SOL/USDC"], priority=4)
+            ctx = t.context_for("BTC/USDC")
+            texts = [ip.prompt_text for ip in ctx.active_intents]
+            assert "BTC only" in texts
+            assert "universal" in texts
+            assert "SOL only" not in texts
+            # Sorted by priority descending
+            assert ctx.active_intents[0].prompt_text == "BTC only"
+
+    def test_expired_intent_pruned_on_tick(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d)
+            # Expires_at in the past (year 2000)
+            t.add_intent("stale", expires_at="2000-01-01T00:00:00Z")
+            t.add_intent("fresh", expires_at="2099-01-01T00:00:00Z")
+            t.on_tick(0.0)
+            texts = [i["prompt_text"] for i in t.list_intents()]
+            assert "stale" not in texts
+            assert "fresh" in texts
+
+    def test_disabled_intent_crud_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = ThesisTracker.load_or_default(save_dir=d, disabled=True)
+            assert t.add_intent("x") is None
+            assert t.list_intents() == []
+            assert t.remove_intent("any") is False
+            assert t.update_intent("any", {"prompt_text": "x"}) is False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -330,7 +470,8 @@ class TestPhaseAInvariants:
 def run_tests():
     classes = [
         TestInit, TestPersistence, TestSnapshotRestore, TestKnobClamping,
-        TestPosture, TestHardRules, TestKillSwitch, TestPhaseAInvariants,
+        TestPosture, TestHardRules, TestKillSwitch,
+        TestContextAndSizeHint, TestIntentCRUD,
     ]
     total = 0
     passed = 0

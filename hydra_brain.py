@@ -57,6 +57,14 @@ class BrainDecision:
     latency_ms: float = 0.0
     fallback: bool = False
     escalated: bool = False        # True if Grok was consulted
+    # v2.13.1 (Golden Unicorn Phase B): thesis layer alignment. Populated
+    # from the analyst's JSON when a ThesisContext was injected into the
+    # prompt. Always None when thesis is disabled / absent; the brain then
+    # behaves identically to v2.12.5. Fields (all optional): in_thesis (bool),
+    # intent_prompts_consulted (List[str] — intent_ids), evidence_delta
+    # (str), posterior_shift_request (float). Surfaces on the dashboard
+    # AI decision card and is stamped onto the journal entry for audit.
+    thesis_alignment: Optional[Dict[str, Any]] = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -71,6 +79,13 @@ Your analysis must be:
 3. QUANTITATIVE — reference actual indicator values
 4. PORTFOLIO-AWARE — consider the aggregate portfolio P&L and cross-pair dynamics when assessing conviction
 
+When a THESIS CONTEXT block is present, treat it as the user's persistent
+worldview (Cowen ITC framework) and authored intent. You DO NOT need to
+obey it — it is advisory context that should shape your reasoning, not
+override it. If any ACTIVE INTENT PROMPT applies to this pair, weigh it
+explicitly. If current evidence contradicts the stated posterior, say so
+directly rather than papering over it.
+
 Respond ONLY with this JSON (no other text):
 {
   "thesis": "1-3 sentence market thesis",
@@ -78,8 +93,16 @@ Respond ONLY with this JSON (no other text):
   "suggested_action": "BUY" or "SELL" or "HOLD",
   "conviction": 0.0 to 1.0,
   "key_factors": ["factor1", "factor2"],
-  "concern": "primary risk or null"
-}"""
+  "concern": "primary risk or null",
+  "thesis_alignment": {
+    "in_thesis": true or false,
+    "intent_prompts_consulted": ["intent_id", ...],
+    "evidence_delta": "1 sentence on any shift vs the stated posterior, or \\"\\" if none",
+    "posterior_shift_request": -0.30 to +0.30
+  }
+}
+
+When no THESIS CONTEXT is present, OMIT the "thesis_alignment" field."""
 
 RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager. You balance capital protection with opportunity capture. You receive the engine's signal, the analyst's thesis, and portfolio state.
 
@@ -402,6 +425,12 @@ class HydraBrain:
                 latency_ms=(time.time() - start) * 1000,
                 fallback=False,
                 escalated=escalated,
+                # v2.13.1: carry thesis_alignment through so the agent can
+                # stamp it on the journal and the dashboard can render it
+                # under the AI decision card. Missing field → None, which
+                # matches the dataclass default and signals "thesis absent
+                # from this deliberation."
+                thesis_alignment=analyst_output.get("thesis_alignment"),
             )
 
             # Bookkeeping: shared state writes under lock
@@ -834,6 +863,58 @@ class HydraBrain:
             return ""
         return f"\nPORTFOLIO STRATEGIST GUIDANCE (advisory):\n  {guidance}"
 
+    def _format_thesis_context(self, state: Dict) -> str:
+        """v2.13.1 (Golden Unicorn Phase B): surface the persistent thesis
+        layer to the analyst. Always empty string when thesis is disabled
+        or no context present — preserves v2.12.5 prompt shape."""
+        ctx = state.get("thesis_context")
+        if not ctx:
+            return ""
+        # ctx may be a ThesisContext dataclass OR a plain dict (test doubles)
+        def _get(key, default=None):
+            if isinstance(ctx, dict):
+                return ctx.get(key, default)
+            return getattr(ctx, key, default)
+
+        intents = _get("active_intents", []) or []
+        intent_lines = []
+        for ip in intents:
+            if isinstance(ip, dict):
+                prio = ip.get("priority", 3)
+                text = ip.get("prompt_text", "")
+                scope = ip.get("pair_scope") or ["*"]
+                intent_id = ip.get("intent_id", "")
+            else:
+                prio = getattr(ip, "priority", 3)
+                text = getattr(ip, "prompt_text", "")
+                scope = getattr(ip, "pair_scope", ["*"])
+                intent_id = getattr(ip, "intent_id", "")
+            scope_str = ",".join(scope) if isinstance(scope, (list, tuple)) else str(scope)
+            intent_lines.append(
+                f"    • [p={prio} scope={scope_str} id={intent_id}] {text}"
+            )
+
+        warnings = _get("hard_rule_warnings", []) or []
+        warn_block = ""
+        if warnings:
+            warn_block = "\n  HARD RULES (advisory surface — brain reads, does not override):\n" + \
+                "\n".join(f"    ! {w}" for w in warnings)
+
+        evidence = _get("recent_evidence_summary", "") or ""
+        ev_block = f"\n  RECENT EVIDENCE (last 72h): {evidence}" if evidence else ""
+
+        intents_block = "\n".join(intent_lines) if intent_lines else "    (none active for this pair)"
+
+        return (
+            f"\n\nTHESIS CONTEXT:\n"
+            f"  Posture: {_get('posture', '?')} ({_get('posture_enforcement', 'advisory')})\n"
+            f"  Posterior: {_get('posterior_summary', '?')}\n"
+            f"  Checklist: {_get('checklist_summary', '?')}\n"
+            f"  Active intent prompts:\n{intents_block}"
+            f"{ev_block}"
+            f"{warn_block}"
+        )
+
     def _build_analyst_prompt(self, state: Dict) -> str:
         sig = state.get("signal", {})
         ind = state.get("indicators", {})
@@ -865,7 +946,7 @@ RECENT CLOSES: {recent_closes}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}"""
+RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}{self._format_thesis_context(state)}"""
 
     def _build_risk_prompt(self, state: Dict, analyst: Dict) -> str:
         sig = state.get("signal", {})

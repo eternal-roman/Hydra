@@ -75,6 +75,9 @@ jobs:
       - name: Run Thesis drift regression (v2.13.0)
         run: python tests/test_thesis_drift.py
 
+      - name: Run Thesis Phase B brain integration (v2.13.1)
+        run: python tests/test_thesis_phase_b.py
+
       - name: Run live-execution harness (smoke + mock)
         run: |
           python tests/live_harness/harness.py --mode smoke

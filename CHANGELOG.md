@@ -6,6 +6,88 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.1] — 2026-04-18
+
+**Golden Unicorn Phase B** — brain augmentation. The analyst now reads the
+persistent thesis layer on every call, active intent prompts reach the LLM
+verbatim, and `BrainDecision.thesis_alignment` stamps the analyst's
+self-reported alignment onto the journal for audit. Size multiplier remains
+unchanged under the default advisory enforcement — binding-mode sizing is
+still the opt-in Phase E path. The Thesis tab's Intent Prompts panel is
+now functional (create / delete with pair scope + priority).
+
+### Added
+- `BrainDecision.thesis_alignment: Optional[Dict]` field carrying the
+  analyst's self-reported `{in_thesis, intent_prompts_consulted,
+  evidence_delta, posterior_shift_request}` back to the agent and UI.
+  Defaults to `None` when thesis is absent — preserves v2.12.5 shape.
+- `HydraBrain._format_thesis_context()` — builds the THESIS CONTEXT block
+  prepended to the analyst user message. Accepts both `ThesisContext`
+  dataclass instances and plain-dict shapes (for test doubles and WS
+  replays). Emits nothing when no context is present.
+- `ANALYST_PROMPT` extended with a thesis-context clause directing the LLM
+  to weigh user-authored intent and flag evidence contradictions with the
+  stated posterior. JSON schema gains an optional `thesis_alignment`
+  block; omitted when no thesis context was supplied.
+- `ThesisTracker.context_for()` now returns a real `ThesisContext`
+  (posture, posture_enforcement, posterior_summary, checklist_summary,
+  active intents scoped to pair, hard-rule warnings, size_hint,
+  conviction_floor_adjustment). Evidence summary + ladder slot remain
+  empty pending Phases C and D.
+- `ThesisTracker.size_hint_for()` returns 1.0 under the default advisory
+  enforcement so Phase B is genuinely augmentative. Binding-mode
+  interpolation across `size_hint_range` × posture is wired but gated
+  behind `knobs.posture_enforcement == "binding"` (Phase E).
+- Intent prompt CRUD: `ThesisTracker.add_intent`, `.remove_intent`,
+  `.update_intent`, `.list_intents`. Enforces `intent_prompt_max_active`
+  via FIFO eviction so new prompts never silently fail.
+  `ThesisTracker.on_tick` now sweeps expired prompts once per tick.
+- Three new WS routes: `thesis_create_intent`, `thesis_delete_intent`,
+  `thesis_update_intent`. Each broadcasts the updated `thesis_state`
+  so every client stays in sync.
+- `HydraAgent._apply_brain` now injects `state["thesis_context"]` for
+  every brain call when the tracker is enabled. The `ai_decision` dict
+  in live state carries `thesis_alignment` back to the dashboard.
+- `HydraAgent._place_order` stamps three new journal-entry fields:
+  `decision.thesis_posture`, `decision.thesis_intents_active`,
+  `decision.thesis_alignment`. Missing under disabled/fallback paths so
+  older journals keep their exact shape.
+- Dashboard: THESIS tab's Active Intent Prompts panel is fully
+  functional — list, delete, compose (with pair scope + priority). The
+  placeholder text has been replaced with a composer bound to the new
+  WS routes.
+- `tests/test_thesis_phase_b.py` — 7 tests verifying prompt construction,
+  intent-text propagation verbatim, hard-rule-warning surfacing,
+  dataclass-vs-dict tolerance, and `BrainDecision.thesis_alignment`
+  field propagation.
+- `tests/test_thesis_tracker.py` extended with TestContextAndSizeHint
+  (8 tests) and TestIntentCRUD (11 tests). Total 52 tracker tests.
+
+### Changed
+- `HydraAgent` execute_signal call site composes
+  `brain_size_multiplier × thesis.size_hint_for(pair, signal)` with a
+  final clamp to `[0.0, 1.5]`. In advisory mode size_hint is 1.0 so the
+  product equals the brain-only value — default behavior preserved.
+- Drift regression (`tests/test_thesis_drift.py`) updated to reflect
+  Phase B: disabled mode stays fully inert; default-enabled surfaces
+  real context but keeps size_hint at 1.0; binding mode begins moving
+  size_hint off 1.0 (the opt-in path).
+- Footer `HYDRA v2.13.0` → `HYDRA v2.13.1`;
+  `hydra_backtest.HYDRA_VERSION` → `2.13.1`.
+
+### Safety
+- Non-binding enforcement is the default and is the ONLY mode that
+  ships enabled — no default install sees a sizing change.
+- Context injection is guarded by `getattr(self, "thesis", None)` +
+  `.disabled` checks so any thesis construction failure leaves the
+  brain call path identical to v2.12.5.
+- Intent prompt text is length-capped at 2000 chars per prompt and
+  priority is clamped to `[1, 5]` before persistence so a hostile WS
+  payload cannot bloat the analyst prompt or overflow the priority
+  ordering.
+
+---
+
 ## [2.13.0] — 2026-04-18
 
 Minor release opening the **Golden Unicorn** initiative — a persistent,
