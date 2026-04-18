@@ -2549,6 +2549,188 @@ function RangeSlider({ label, value, onCommit, min, max, step = 0.01, format = (
   );
 }
 
+function DocumentLibraryPanel({ documentCount, sendMessage }) {
+  const [name, setName] = useState("");
+  const [body, setBody] = useState("");
+  const [kind, setKind] = useState("cowen_memo");
+  const submit = () => {
+    const content = body.trim();
+    const filename = name.trim() || `note_${Date.now()}.md`;
+    if (!content) return;
+    sendMessage({
+      type: "thesis_upload_document",
+      filename, content, doc_type: kind,
+    });
+    setName(""); setBody("");
+  };
+  return (
+    <ThesisCard title="Document Library">
+      <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono,
+                    lineHeight: 1.6, marginBottom: 12 }}>
+        Paste research (Cowen memos, FOMC minutes, custom analyses). Grok 4
+        reasoning synthesizes each into a pending proposal for your review.
+        Budget cap set in the Knobs panel above (default $5/day).
+      </div>
+      <div style={{ fontSize: 11, color: COLORS.textDim, fontFamily: mono,
+                    marginBottom: 10 }}>
+        Current library: {documentCount ?? 0} document(s)
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+        <StyledInput
+          value={name}
+          onChange={setName}
+          placeholder="filename.md (optional)"
+        />
+        <StyledSelect
+          value={kind}
+          onChange={setKind}
+          options={[
+            { value: "cowen_memo", label: "Cowen memo" },
+            { value: "fomc_minutes", label: "FOMC minutes" },
+            { value: "research_report", label: "Research" },
+            { value: "user_note", label: "User note" },
+            { value: "other", label: "Other" },
+          ]}
+        />
+      </div>
+      <StyledTextarea
+        value={body}
+        onChange={setBody}
+        placeholder="Paste document content here…"
+        minHeight={140}
+      />
+      <div style={{ marginTop: 10, textAlign: "right" }}>
+        <button
+          onClick={submit}
+          disabled={!body.trim()}
+          style={{ padding: "8px 18px",
+                   background: body.trim() ? `${COLORS.warn}20` : "transparent",
+                   color: body.trim() ? COLORS.warn : COLORS.textDim,
+                   border: `1px solid ${body.trim() ? COLORS.warn + "60" : COLORS.panelBorder}`,
+                   borderRadius: 4, cursor: body.trim() ? "pointer" : "not-allowed",
+                   fontFamily: mono, fontSize: 11, fontWeight: 700,
+                   letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          Upload + process
+        </button>
+      </div>
+    </ThesisCard>
+  );
+}
+
+function PendingProposalCard({ p, sendMessage }) {
+  const [notes, setNotes] = useState("");
+  const meta = p._meta || {};
+  const failed = meta.failed === true;
+  const bigShift = p.requires_human === true;
+  const accent = failed ? COLORS.danger : (bigShift ? COLORS.purple : COLORS.warn);
+  const approve = () => sendMessage({
+    type: "thesis_approve_proposal", proposal_id: p.proposal_id,
+    user_notes: notes.trim() || null,
+  });
+  const reject = () => sendMessage({
+    type: "thesis_reject_proposal", proposal_id: p.proposal_id,
+    user_notes: notes.trim() || null,
+  });
+  return (
+    <div style={{ border: `1px solid ${accent}40`, borderRadius: 6,
+                  padding: 12, marginBottom: 10, background: `${accent}08` }}>
+      <div style={{ display: "flex", justifyContent: "space-between",
+                    fontFamily: mono, fontSize: 11, marginBottom: 8 }}>
+        <span style={{ color: accent, fontWeight: 700, letterSpacing: "0.08em" }}>
+          {failed ? "FAILED" : (bigShift ? "REQUIRES HUMAN" : "PENDING")}
+        </span>
+        <span style={{ color: COLORS.textDim }}>
+          conf: {(p.confidence ?? 0).toFixed(2)} · {meta.filename || "—"}
+        </span>
+      </div>
+      <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text,
+                    lineHeight: 1.5, marginBottom: 10 }}>
+        {p.reasoning || "(no reasoning)"}
+      </div>
+      {p.posterior_shift && (
+        <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, marginBottom: 6 }}>
+          posterior → {p.posterior_shift.regime} @ {p.posterior_shift.confidence?.toFixed?.(2)}
+        </div>
+      )}
+      {Array.isArray(p.proposed_intents) && p.proposed_intents.length > 0 && (
+        <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, marginBottom: 6 }}>
+          proposed intents: {p.proposed_intents.length}
+        </div>
+      )}
+      {!failed && (
+        <>
+          <StyledInput
+            value={notes}
+            onChange={setNotes}
+            placeholder="approval notes (optional)"
+            fontSize={11}
+          />
+          <div style={{ display: "flex", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
+            <button onClick={reject}
+              style={{ padding: "6px 14px", background: "transparent",
+                       color: COLORS.danger,
+                       border: `1px solid ${COLORS.danger}40`, borderRadius: 4,
+                       cursor: "pointer", fontFamily: mono, fontSize: 11,
+                       fontWeight: 700, letterSpacing: "0.08em",
+                       textTransform: "uppercase" }}>
+              reject
+            </button>
+            <button onClick={approve}
+              style={{ padding: "6px 14px",
+                       background: `${COLORS.accent}20`,
+                       color: COLORS.accent,
+                       border: `1px solid ${COLORS.accent}60`, borderRadius: 4,
+                       cursor: "pointer", fontFamily: mono, fontSize: 11,
+                       fontWeight: 700, letterSpacing: "0.08em",
+                       textTransform: "uppercase" }}>
+              approve
+            </button>
+          </div>
+        </>
+      )}
+      {failed && (
+        <div style={{ display: "flex", gap: 8, marginTop: 4, justifyContent: "flex-end" }}>
+          <button onClick={reject}
+            style={{ padding: "4px 10px", background: "transparent",
+                     color: COLORS.textDim, border: `1px solid ${COLORS.panelBorder}`,
+                     borderRadius: 4, cursor: "pointer", fontFamily: mono, fontSize: 10 }}>
+            dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingProposalsPanel({ proposals, sendMessage }) {
+  useEffect(() => {
+    // Refresh on mount — agent pushes updates via thesis_state broadcasts,
+    // but the explicit list request ensures we have a snapshot even if no
+    // change has fired since the user connected.
+    sendMessage({ type: "thesis_list_proposals" });
+  }, [sendMessage]);
+  const items = proposals || [];
+  return (
+    <ThesisCard title="Pending Proposals" accent={items.length > 0 ? COLORS.warn : COLORS.textDim}>
+      <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono,
+                    lineHeight: 1.6, marginBottom: 12 }}>
+        Grok-authored thesis updates awaiting your approval. Posterior
+        shifts above 0.30 require an explicit "requires human" review
+        regardless of auto-apply.
+      </div>
+      {items.length === 0 && (
+        <div style={{ fontSize: 12, color: COLORS.textDim, fontFamily: mono,
+                      padding: "12px 0" }}>
+          No pending proposals — upload a document on the left to get one.
+        </div>
+      )}
+      {items.map((p) => (
+        <PendingProposalCard key={p.proposal_id} p={p} sendMessage={sendMessage} />
+      ))}
+    </ThesisCard>
+  );
+}
+
 function IntentPromptsPanel({ intents, max, sendMessage }) {
   const [draft, setDraft] = useState("");
   const [scope, setScope] = useState("*");
@@ -2663,7 +2845,7 @@ function IntentPromptsPanel({ intents, max, sendMessage }) {
   );
 }
 
-function ThesisPanel({ thesisState, sendMessage }) {
+function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
   // Before the first thesis_state response, show a loading shell.
   if (thesisState == null) {
     return (
@@ -2899,23 +3081,14 @@ function ThesisPanel({ thesisState, sendMessage }) {
           so the UX contract is clear and future phases slot in without layout
           churn. */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <ThesisCard title="Document Library (Phase C)" muted>
-          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
-            Upload Cowen memos, FOMC minutes, research. Grok 4 reasoning
-            synthesizes each into a pending ProposedThesisUpdate for your
-            review. Lands in Phase C alongside the processor pipeline.
-          </div>
-          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
-            Current library: {thesisState.document_library_count ?? 0} document(s)
-          </div>
-        </ThesisCard>
-        <ThesisCard title="Pending Proposals (Phase C)" muted>
-          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
-            Grok-authored thesis updates awaiting your approval. Posterior
-            shifts above 0.30 require an explicit "regime-change claim"
-            checkbox regardless of auto-apply setting.
-          </div>
-        </ThesisCard>
+        <DocumentLibraryPanel
+          documentCount={thesisState.document_library_count}
+          sendMessage={sendMessage}
+        />
+        <PendingProposalsPanel
+          proposals={pendingProposals}
+          sendMessage={sendMessage}
+        />
         <IntentPromptsPanel
           intents={thesisState.active_intents || []}
           max={knobs.intent_prompt_max_active ?? 5}
@@ -2988,6 +3161,10 @@ export default function App() {
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
   const [thesisState, setThesisState] = useState(null);
+  // v2.13.2 (Phase C): pending Grok proposals list. Agent pushes updates
+  // via thesis_proposals_list messages; individual thesis_proposal_pending
+  // pushes also trigger a re-fetch so the list stays fresh.
+  const [pendingProposals, setPendingProposals] = useState([]);
   const [btProgress, setBtProgress] = useState({});     // experiment_id -> progress msg
   const [btResults, setBtResults] = useState({});       // experiment_id -> result summary
   const [btReviews, setBtReviews] = useState({});       // experiment_id -> review
@@ -3341,6 +3518,20 @@ export default function App() {
               // v2.13.0: THESIS tab snapshot. `msg.data` follows the shape
               // returned by ThesisTracker.current_state() (Python side).
               if (msg.data) setThesisState(msg.data);
+              return;
+            case "thesis_proposals_list":
+              // v2.13.2 (Phase C): full pending list refresh.
+              if (Array.isArray(msg.data)) setPendingProposals(msg.data);
+              return;
+            case "thesis_proposal_pending":
+              // v2.13.2 (Phase C): incremental push from processor worker.
+              if (msg.data) setPendingProposals((prev) => {
+                const next = prev.filter(
+                  (p) => p.proposal_id !== msg.data.proposal_id
+                );
+                next.push(msg.data);
+                return next;
+              });
               return;
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
@@ -3780,7 +3971,11 @@ export default function App() {
               </div>
             )}
             {activeTab === "THESIS" && (
-              <ThesisPanel thesisState={thesisState} sendMessage={sendMessage} />
+              <ThesisPanel
+                thesisState={thesisState}
+                sendMessage={sendMessage}
+                pendingProposals={pendingProposals}
+              />
             )}
             {activeTab === "COMPARE" && (
               <div style={{ padding: "16px 24px" }}>
@@ -4282,7 +4477,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.13.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.13.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

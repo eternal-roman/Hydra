@@ -54,6 +54,7 @@ if os.path.exists(_env_path):
 from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
 from hydra_tuner import ParameterTracker
 from hydra_thesis import ThesisTracker
+from hydra_thesis_processor import ThesisProcessorWorker
 from hydra_journal_migrator import migrate_legacy_trade_log_file
 
 try:
@@ -1612,6 +1613,7 @@ class HydraAgent:
         # (drift regression test enforces v2.12.5 bit-identical behavior
         # when disabled). Any init failure leaves the live agent untouched.
         self.thesis = None
+        self.thesis_processor = None
         try:
             self.thesis = ThesisTracker.load_or_default(save_dir=base_dir)
             if self.thesis.disabled:
@@ -1621,6 +1623,38 @@ class HydraAgent:
         except Exception as e:
             print(f"  [THESIS] init failed ({type(e).__name__}: {e}); disabled for this run")
             self.thesis = ThesisTracker(save_dir=base_dir, disabled=True)
+
+        # v2.13.2 (Phase C): Grok document processor. Available only when
+        # XAI_API_KEY is set AND HYDRA_THESIS_PROCESSOR_DISABLED != 1 AND
+        # the thesis layer itself is enabled. Daemon worker; failure
+        # isolation mirrors the backtest subsystem.
+        try:
+            if (self.thesis and not self.thesis.disabled
+                    and not os.environ.get("HYDRA_THESIS_PROCESSOR_DISABLED")):
+                xai_key = os.environ.get("XAI_API_KEY", "")
+                if xai_key:
+                    budget = float(
+                        (self.thesis.knobs or {}).get("grok_processing_budget_usd_per_day")
+                        or 5.0
+                    )
+                    self.thesis_processor = ThesisProcessorWorker(
+                        xai_key=xai_key,
+                        pending_dir=self.thesis._pending_dir(),
+                        get_thesis_state=lambda: self.thesis.snapshot(),
+                        on_proposal=self._on_thesis_proposal,
+                        broadcast=self.broadcaster.broadcast_message,
+                        daily_budget_usd=budget,
+                    )
+                    if self.thesis_processor.available:
+                        self.thesis_processor.start()
+                        print(f"  [THESIS_PROC] Grok document processor started (budget=${budget:.2f}/day)")
+                    else:
+                        print("  [THESIS_PROC] worker unavailable (openai client unreachable)")
+                else:
+                    print("  [THESIS_PROC] XAI_API_KEY not set — processor offline")
+        except Exception as e:
+            print(f"  [THESIS_PROC] init failed ({type(e).__name__}: {e}); disabled for this run")
+            self.thesis_processor = None
 
         # ─── Backtest subsystem (v2.10.0, Phase 6) ─────────────────────
         # Strictly additive. Kill-switchable via HYDRA_BACKTEST_DISABLED=1
@@ -1995,6 +2029,64 @@ class HydraAgent:
             self.thesis.update_intent(intent_id, patch)
         self._broadcast_thesis_state()
 
+    # ─── Thesis document + proposal handlers (v2.13.2, Phase C) ───
+
+    def _on_thesis_proposal(self, proposal: Dict[str, Any]) -> None:
+        """Callback invoked by ThesisProcessorWorker once Grok has produced
+        a proposal. Write to hydra_thesis_pending/ and broadcast."""
+        if not self.thesis:
+            return
+        self.thesis.write_pending_proposal(proposal)
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_upload_document(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        ref = self.thesis.upload_document(
+            filename=p.get("filename", "note.md"),
+            content=p.get("content", ""),
+            doc_type=p.get("doc_type", "other"),
+        )
+        if ref and self.thesis_processor and self.thesis_processor.available:
+            try:
+                with open(ref["file_path"], "r", encoding="utf-8") as f:
+                    text = f.read()
+                self.thesis_processor.submit({
+                    "doc_id": ref["doc_id"],
+                    "filename": ref["filename"],
+                    "doc_type": ref["doc_type"],
+                    "text": text,
+                })
+            except Exception as e:
+                print(f"  [THESIS] document submit failed ({type(e).__name__}: {e})")
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_list_proposals(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        proposals = self.thesis.list_pending_proposals()
+        try:
+            self.broadcaster.broadcast_message(
+                "thesis_proposals_list", {"data": proposals},
+            )
+        except Exception:
+            pass
+
+    def _handle_thesis_approve_proposal(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        self.thesis.approve_proposal(p.get("proposal_id", ""), p.get("user_notes"))
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_reject_proposal(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        self.thesis.reject_proposal(p.get("proposal_id", ""), p.get("user_notes"))
+        self._broadcast_thesis_state()
+
     def _mount_thesis_routes(self) -> None:
         """Wire thesis WS handlers into the broadcaster. Safe on repeat
         invocation — register_handler overwrites prior mappings."""
@@ -2006,6 +2098,11 @@ class HydraAgent:
         self.broadcaster.register_handler("thesis_create_intent", self._handle_thesis_create_intent)
         self.broadcaster.register_handler("thesis_delete_intent", self._handle_thesis_delete_intent)
         self.broadcaster.register_handler("thesis_update_intent", self._handle_thesis_update_intent)
+        # v2.13.2 (Phase C) — document uploads + Grok proposal approval workflow.
+        self.broadcaster.register_handler("thesis_upload_document", self._handle_thesis_upload_document)
+        self.broadcaster.register_handler("thesis_list_proposals", self._handle_thesis_list_proposals)
+        self.broadcaster.register_handler("thesis_approve_proposal", self._handle_thesis_approve_proposal)
+        self.broadcaster.register_handler("thesis_reject_proposal", self._handle_thesis_reject_proposal)
 
     def _merge_order_journal(self):
         """Merge on-disk journal files into self.order_journal.
@@ -4459,7 +4556,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.1",
+            "version": "2.13.2",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
