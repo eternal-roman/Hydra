@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.0] — 2026-04-17
+
+Cross-session memory via CBP sidecar.
+
+### Added
+
+- **`hydra_companions/cbp_client.py`** — thin urllib client for the
+  cbp-runner sidecar (a sibling checkout that supervises a vendored
+  Context Binding Protocol reference server). Public API:
+  `remember(label, summary, tags, …)` → `PUT /v1/node/:id` (v0.8.1
+  clean body, no `v`/`prev`), `recall(label, tag, weight_min)` →
+  `GET /v1/frame/:id?cbq=…` (server-side filtering only). All
+  failures degrade silently per the sidecar's "clients MUST NOT
+  block" invariant — the client re-reads `state/ready.json` on every
+  call so it handles server restart / token rotation transparently.
+- **`start_hydra.bat` + `start_all.bat`** — prepend
+  `python "%CBP_RUNNER_DIR%\supervisor.py" --detach` so Hydra
+  auto-starts the CBP sidecar on launch. `CBP_RUNNER_DIR` defaults to
+  `C:\Users\elamj\Dev\cbp-runner`, overridable via env. The call is
+  idempotent (no-op if already up) and its output is suppressed.
+- **`tests/test_cbp_client.py`** — 6 new tests using a real in-process
+  HTTP server (no mocks). Covers v0.8.1 body shape (omitted v/prev),
+  PUT idempotence, server-side CBQ URL encoding, and silent
+  degradation on missing `ready.json` / network failure.
+
+### Changed
+
+- **`hydra_companions/memory.py`** — `DistilledMemory.remember()` now
+  mirrors every write into the CBP graph after persisting JSONL.
+  JSONL stays authoritative for the in-process companion loop; CBP
+  is the cross-session knowledge graph. Mirror failures do not
+  propagate. Node id is
+  `sha256('node:companion.<companion>.<topic>.<sha8(fact)>')[:8]` so
+  re-saying the same fact is a graph-level no-op.
+- **`HYDRA_MEMORY.md`** (local-only, gitignored) — replaces the
+  archival stub with the actual sidecar topology, kill switches, and
+  seeding command.
+
 ## [2.11.1] — 2026-04-17
 
 Dashboard polish — Strategy Matrix panel restyle.

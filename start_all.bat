@@ -7,6 +7,13 @@ echo  HYDRA - Starting All Services
 echo ========================================
 echo.
 
+:: Kick the CBP memory sidecar first (idempotent; no-op if already up).
+if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=C:\Users\elamj\Dev\cbp-runner"
+if exist "%CBP_RUNNER_DIR%\supervisor.py" (
+    echo [%date% %time%] Bringing up CBP sidecar (%CBP_RUNNER_DIR%)
+    python "%CBP_RUNNER_DIR%\supervisor.py" --detach >nul 2>&1
+)
+
 :: Start dashboard in a new window
 start "HYDRA Dashboard" cmd /c start_dashboard.bat
 
