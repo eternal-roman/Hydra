@@ -28,6 +28,14 @@ from typing import Dict, List, Optional, Any, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Force UTF-8 on stdout/stderr so non-ASCII glyphs in status prints (e.g. ∞)
+# don't crash the tick loop under Windows cmd.exe's default cp1252 codepage.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 # Load .env file if present (no dependency needed)
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 if os.path.exists(_env_path):
