@@ -195,12 +195,15 @@ class CbpClient:
         if not addr or not token:
             return 0, "missing addr/token"
         url = addr.rstrip("/") + path
-        data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {"Authorization": f"Bearer {token}"}
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        # Serialize + build the request inside the try-block so a TypeError
+        # from json.dumps (non-serializable body) honors the no-raise contract
+        # documented on the class and in remember()/recall().
         try:
+            data = None if body is None else json.dumps(body).encode("utf-8")
+            headers = {"Authorization": f"Bearer {token}"}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
             with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
                 raw = resp.read().decode("utf-8") or ""
                 try:
@@ -214,6 +217,10 @@ class CbpClient:
             except ValueError:
                 return e.code, raw
         except (urllib.error.URLError, OSError, TimeoutError) as e:
+            return 0, f"{type(e).__name__}: {e}"
+        except (TypeError, ValueError) as e:
+            # json.dumps TypeError on non-serializable bodies, or any other
+            # prep-time failure. Covered separately from URLError/OSError.
             return 0, f"{type(e).__name__}: {e}"
 
 
