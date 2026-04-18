@@ -53,6 +53,7 @@ if os.path.exists(_env_path):
 
 from hydra_engine import HydraEngine, CrossPairCoordinator, OrderBookAnalyzer, PositionSizer, SIZING_CONSERVATIVE, SIZING_COMPETITION
 from hydra_tuner import ParameterTracker
+from hydra_thesis import ThesisTracker
 from hydra_journal_migrator import migrate_legacy_trade_log_file
 
 try:
@@ -1603,6 +1604,24 @@ class HydraAgent:
         # Dashboard broadcaster
         self.broadcaster = DashboardBroadcaster(port=ws_port)
 
+        # ─── Thesis layer (v2.13.0, Phase A — Golden Unicorn) ──────────
+        # Slow-moving persistent worldview + user-authored intent. Phase A
+        # is surface-only: state + knobs load/save, dashboard THESIS tab,
+        # WS handlers. No brain wiring, no signal gating, no ladders —
+        # those land in Phases B–E. Kill-switchable via HYDRA_THESIS_DISABLED=1
+        # (drift regression test enforces v2.12.5 bit-identical behavior
+        # when disabled). Any init failure leaves the live agent untouched.
+        self.thesis = None
+        try:
+            self.thesis = ThesisTracker.load_or_default(save_dir=base_dir)
+            if self.thesis.disabled:
+                print("  [THESIS] subsystem disabled via HYDRA_THESIS_DISABLED=1")
+            else:
+                print(f"  [THESIS] layer loaded (posture={self.thesis.posture})")
+        except Exception as e:
+            print(f"  [THESIS] init failed ({type(e).__name__}: {e}); disabled for this run")
+            self.thesis = ThesisTracker(save_dir=base_dir, disabled=True)
+
         # ─── Backtest subsystem (v2.10.0, Phase 6) ─────────────────────
         # Strictly additive. Kill-switchable via HYDRA_BACKTEST_DISABLED=1
         # (I6). Any failure inside init leaves the live agent completely
@@ -1668,6 +1687,15 @@ class HydraAgent:
         except Exception as e:
             print(f"  [COMPANION] init failed ({type(e).__name__}: {e}); disabled for this run")
             self.companion_coordinator = None
+
+        # v2.13.0: Mount Thesis WS handlers so the dashboard THESIS tab can
+        # read/update knobs, posture, and hard rules. All handlers are no-ops
+        # when the tracker is disabled (they report disabled:true back to UI
+        # so the tab can render a clear "kill-switched" state).
+        try:
+            self._mount_thesis_routes()
+        except Exception as e:
+            print(f"  [THESIS] route mount failed ({type(e).__name__}: {e})")
 
         # Cross-pair regime coordinator
         self.coordinator = CrossPairCoordinator(pairs)
@@ -1789,6 +1817,12 @@ class HydraAgent:
             # Persist the userref counter so a restart never re-issues a
             # userref already in-flight on the exchange from this session.
             "userref_counter": self._userref_counter,
+            # v2.13.0: Thesis layer state. Empty dict when disabled — the
+            # tracker's snapshot() returns {} so the load path is fail-soft.
+            # getattr guards tests that use object.__new__(HydraAgent) to
+            # bypass __init__ and therefore never set self.thesis.
+            "thesis_state": (getattr(self, "thesis", None).snapshot()
+                             if getattr(self, "thesis", None) else {}),
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -1850,9 +1884,66 @@ class HydraAgent:
             persisted_uref = snapshot.get("userref_counter")
             if isinstance(persisted_uref, int) and 0 < persisted_uref < (1 << 31):
                 self._userref_counter = max(self._userref_counter, persisted_uref)
+            # v2.13.0: Restore thesis layer state. Missing key (older snapshots)
+            # or empty dict (disabled layer) both no-op inside tracker.restore().
+            # getattr guards tests that use object.__new__(HydraAgent).
+            thesis_attr = getattr(self, "thesis", None)
+            if thesis_attr is not None:
+                thesis_attr.restore(snapshot.get("thesis_state"))
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
+
+    # ─── Thesis WS routes (v2.13.0, Phase A) ──────────────────────────
+    # Handlers let the dashboard read/update knobs, posture, and hard rules.
+    # Each handler broadcasts the new thesis_state so every connected client
+    # stays in sync after a mutation. Disabled mode short-circuits to inert
+    # responses so the UI can render a "kill-switched" banner.
+
+    def _broadcast_thesis_state(self) -> None:
+        """Push current thesis_state to all dashboard clients."""
+        if not self.thesis:
+            return
+        try:
+            self.broadcaster.broadcast_message(
+                "thesis_state",
+                {"data": self.thesis.current_state()},
+            )
+        except Exception as e:
+            print(f"  [THESIS] broadcast failed: {type(e).__name__}: {e}")
+
+    def _handle_thesis_get_state(self, payload: Dict[str, Any]) -> None:
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_update_knobs(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        patch = (payload or {}).get("knobs") or {}
+        self.thesis.update_knobs(patch)
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_update_posture(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        posture = (payload or {}).get("posture")
+        if posture:
+            self.thesis.update_posture(posture)
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_update_hard_rules(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        patch = (payload or {}).get("hard_rules") or {}
+        self.thesis.update_hard_rules(patch)
+        self._broadcast_thesis_state()
+
+    def _mount_thesis_routes(self) -> None:
+        """Wire thesis WS handlers into the broadcaster. Safe on repeat
+        invocation — register_handler overwrites prior mappings."""
+        self.broadcaster.register_handler("thesis_get_state", self._handle_thesis_get_state)
+        self.broadcaster.register_handler("thesis_update_knobs", self._handle_thesis_update_knobs)
+        self.broadcaster.register_handler("thesis_update_posture", self._handle_thesis_update_posture)
+        self.broadcaster.register_handler("thesis_update_hard_rules", self._handle_thesis_update_hard_rules)
 
     def _merge_order_journal(self):
         """Merge on-disk journal files into self.order_journal.
@@ -2082,6 +2173,16 @@ class HydraAgent:
                 tick += 1
                 elapsed = time.time() - self.start_time
                 remaining = "∞" if self.duration == 0 else f"{self.duration - elapsed:.0f}s"
+
+                # v2.13.0: Thesis on_tick is a no-op in Phase A (drift-safe)
+                # but Phase C/D extend it to drain the Grok processor queue
+                # and expire stale ladder rungs. Hook exists now so the
+                # integration point is stable across the phase rollout.
+                if self.thesis is not None:
+                    try:
+                        self.thesis.on_tick(time.time())
+                    except Exception as te:
+                        print(f"  [THESIS] on_tick error ({type(te).__name__}: {te})")
 
                 ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
                 print(f"\n  === Tick {tick} | {ts} | Elapsed: {elapsed:.0f}s | Remaining: {remaining} ===")
@@ -4261,7 +4362,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.12.5",
+            "version": "2.13.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

@@ -59,3 +59,11 @@ hydra_backtest_errors.log
 
 # Companion runtime artifacts (transcripts, memory, proposals, routing/cost logs)
 .hydra-companions/
+
+# Thesis layer (v2.13.0+; runtime state + user-uploaded research, not tracked)
+hydra_thesis.json
+hydra_thesis.json.tmp
+hydra_thesis_documents/
+hydra_thesis_processed/
+hydra_thesis_pending/
+hydra_thesis_evidence_archive/

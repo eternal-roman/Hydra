@@ -6,6 +6,89 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.0] — 2026-04-18
+
+Minor release opening the **Golden Unicorn** initiative — a persistent,
+user-curated thesis layer that sits above the reactive engine and the
+stateless 3-agent brain. Phase A ships the foundational surface: a new
+`hydra_thesis.py` module with `ThesisTracker`, `hydra_thesis.json`
+persistence with atomic writes and fail-soft loading, a new **THESIS** tab
+in the dashboard with functional Posture/Knobs/Hard-Rules/Deadline panels
+plus scaffolded placeholders for the Phase B–E sub-panels, and a complete
+`HYDRA_THESIS_DISABLED=1` kill switch that keeps v2.12.5 behavior
+bit-identical. Brain context injection, Grok 4 reasoning document
+processing, the Ladder primitive, and opt-in posture enforcement land in
+subsequent 2.13.x releases.
+
+Design stance (see agent memory `feedback_hydra_design_philosophy.md`):
+Hydra is the flywheel, not the shield. The thesis layer augments brain
+reasoning and surfaces user intent — it does not throttle trading. `BLOCK`
+is reserved for the small set of hard rules (ledger shield at 0.20 BTC,
+tax friction floor, no-altcoin gate); everything else is advisory context
+that makes the brain smarter, not more restrictive.
+
+### Added
+- `hydra_thesis.py`: `ThesisTracker` (load / save / snapshot / restore /
+  knob + posture + hard-rule mutations), `ThesisState` / `ThesisKnobs` /
+  `HardRules` / `Posterior` / `ChecklistItem` / `Ladder` / `Rung` /
+  `IntentPrompt` / `DocumentRef` / `Evidence` / `ProposedThesisUpdate` /
+  `ThesisContext` dataclasses, `Posture` / `MacroRegime` /
+  `ChecklistItemStatus` / `EvidenceCategory` / `DocumentType` /
+  `ProcessingStatus` / `LadderStatus` / `RungStatus` enums. Pure stdlib;
+  no new runtime dependencies. Schema `THESIS_SCHEMA_VERSION = "1.0.0"`.
+- `hydra_thesis.json` (gitignored) — persistent state file with atomic
+  `.tmp` → `os.replace()` writes mirroring `_save_snapshot`. Hard-rule
+  floor enforced at load and update time: `ledger_shield_btc` cannot be
+  lowered below 0.20 BTC via the API.
+- `HydraAgent.__init__`: loads `ThesisTracker`; extends session snapshot
+  with a `thesis_state` key; restores on `--resume`; registers four WS
+  routes (`thesis_get_state`, `thesis_update_knobs`,
+  `thesis_update_posture`, `thesis_update_hard_rules`); calls
+  `thesis.on_tick(now)` once per tick (no-op in Phase A, hook for B–E).
+- `dashboard/src/App.jsx`: new **THESIS** tab sibling to LIVE / BACKTEST /
+  COMPARE. `ThesisPanel` renders Posture badge + transition buttons,
+  Ideological Knobs (conviction floor slider, size-hint range sliders,
+  posture-enforcement select, ladder/intent/Grok-budget inputs), Hard
+  Rules (ledger shield / tax friction / no-altcoin), accumulation
+  Deadline card, plus scaffolded placeholders for Document Library /
+  Pending Proposals / Active Intents / Active Ladders / Thesis Timeline /
+  FOMC Window with explicit "lands in Phase X" messaging.
+- `tests/test_thesis_tracker.py` (36 tests): defaults, persistence round-
+  trip, snapshot/restore, knob clamping, posture updates, hard-rule
+  protection (the 0.20 BTC floor, tax-friction non-negative clamp,
+  no-altcoin toggle), and the full `HYDRA_THESIS_DISABLED` kill-switch
+  contract.
+- `tests/test_thesis_drift.py`: Phase A invariant — `context_for` returns
+  `None` and `size_hint_for` returns `1.0` in both disabled and
+  default-enabled modes. Any future phase that begins influencing the
+  tick must preserve this for the disabled branch. Loading does not
+  touch disk; only explicit `save()` writes.
+- `HYDRA_THESIS_DISABLED=1` environment kill switch — when set, the
+  tracker returns an inert default and the save path is a no-op; live
+  behavior matches v2.12.5 bit-for-bit.
+
+### Changed
+- Dashboard footer bumped from `HYDRA v2.12.5` to `HYDRA v2.13.0`.
+- `hydra_backtest.HYDRA_VERSION` corrected from the stale `2.12.3` to
+  `2.13.0` — this marker stamps every `BacktestResult` so it now
+  matches the seven-site canonical list in CLAUDE.md § Version
+  Management (which was extended in the same commit adding the lint
+  rule).
+- `hydra_agent._export_competition_results` version string bumped.
+
+### Safety
+- `HydraAgent` init swallows any thesis construction failure and
+  substitutes an inert disabled tracker so the live agent boots even
+  under a corrupt or incompatible `hydra_thesis.json`.
+- `ThesisTracker.update_hard_rules` enforces the ledger-shield floor
+  unconditionally — a dashboard typo or malicious WS payload cannot
+  reduce the protected BTC below 0.20.
+- Partial-state JSON (missing keys from a future schema or truncated
+  write) is merged against defaults on load rather than rejected, so a
+  forward-compatible read path is baked in from v1.0.0.
+
+---
+
 ## [2.12.5] — 2026-04-18
 
 Patch fixing a journal-visibility bug in the companion runtime. Apex
