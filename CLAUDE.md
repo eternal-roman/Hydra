@@ -145,6 +145,12 @@ docs/BACKTEST_SPEC.md      — Authoritative backtest design spec
 docs/COMPANION_SPEC.md     — Authoritative companion subsystem spec
 ```
 
+Agent tooling (Claude Code project-scoped):
+
+- `.claude/skills/release/SKILL.md` — release workflow skill (invoke via `/release`)
+- `.claude/skills/audit/SKILL.md` — audit workflow skill (invoke via `/audit`)
+- `.claude/settings.json` + `.claude/hooks/post-edit.sh` — path-scoped post-edit verification hook (set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to silence)
+
 ## Memory & CBP Sidecar
 
 - Hydra auto-launches the sibling `cbp-runner/` checkout from `start_hydra.bat` / `start_all.bat` via `python "%CBP_RUNNER_DIR%\supervisor.py" --detach`.

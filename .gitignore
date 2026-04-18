@@ -44,8 +44,10 @@ hydra_session_snapshot.json
 hydra_session_snapshot.json.tmp
 hydra_session_snapshot.json.harness_stash
 
-# Claude Code
-.claude/
+# Claude Code — per-user / runtime files only.
+# .claude/settings.json, .claude/skills/, and .claude/hooks/ are committed.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Local agent memory (project-scoped, not tracked)
 HYDRA_MEMORY.md
