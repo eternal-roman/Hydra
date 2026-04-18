@@ -1937,6 +1937,31 @@ class HydraAgent:
             return None
         return t.posture
 
+    def _journal_ladder_stamp(
+        self, pair: str, side: str, price: Optional[float],
+    ) -> Dict[str, Any]:
+        """Compute the (ladder_id, rung_idx, adhoc) fields for a journal
+        entry. Returns an empty dict when the thesis layer is disabled
+        OR HYDRA_THESIS_LADDERS is unset, so entries from users who
+        haven't opted in keep their v2.13.2 schema exactly."""
+        t = getattr(self, "thesis", None)
+        if t is None or t.disabled or not t._ladders_enabled():
+            return {}
+        if price is None:
+            return {"ladder_id": None, "rung_idx": None, "adhoc": True}
+        match = None
+        try:
+            match = t.match_rung(pair, side, price)
+        except Exception as e:
+            print(f"  [THESIS] match_rung error ({type(e).__name__}: {e})")
+        if match:
+            return {
+                "ladder_id": match.get("ladder_id"),
+                "rung_idx": match.get("rung_idx"),
+                "adhoc": False,
+            }
+        return {"ladder_id": None, "rung_idx": None, "adhoc": True}
+
     def _journal_intents_active(self, ai: Optional[Dict[str, Any]]) -> Optional[List[str]]:
         """List of intent_ids the analyst consulted. Prefers the analyst's
         self-reported list (thesis_alignment.intent_prompts_consulted) — the
@@ -2087,6 +2112,40 @@ class HydraAgent:
         self.thesis.reject_proposal(p.get("proposal_id", ""), p.get("user_notes"))
         self._broadcast_thesis_state()
 
+    # ─── Thesis ladder handlers (v2.13.3, Phase D) ────────────────
+
+    def _handle_thesis_create_ladder(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        try:
+            total = float(p.get("total_size", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0.0
+        if total <= 0:
+            self._broadcast_thesis_state()
+            return
+        self.thesis.create_ladder(
+            pair=p.get("pair", ""),
+            side=p.get("side", "BUY"),
+            total_size=total,
+            rungs_spec=p.get("rungs") or [],
+            stop_loss_price=p.get("stop_loss_price"),
+            expiry_hours=p.get("expiry_hours"),
+            expiry_action=p.get("expiry_action", "cancel"),
+            reasoning=p.get("reasoning", ""),
+            creator=p.get("creator", "user:dashboard"),
+        )
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_cancel_ladder(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        lid = (payload or {}).get("ladder_id", "")
+        if lid:
+            self.thesis.cancel_ladder(lid)
+        self._broadcast_thesis_state()
+
     def _mount_thesis_routes(self) -> None:
         """Wire thesis WS handlers into the broadcaster. Safe on repeat
         invocation — register_handler overwrites prior mappings."""
@@ -2103,6 +2162,12 @@ class HydraAgent:
         self.broadcaster.register_handler("thesis_list_proposals", self._handle_thesis_list_proposals)
         self.broadcaster.register_handler("thesis_approve_proposal", self._handle_thesis_approve_proposal)
         self.broadcaster.register_handler("thesis_reject_proposal", self._handle_thesis_reject_proposal)
+        # v2.13.3 (Phase D) — ladder primitive. Journal stamping lands in
+        # _place_order; rungs match on (pair, side, price) within tolerance.
+        # Feature flag: HYDRA_THESIS_LADDERS=1 (otherwise match_rung is a no-op
+        # and journal schema stays v2.13.2).
+        self.broadcaster.register_handler("thesis_create_ladder", self._handle_thesis_create_ladder)
+        self.broadcaster.register_handler("thesis_cancel_ladder", self._handle_thesis_cancel_ladder)
 
     def _merge_order_journal(self):
         """Merge on-disk journal files into self.order_journal.
@@ -3254,6 +3319,13 @@ class HydraAgent:
                 "thesis_posture": self._journal_thesis_posture(),
                 "thesis_intents_active": self._journal_intents_active(ai),
                 "thesis_alignment": (ai or {}).get("thesis_alignment") if isinstance(ai, dict) else None,
+                # v2.13.3 (Phase D) — ladder alignment. Set when the placed
+                # (pair, side, price) matches a pending rung of an active
+                # ladder. Otherwise "adhoc=true" — still a legal trade, just
+                # flagged so the tape distinguishes planned from reactive.
+                # Both fields stay None when HYDRA_THESIS_LADDERS is unset
+                # so journal schema is stable for users who haven't opted in.
+                **self._journal_ladder_stamp(pair, action_upper, trade.get("price")),
             },
             "order_ref": {"order_userref": None, "order_id": None},
             "lifecycle": {
@@ -4556,7 +4628,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.2",
+            "version": "2.13.3",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

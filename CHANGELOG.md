@@ -6,6 +6,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.3] — 2026-04-18
+
+**Golden Unicorn Phase D** — the Ladder primitive. A user authors a
+multi-tick plan (pair, side, total size, predetermined rung prices,
+stop-loss, 24h expiry), and every subsequent placed order whose
+(pair, side, price) matches a pending rung within 0.5% tolerance gets
+stamped `decision.ladder_id / rung_idx / adhoc=false` in the journal.
+Orders that don't match stamp `adhoc=true` — still legal (Hydra is the
+flywheel), just flagged so the tape distinguishes planned deployment
+from tactical opportunism. Athena's "is this a ladder or averaging into
+a loss?" question now has a deterministic answer for any journal entry.
+
+Feature flag: `HYDRA_THESIS_LADDERS=1` — without it, `match_rung` is a
+no-op and journal entries stay v2.13.2-shaped. This keeps the schema
+stable for users who haven't opted in.
+
+### Added
+- `ThesisTracker.create_ladder / list_ladders / cancel_ladder /
+  match_rung / record_rung_placement / record_rung_fill /
+  check_stop_loss` — the full Ladder lifecycle state machine.
+  Per-pair cap enforced via `knobs.max_active_ladders_per_pair`.
+  Rung sizes auto-scale to sum to `total_size` on creation.
+- `_sweep_expired_ladders` runs on every tick (when the feature flag
+  is set). Expiry honors `expiry_action="cancel"`; the
+  `convert_to_market` variant is logged + treated as cancel for Phase
+  D safety — auto-market conversion lands in a later patch.
+- `HydraAgent._journal_ladder_stamp(pair, side, price)` computes three
+  new journal-entry fields: `ladder_id`, `rung_idx`, `adhoc`. Returns
+  `{}` (no fields) when `HYDRA_THESIS_LADDERS` is unset, preserving
+  v2.13.2 schema for default installs.
+- Two new WS routes: `thesis_create_ladder`, `thesis_cancel_ladder`.
+  Ladder state broadcasts via the existing `thesis_state` channel.
+- Dashboard: THESIS tab's **Active Ladders** panel is now a functional
+  composer — pair/side/total size/N rungs/top+bottom price/stop/expiry
+  — plus a live list of authored ladders showing per-rung fill state
+  (color-coded chips) and a cancel button per active ladder.
+- `tests/test_thesis_phase_d.py` (20 tests) — CRUD, rung matching with
+  tolerance, side/pair mismatch rejection, feature-flag gating,
+  placement + fill transitions, stop-loss breach with/without prior
+  fills (stops-out vs cancels), expiry sweep, kill-switch isolation.
+
+### Safety
+- Stop-loss follows Athena's distinction: "stopped out" requires
+  committed capital. A BUY ladder with zero fills that breaches its
+  stop simply cancels (not STOPPED_OUT) — no drama for
+  never-materialized intent.
+- Phase D is ADVISORY on stop-breach: remaining pending rungs flip
+  CANCELLED, but filled positions are NOT auto-sold. The user sees the
+  breach via the dashboard and decides. Auto-sell-on-stop is a
+  deliberate non-goal here.
+- No Kraken-side order cancellation is sent — the tracker flips rung
+  status locally. The agent's existing shutdown path handles resting-
+  limit cleanup. Kraken-side rung auto-placement (where authoring a
+  ladder auto-posts all N limit orders) is a future feature.
+- Live harness `--mode mock` (35 scenarios) green after Phase D —
+  Rule 4 honored for the journal-field addition in `_place_order`.
+
+### Changed
+- `_place_order` journal entry gains (when flag enabled)
+  `decision.ladder_id / rung_idx / adhoc`. Field order preserved
+  relative to existing keys; legacy readers ignoring unknown keys
+  unaffected.
+- Footer `HYDRA v2.13.2` → `HYDRA v2.13.3`;
+  `hydra_backtest.HYDRA_VERSION` → `2.13.3`.
+
+---
+
 ## [2.13.2] — 2026-04-18
 
 **Golden Unicorn Phase C** — Grok 4 reasoning document processor. Users
