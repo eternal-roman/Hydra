@@ -151,6 +151,8 @@ Agent tooling (Claude Code project-scoped):
 - `.claude/skills/audit/SKILL.md` — audit workflow skill (invoke via `/audit`)
 - `.claude/settings.json` + `.claude/hooks/post-edit.sh` — path-scoped post-edit verification hook (set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to silence)
 
+Per-user `.claude/settings.local.json` and runtime `.claude/scheduled_tasks.lock` are gitignored; everything else under `.claude/` is committed (Claude Code's documented split between team-wide and per-user config). `.gitattributes` pins `*.sh text eol=lf` so Windows clones with `core.autocrlf=true` don't silently rewrite the hook's shebang to CRLF and break it on Git Bash / WSL.
+
 ## Memory & CBP Sidecar
 
 - Hydra auto-launches the sibling `cbp-runner/` checkout from `start_hydra.bat` / `start_all.bat` via `python "%CBP_RUNNER_DIR%\supervisor.py" --detach`.

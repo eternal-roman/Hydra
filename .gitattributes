@@ -1,1 +1,4 @@
+# Bash hook scripts must keep LF endings. Without this, Windows clones
+# with `core.autocrlf=true` would silently rewrite the shebang to CRLF
+# and break the hook on Git Bash / WSL. See .claude/hooks/post-edit.sh.
 *.sh text eol=lf
