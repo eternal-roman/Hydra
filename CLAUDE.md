@@ -1,24 +1,177 @@
 # CLAUDE.md — Agent Instructions for HYDRA
 
+> **AGENT HARD REQUIREMENT — CLAUDE.md MAINTENANCE**
+>
+> This file is load-bearing. Any agent (Claude Code, Cursor, etc.) that
+> modifies the codebase MUST update this file in the same change when:
+> - A module is added, removed, renamed, or split (Repository Structure)
+> - A launcher script is added or removed (Build & Run)
+> - A version-bump site is added/removed (Version Management)
+> - A new env var, kill switch, or opt-in flag is introduced (Companion
+>   Subsystem / Common Pitfalls)
+> - A subsystem changes ownership of state files (Verification Discipline)
+> - A safety invariant or hard rule changes (Common Pitfalls / Audit Workflow)
+> - The CI gate changes (Testing / Release & PR Workflow)
+>
+> If you cannot update this file in the same commit, leave a `TODO(claude-md):`
+> marker in the relevant code change AND a matching `<!-- TODO(claude-md): -->`
+> comment in this file. Stale CLAUDE.md is treated as a CI failure waiting
+> to happen — do not let drift accumulate.
+>
+> Companion specs (`docs/COMPANION_SPEC.md`, `HYDRA_MEMORY.md`,
+> `docs/BACKTEST_SPEC.md`) are the authoritative deep references. CLAUDE.md
+> is the agent-facing index — it must point at them, not duplicate them.
+
 This file provides context for Claude Code and other AI agents working on this repository.
 
 ## Project Overview
 
 HYDRA is a regime-adaptive crypto trading agent for Kraken. It detects market conditions (trending, ranging, volatile) and switches between four strategies (Momentum, Mean Reversion, Grid, Defensive) to execute limit post-only orders on SOL/USDC, SOL/BTC, and BTC/USDC.
 
+## Verification Discipline
+
+- Always stop running agents/processes before editing journals, snapshots, or state files (they will be overwritten)
+- After any fix, verify with actual commands (git tag -v, test runs) rather than claiming success
+- Run the full test suite AND typecheck/lint before declaring work complete
+- When a fix touches multi-file state (journal + snapshot + config), explicitly enumerate all files to update
+
+**Hydra-specific:**
+- Stop `hydra_agent.py` and the `start_hydra.bat` watchdog before editing
+  `hydra_session_snapshot.json`, `hydra_order_journal.json`,
+  `hydra_params_*.json`, or `hydra_errors.log` — the live agent rewrites them.
+  See §Operating Rules → Rule 2 for the binding form.
+- Verification commands: the CI invocation pattern in `.github/workflows/ci.yml`
+  (individual `python tests/test_*.py` runs), `python tests/live_harness/harness.py --mode mock`,
+  and `python hydra_engine.py` (synthetic demo). See §Operating Rules → Rule 3.
+- Multi-file state for a typical engine change: snapshot + journal +
+  `hydra_params_<pair>.json` (one per traded pair) + `hydra_errors.log`.
+- The `.claude/hooks/post-edit.sh` hook runs a path-scoped verification step
+  after every Edit/Write tool use. Set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to
+  silence it during heavy refactors. Hook failures are advisory only.
+
+## Operating Rules
+
+These rules are binding on any agent operating in this repo. Each was
+earned through a documented past failure and is non-negotiable.
+
+### Rule 1 — Parallel Task agents for any audit > 20 files
+
+Past failure: single-pass review missed 7+ bugs that parallel-agent audits caught (10-agent and 6-agent sessions both surfaced findings the orchestrator alone missed).
+
+> Use N parallel Task agents to audit this codebase. Split by directory or
+> module group (see §Audit Workflow for Hydra's 7-way partition). Each agent
+> returns HIGH/MED/LOW findings. Then synthesize.
+
+Default: 7 agents on the partitions in §Audit Workflow. Scale up to 10+ if file count justifies.
+
+### Rule 2 — Stop processes before editing their state
+
+Past failure: in a journal-reconciliation session, the agent edited
+`hydra_order_journal.json` multiple times while `hydra_agent.py` was running.
+Each edit was overwritten on the next tick.
+
+> Before editing any state file (journal, snapshot, db), check if a process
+> is actively writing to it. If yes: stop the process first, make the edit,
+> verify it persisted, then restart. Always clean the snapshot AND the
+> journal together — they must stay in sync.
+
+Hydra state-file owners: `hydra_agent.py` owns
+`hydra_session_snapshot.json`, `hydra_order_journal.json`,
+`hydra_params_*.json`, `hydra_errors.log`. The CBP sidecar
+(`cbp-runner/state/`) is owned by `cbp-runner/supervisor.py` — see
+[HYDRA_MEMORY.md](HYDRA_MEMORY.md) for kill switches.
+
+### Rule 3 — Verify claims with actual commands
+
+Past failure: agent claimed a git tag was verified without running
+`git tag -v`; another session claimed a fix worked without re-running
+the failing test.
+
+> When you claim something is 'verified', 'passing', or 'fixed', you
+> must run the actual verification command (pytest, git tag -v, curl,
+> etc.) in the same turn and paste the output. No claims without evidence.
+
+### Rule 4 — Two-phase self-audit on new code
+
+Past failure: a single-pass review of new code missed bugs that a
+self-audit caught. The journal-maintenance-tool session had the agent
+find 7 bugs in its own code across two self-audit rounds.
+
+> After you finish writing this, do a self-audit pass looking for: unused
+> imports, dead code, unhandled exceptions, null/empty crashes, deprecated
+> API usage, misleading error messages, false-positive checks. Fix
+> everything found, then do a second self-audit pass. Only then declare done.
+
+### Rule 5 — Enumerate all version-bump locations upfront
+
+Past failure: v2.6.0 release bumped version in some files but missed
+others, requiring a follow-up correction commit.
+
+> Before bumping version to X.Y.Z, run:
+> `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'`
+> and list every location. Update all of them in one commit.
+
+Hydra's canonical 7-site list is in §Version Management. The grep is the
+safety net for sites added since that list was last updated.
+
 ## Repository Structure
 
 ```
-hydra_engine.py     — Pure Python trading engine (indicators, regime detection, signals, position sizing)
-hydra_agent.py      — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution,
-                      order reconciler, session snapshot + --resume)
-hydra_brain.py      — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
-hydra_tuner.py      — Self-tuning parameters via exponential smoothing of regime/signal thresholds
-dashboard/src/App.jsx — React dashboard (single-file, all inline styles)
-SKILL.md            — Full trading specification (agent-readable)
-AUDIT.md            — Technical audit with test results
-CHANGELOG.md        — Version history
+hydra_engine.py            — Pure Python trading engine (indicators, regime detection, signals, position sizing)
+hydra_agent.py             — Live agent (Kraken CLI via WSL, WebSocket broadcast, trade execution,
+                             order reconciler, session snapshot + --resume)
+hydra_brain.py             — AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
+hydra_tuner.py             — Self-tuning parameters via exponential smoothing of regime/signal thresholds
+hydra_companions/          — Companion subsystem package (chat, proposals, nudges, ladder watcher,
+                             live executor, CBP memory client, soul JSONs under souls/).
+                             Module count not pinned — see docs/COMPANION_SPEC.md.
+hydra_backtest.py          — Core replay engine (see Backtesting & Experimentation section)
+hydra_backtest_metrics.py  — Bootstrap CI, walk-forward, Monte Carlo, regime-conditioned P&L
+hydra_backtest_server.py   — BacktestWorkerPool + WS message handlers
+hydra_backtest_tool.py     — Anthropic tool-use schemas + dispatcher + quota tracker
+hydra_experiments.py       — Experiment dataclass + ExperimentStore + presets + sweep/compare
+hydra_reviewer.py          — AI Reviewer (7 code-enforced rigor gates, PR-draft only)
+hydra_shadow_validator.py  — Single-slot FIFO live-parallel validation before param writes
+journal_maintenance.py     — Order journal compaction / rotation
+hydra_journal_migrator.py  — One-shot legacy hydra_trades_live.json → hydra_order_journal.json migration
+dashboard/src/App.jsx      — React dashboard (single-file, all inline styles)
+SKILL.md                   — Full trading specification (agent-readable)
+AUDIT.md                   — Technical audit with test results
+CHANGELOG.md               — Version history
+HYDRA_MEMORY.md            — Memory wiring spec (CBP sidecar topology)
+SECURITY.md                — Security policy
+docs/BACKTEST.md           — User runbook for the backtesting platform
+docs/BACKTEST_SPEC.md      — Authoritative backtest design spec
+docs/COMPANION_SPEC.md     — Authoritative companion subsystem spec
 ```
+
+Agent tooling (Claude Code project-scoped):
+
+- `.claude/skills/release/SKILL.md` — release workflow skill (invoke via `/release`)
+- `.claude/skills/audit/SKILL.md` — audit workflow skill (invoke via `/audit`)
+- `.claude/settings.json` + `.claude/hooks/post-edit.sh` — path-scoped post-edit verification hook (set `HYDRA_POSTEDIT_HOOK_DISABLED=1` to silence)
+
+Per-user `.claude/settings.local.json` and runtime `.claude/scheduled_tasks.lock` are gitignored; everything else under `.claude/` is committed (Claude Code's documented split between team-wide and per-user config). `.gitattributes` pins `*.sh text eol=lf` so Windows clones with `core.autocrlf=true` don't silently rewrite the hook's shebang to CRLF and break it on Git Bash / WSL.
+
+## Memory & CBP Sidecar
+
+- Hydra auto-launches the sibling `cbp-runner/` checkout from `start_hydra.bat` / `start_all.bat` via `python "%CBP_RUNNER_DIR%\supervisor.py" --detach`.
+- `CBP_RUNNER_DIR` defaults to `C:\Users\elamj\Dev\cbp-runner`; override via env.
+- `hydra_companions.cbp_client.CbpClient` reads `state/ready.json` on every call (tokens rotate).
+- Authoritative wiring spec: [HYDRA_MEMORY.md](HYDRA_MEMORY.md). Sidecar invariants live in `cbp-runner/CLAUDE.md`.
+- Kill switches: `CBP_SIDECAR_ENABLED=0` env or `state/_disabled` flag file. Hydra's memory path falls through to JSONL-only with no interruption — never block on the sidecar.
+
+## Companion Subsystem
+
+- Default-on. Chat, proposals, and proactive nudges are active without env vars. The orb in the dashboard IS the activation.
+- Authoritative spec: [docs/COMPANION_SPEC.md](docs/COMPANION_SPEC.md).
+- Package: `hydra_companions/` + soul JSONs at `hydra_companions/souls/` (`apex.soul.json`, `athena.soul.json`, `broski.soul.json`).
+- Test launcher: `start_hydra_companion.bat` (paper mode, no real money).
+- Env contract (opt-out only):
+  - `HYDRA_COMPANION_DISABLED=1` — kill switch (no orb)
+  - `HYDRA_COMPANION_PROPOSALS_ENABLED=0` — no trade cards
+  - `HYDRA_COMPANION_NUDGES=0` — no proactive messages
+  - `HYDRA_COMPANION_LIVE_EXECUTION=1` — opt-in real-order execution (default OFF for money safety)
 
 ## Key Technical Decisions
 
@@ -53,6 +206,13 @@ python hydra_agent.py --mode competition --resume
 python hydra_engine.py
 ```
 
+Windows launchers:
+
+- `start_hydra.bat` — agent watchdog (production: `--mode competition --resume`)
+- `start_all.bat` — full stack (CBP sidecar + agent + dashboard)
+- `start_dashboard.bat` — dashboard only
+- `start_hydra_companion.bat` — paper-mode companion testing harness (no real money)
+
 ## Working with the Code
 
 ### Indicators (hydra_engine.py)
@@ -84,10 +244,10 @@ python hydra_engine.py
 - BaseStream superclass: `ExecutionStream`, `CandleStream`, `TickerStream`, `BalanceStream`, and `BookStream` all inherit from `BaseStream` which provides subprocess spawn/stop, reader/stderr threads, heartbeat-based health checks, and auto-restart with cooldown. Subclasses override `_build_cmd()`, `_on_message(msg)`, and `_stream_label()`.
 - Push-based market data: `CandleStream` (ws ohlc) and `TickerStream` (ws ticker) each subscribe to ALL traded pairs in one WS connection. `_fetch_and_tick()` uses the candle stream (zero REST calls, zero rate-limit sleep). Both streams are auto-restarted on failure via `ensure_healthy()` each tick. If a WS stream is unhealthy, the agent skips that data source until auto-restart recovers it. Order placement is blocked when TickerStream is unavailable.
 - Push-based balances: `BalanceStream` (ws balances) receives real-time balance updates. `_build_dashboard_state()` uses WS data when healthy. If the stream is unhealthy, the agent skips balance updates until auto-restart recovers it. Asset names are normalized (XXBT→BTC, XBT→BTC) and equities/ETFs are filtered out.
-- Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Phase 1.75 (order book intelligence) uses WS data when healthy. If the stream is unhealthy, the agent skips order book data until auto-restart recovers it. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
+- Push-based order book: `BookStream` (ws book) subscribes to all pairs with depth 10. Order book intelligence uses WS data when healthy. If the stream is unhealthy, the agent skips order book data until auto-restart recovers it. WS format `{price, qty}` dicts are converted to REST format `[price, qty, ts]` arrays so `OrderBookAnalyzer` works unchanged.
 - Execution stream health: `ExecutionStream.health_status()` returns `(healthy, reason)` so the tick warning identifies *which* check failed (subprocess exited / reader thread crashed / heartbeat stale). `ensure_healthy()` auto-restarts the subprocess on failure with a `RESTART_COOLDOWN_S=30s` cooldown so we don't thrash. Heartbeat threshold is 30s — kraken cold-start over WSL can take 5–10s before the first heartbeat. A separate stderr-drain thread prevents the OS pipe buffer from filling and silently freezing the subprocess. The tick warning is rate-limited to *transitions* (one print per distinct reason; one "stream healthy again" print on recovery).
 - Tick body is wrapped in try/except — any exception is logged to `hydra_errors.log` with full traceback and the tick loop continues to the next iteration instead of dying (which would trigger `start_hydra.bat` restart)
-- FOREX session weighting: Phase 1.8 applies a confidence modifier based on UTC hour — London/NY overlap (12-16 UTC) +0.04, London (07-12) +0.02, NY (16-21) +0.02, Asian (00-07) -0.03, dead zone (21-00) -0.05. Subject to the same +0.15 total modifier cap as order book and cross-pair modifiers.
+- FOREX session weighting: applies a confidence modifier based on UTC hour — London/NY overlap (12-16 UTC) +0.04, London (07-12) +0.02, NY (16-21) +0.02, Asian (00-07) -0.03, dead zone (21-00) -0.05. Subject to the same +0.15 total modifier cap as order book and cross-pair modifiers.
 
 ### Dashboard
 - Connects to agent via WebSocket on port 8765
@@ -108,7 +268,7 @@ python hydra_engine.py
 - Do not change the JSON response format in system prompts — the parser depends on it
 - Strategist always uses `self.strategist_client` (xAI) — do not route it through primary client
 
-## Backtesting & Experimentation (v2.10.0)
+## Backtesting & Experimentation
 
 Strictly-additive platform layered on top of the live agent. Default behavior with no opt-in flag is identical to v2.9.x. Full user runbook: `docs/BACKTEST.md`. Authoritative design spec: `docs/BACKTEST_SPEC.md`.
 
@@ -164,7 +324,12 @@ Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumula
 ### Brain tool-use
 `HydraBrain.__init__` gained `tool_dispatcher`, `enable_tool_use`, `enforce_budget`, `broadcaster`, and `tool_iterations_cap` kwargs. `_call_llm_with_tools()` implements the Anthropic stop_reason loop with the **injectable iteration cap** (default 4) and an 8 KB result cap that truncates via a structured JSON envelope (not a naive byte-slice) so the LLM sees a `truncated:true` signal instead of malformed JSON. `max_tokens` stop with pending `tool_use` blocks is logged rather than silently dropped. Analyst + Risk Manager branch on `_tool_use_enabled`; `_call_llm` unchanged for fallback and Grok path.
 
-### Tests (328 new + 139 legacy = 467 total)
+### Tests
+The full suite lives under `tests/` and `tests/live_harness/`. The CI gate
+is `.github/workflows/ci.yml` (`engine-tests` + `dashboard-build` jobs);
+that workflow is the authoritative list of what must pass on every PR.
+Run the backtest-platform subset locally as:
+
 ```bash
 python -m pytest tests/test_backtest_engine.py tests/test_backtest_drift.py
 python -m pytest tests/test_backtest_metrics.py tests/test_experiments.py
@@ -175,7 +340,7 @@ python tests/live_harness/harness.py --mode smoke   # kill-switch verified
 ```
 
 ### Gotchas
-- `HYDRA_VERSION` in `hydra_backtest.py` stamps every `BacktestResult` — keep in lockstep with the 6-location version bump.
+- `HYDRA_VERSION` in `hydra_backtest.py` stamps every `BacktestResult` — see §Version Management entry 6.
 - `ExperimentStore` uses `threading.RLock()` — switching to `Lock` deadlocks `delete() → audit_log()` re-entry.
 - `sanitize_json` replaces non-finite floats with None pre-serialize (stdlib `json.dump` emits `Infinity`). Applied on both main persistence AND `audit_log`/`log_review` jsonl writes.
 - `sweep_experiment` clears `param_hash` + `created_at` before `replace()` on the frozen dataclass so `finalize_stamps` recomputes.
@@ -185,24 +350,15 @@ python tests/live_harness/harness.py --mode smoke   # kill-switch verified
 
 ## Testing
 
-```bash
-python tests/test_engine.py        # Core engine: indicators, regime, signals, sizing, circuit breaker
-python tests/test_cross_pair.py    # Cross-pair coordinator (BTC-leads-SOL rules)
-python tests/test_order_book.py    # Depth analyzer, imbalance, walls, confidence modifiers
-python tests/test_tuner.py         # Self-tuning exponential smoothing updates
-python tests/test_balance.py       # Staked asset handling, USD conversion, engine balance init
-python tests/test_kraken_cli.py    # KrakenCLI wrappers: args, parsing, price precision, fee extraction
-python tests/test_execution_stream.py # ExecutionStream health diagnostics + auto-restart cooldown
-python tests/test_status_gate.py   # System status gate (maintenance skip, degradation, transitions)
-python tests/test_pair_constants.py # Dynamic pair constants (load, apply, fallback)
-python tests/test_reconciliation.py # Restart-gap reconciliation (query-orders recovery, drain integration)
-python tests/test_resume_reconcile.py # Resume reconciliation (stale PLACED entries from previous sessions)
-python tests/test_candle_stream.py # CandleStream (ws ohlc) dispatch, storage, symbol mapping
-python tests/test_ticker_stream.py # TickerStream (ws ticker) dispatch, storage, symbol mapping
-python tests/test_balance_stream.py # BalanceStream (ws balances) dispatch, normalization, filtering
-python tests/test_book_stream.py   # BookStream (ws book) dispatch, REST-format conversion, analyzer compat
-python hydra_engine.py             # Synthetic engine demo (no API keys needed)
-```
+The full suite lives under `tests/` and `tests/live_harness/`. The CI gate
+is `.github/workflows/ci.yml` (`engine-tests` + `dashboard-build` jobs);
+that workflow is the authoritative list of what must pass on every PR.
+Run the suite locally as individual files (CI invocation pattern) or via
+`python -m pytest tests/`.
+
+Always run `python tests/live_harness/harness.py --mode mock` for any
+change to the execution path (`HydraAgent._place_order`, `ExecutionStream`,
+snapshot/restore, `PositionSizer`, or any order-journal write site).
 
 ### Live-execution test harness
 
@@ -231,18 +387,65 @@ be consulted before modifying `HydraEngine` snapshot fields.
 
 See AUDIT.md for the full verification checklist.
 
+## Release & PR Workflow
+
+- For every feature/fix: create branch → tests pass → PR → verify CI green → merge → tag version
+- Bump version in ALL locations (check package.json, __init__.py, README, docs, etc. — grep for current version)
+- Use signed tags for releases
+- Never merge with red or pending CI
+
+**Hydra-specific:**
+- "Tests pass" means both CI jobs green per `.github/workflows/ci.yml`:
+  `engine-tests` (all individual `python tests/test_*.py` invocations
+  + live harness `--mode smoke` + `--mode mock` + module import smoke)
+  and `dashboard-build` (`npm run build`). The `mock` harness is the
+  mandatory gate for any PR touching the execution path.
+- "ALL locations" is the 7-site list in §Version Management below. Always
+  run `git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'` BEFORE bumping, per
+  §Operating Rules → Rule 5.
+- Signed tag command: `git tag -s vX.Y.Z -m "vX.Y.Z"`. Verify with
+  `git tag -v vX.Y.Z` per §Operating Rules → Rule 3.
+- Use the `/release` skill (`.claude/skills/release/SKILL.md`) to drive
+  the full cycle — it codifies steps 1–7 with the Hydra-specific
+  expansions inline.
+
 ## Version Management
 
-When bumping the version, **all six locations must be updated in lockstep**:
+When bumping the version, **all seven locations must be updated in lockstep**:
 
 1. `CHANGELOG.md` — new `## [X.Y.Z]` section header
 2. `dashboard/package.json` — `"version"` field
 3. `dashboard/package-lock.json` — both `"version"` fields (root + `""` package)
 4. `dashboard/src/App.jsx` — footer string `HYDRA vX.Y.Z`
 5. `hydra_agent.py` — `_export_competition_results()` → `"version"` field
-6. Git tag — `git tag vX.Y.Z` after merge to main
+6. `hydra_backtest.py` — `HYDRA_VERSION = "X.Y.Z"` (stamps every `BacktestResult`)
+7. Git tag — `git tag vX.Y.Z` after merge to main
 
 Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new features, architectural changes). Bug fixes and doc tweaks use **patch** increments (e.g. 2.8.0 → 2.8.1).
+
+## Windows/WSL Gotchas
+
+- Use UTF-8 explicitly; cp1252 will crash on Unicode (emoji, special chars)
+- time.time() has low resolution on Windows — use time.perf_counter() for timing
+- Escape parentheses in .bat files, especially inside if-blocks
+- Watch for Vite/dev-server silently switching ports; verify the actual bound port
+
+**Hydra-specific:**
+- The dashboard renders regime emoji (📈 ⚠️ etc.) and the console writes
+  the portfolio block under the same theme — both will crash on cp1252.
+- `time.time()` has ~15 ms Windows resolution; using it in `BaseStream`
+  heartbeat checks or `RESTART_COOLDOWN_S=30s` accounting silently
+  miscounts. Use `time.perf_counter()`.
+- `start_hydra.bat` and `start_all.bat` use nested `if`-blocks around
+  `--resume` and the CBP sidecar launch — escape parens or the cmd
+  parser drops branches silently.
+- WSL: kraken-cli runs via
+  `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ..."`.
+  If the distro is named `Ubuntu-22.04` instead of `Ubuntu`, the
+  invocation silently routes nowhere — verify with `wsl -l -v`.
+- Vite dev server in `dashboard/` falls off `:5173` to the next free
+  port if it's taken; the dashboard WS proxy assumes `:5173`. Verify
+  the bound port in Vite's startup log before assuming hot-reload works.
 
 ## Common Pitfalls
 
@@ -257,3 +460,36 @@ Only bump the **minor** version (e.g. 2.8 → 2.9) for material upgrades (new fe
 - On shutdown, the agent cancels all resting limit orders and flushes a snapshot — do not bypass this
 - `start_hydra.bat` uses `--mode competition --resume` for production — do not remove these flags
 - **Feature gap:** CrossPairCoordinator Rule 2 (BTC recovery BUY boost) and Rule 3 (coordinated swap SELL) can theoretically conflict if BTC is TREND_UP + SOL TREND_DOWN + SOL/BTC TREND_UP simultaneously — Rule 3 overwrites Rule 2. Current behavior favors the safer SELL. Future work: add explicit priority or merge logic.
+- Companion live execution requires explicit opt-in: `HYDRA_COMPANION_LIVE_EXECUTION=1`. Without it, companion proposals are paper/advisory only — confirm this env var is unset before any live debugging.
+- CBP sidecar failures are silent by design (Hydra falls through to JSONL). If memory writes seem to vanish, check `cbp-runner/state/ready.json` exists and `cbp-runner/state/_disabled` does NOT exist.
+- `kraken-cli` is an external dep installed in WSL Ubuntu (`source ~/.cargo/env && kraken`). The dashboard footer (`dashboard/src/App.jsx`) pins the current expected version. Check there before debugging schema errors from `--validate`.
+
+## Audit Workflow
+
+- For codebase audits, spawn parallel Task agents across file groups (pattern used successfully with 6-10 agents)
+- Categorize findings as HIGH/MED/LOW and fix in that order
+- Re-audit your own fixes before declaring done (self-audit has caught 7+ bugs in past sessions)
+
+**Hydra-specific:**
+- Natural file-group partitions for parallel agents (see §Operating Rules → Rule 1):
+  1. Engine + tuner: `hydra_engine.py`, `hydra_tuner.py`
+  2. Agent + streams: `hydra_agent.py` (contains `BaseStream` and its
+     `ExecutionStream` / `CandleStream` / `TickerStream` / `BalanceStream` /
+     `BookStream` subclasses)
+  3. AI layer: `hydra_brain.py`, `hydra_reviewer.py`, `hydra_shadow_validator.py`
+  4. Backtest platform: `hydra_backtest*.py`, `hydra_experiments.py`
+  5. Companion subsystem: `hydra_companions/` package
+  6. Dashboard: `dashboard/src/App.jsx`
+  7. Tests: `tests/` + `tests/live_harness/`
+- HIGH severity: any violation of safety invariants I1–I12
+  (see §Backtesting & Experimentation), the limit-post-only rule,
+  the 2 s rate-limit floor, the 15 % circuit breaker, the Wilder-EMA
+  RSI/ATR specification, or the companion `HYDRA_COMPANION_LIVE_EXECUTION`
+  default-off contract.
+- Two-phase self-audit is mandatory per §Operating Rules → Rule 4: after
+  fixing HIGH/MED items, re-run the partition sweep against your own diff,
+  then re-run the full §Testing block AND
+  `python tests/live_harness/harness.py --mode mock`. Only declare done
+  when phase 2 is clean.
+- Use the `/audit` skill (`.claude/skills/audit/SKILL.md`) to drive
+  the full cycle.
