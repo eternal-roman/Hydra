@@ -6,6 +6,93 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.4] — 2026-04-18
+
+Companion soul schema bumped from 1.0 → 1.1. Additive-only CBP-hybrid
+refactor of all three souls: Apex gets a full deep-content pass
+(dated formative incidents with lessons, intellectual lineage with
+what-was-taken / what-was-rejected per mentor, weighted beliefs with
+decay policies, past-selves linked via `supersedes` edges, typed
+provenance edges using the CBP standard-8 vocab, conditional rule
+activation expressions, a self-correction protocol for the
+chronological-inversion bias flagged on 2026-04-18, a multi-mode
+voice register, non-trading interests, and internal tensions).
+Athena and Broski get the same structural sections with existing
+content re-shaped (no deep curation pass — functional consistency
+across the compiler). Three new read-only tools grant all companions
+access to the trade journal and summary-only chart data. Apex
+migrates from Sonnet to Grok reasoning for deep intents; Sonnet
+remains Athena's primary. This release also reconciles long-standing
+dashboard version drift (2.11.1 → 2.12.4) across
+`dashboard/package.json`, `package-lock.json`, and `App.jsx` footer.
+
+### Added
+
+- **Soul schema v1.1 — CBP-hybrid additive sections** on all three
+  companions: `formative_incidents`, `intellectual_lineage`, `beliefs`,
+  `past_selves`, `provenance_edges`, `conditional_rules`, `fallibility`,
+  `non_trading_interests`, `internal_tensions`, `capabilities.tool_access`,
+  and `voice.modes`. Hand-authored semantic-slug ids; the CBP sidecar
+  (v0.8.1) is already running under Hydra for memory via
+  `hydra_companions/cbp_client.py`, so ids can be rederived to BLAKE3
+  through the sidecar's `PUT /v1/node` endpoint whenever we migrate
+  soul graphs off flat JSON.
+- **Apex deep-content pass** — 6 dated formative incidents with
+  narratives and lessons, 7 mentor lineage nodes with provenance edges,
+  11 weighted beliefs, 3 past-selves linked via `supersedes`, 14
+  provenance edges using `causes | amplifies | qualifies | supersedes`
+  from the CBP 8-rel vocabulary. 3 voice modes (`desk_clipped`,
+  `mentor`, `reflective`) with explicit switching rules. A
+  self-correction protocol (`chronological-before-indictment`) wired
+  directly to the 2026-04-18 size-misread incident.
+- **New read-only tools** in `hydra_companions/tools_readonly.py`:
+  - `get_order_journal` — filtered, chronologically-sorted journal
+    access (memory-first, disk-fallback); `pair`, `side`, `strategy`,
+    `state`, `since_iso`, `limit ≤ 200` filters.
+  - `get_chart_snapshot` — token-tight structural fingerprint per
+    pair. No raw OHLCV.
+  - `get_chart_summary` — richer timeframe metrics (swing H/L, RSI
+    range, ATR% median + current, BB touch counts, directional bias)
+    over a capped lookback window. No raw OHLCV.
+- **Per-soul tool allowlist** — `capabilities.tool_access` on each
+  soul JSON gates tool use; `check_tool_access` / `enforce_tool_access`
+  helpers in `tools_readonly.py` enforce deny-by-default.
+  `compose_context_blob` honors the allowlist — chart / journal data
+  is only injected for souls granted the corresponding tools.
+- **`chart_analysis` intent** in `model_routing.json` v1.1 with a
+  classifier heuristic matching chart / tape-read / BB-touch / RSI-range
+  language.
+- **Apex → Grok reasoning migration** for `market_state_query`,
+  `teaching_explanation`, `trade_proposal`, `ladder_proposal`,
+  `chart_analysis`. New rotation pools for Apex non-execution intents
+  (reasoning ≥ 0.75, fast ≤ 0.25). Execution-class intents remain 100%
+  reasoning (no variance on trade-building calls). Sonnet stays
+  Athena's primary.
+- **Compiler v1.1** (`hydra_companions/compiler.py`) — gated rendering
+  of new sections: `## Voice modes`, `## How I got here`,
+  `## Where my rules come from`, `## Gated rules`, `## Known
+  fallibilities`, `## Human texture`. `CompiledSoul` gained
+  `tool_access`, `voice_modes`, and three `has_*` flags. New
+  `_render_condition_plain` helper translates CBP conditional
+  expressions to English for prompt inclusion.
+- **Tests** — 37 new tests across `test_companion_compiler.py` (11),
+  `test_companion_router.py` (7), and new `test_apex_tools.py` (19).
+  Total companion suite: 113 passing.
+- **`docs/COMPANION_SPEC.md` §16** — full specification of the v1.1
+  CBP-hybrid schema, tool surface, routing changes, and migration
+  path to native CBP wire format.
+
+### Changed
+
+- `hydra_companions/companion.py::respond()` — threads the soul's
+  `tool_access` allowlist into `compose_context_blob` and enables
+  chart / journal inclusion flags for `chart_analysis`,
+  `trade_proposal`, and `ladder_proposal` intents.
+- `compose_context_blob` max_bytes truncation — switched from
+  single-slice (off-by-one on the suffix) to iterative trim safe
+  for multi-byte characters.
+- Dashboard version reconciled from 2.11.1 to 2.12.4.
+
 ## [2.12.3] — 2026-04-17
 
 Patch for a cmd.exe batch-parser bug that prevented the agent from

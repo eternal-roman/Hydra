@@ -117,10 +117,30 @@ class Companion:
         needs_market = intent_result.intent in {
             "market_state_query", "trade_proposal", "ladder_proposal",
             "teaching_explanation", "idle_proactive_nudge",
+            "chart_analysis",
+        }
+        # v1.1: chart + journal inclusion is gated on the soul's allowlist.
+        # We pass a minimal soul dict to compose_context_blob so it can
+        # check capabilities.tool_access without needing the full soul JSON.
+        include_chart = intent_result.intent in {
+            "chart_analysis", "trade_proposal", "ladder_proposal",
+        }
+        include_journal = intent_result.intent in {
+            "chart_analysis", "trade_proposal",
+        }
+        soul_for_gate = {
+            "id": self.soul.id,
+            "capabilities": {"tool_access": list(self.soul.tool_access)},
         }
         augmented = user_text
         if needs_market:
-            blob = tools_readonly.compose_context_blob(self.agent, max_bytes=1500)
+            blob = tools_readonly.compose_context_blob(
+                self.agent,
+                max_bytes=2048,
+                soul=soul_for_gate,
+                include_chart=include_chart,
+                include_journal_tail=include_journal,
+            )
             if blob:
                 augmented = f"{user_text}\n\n[LIVE CONTEXT]\n{blob}"
 

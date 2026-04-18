@@ -400,3 +400,83 @@ No auth, no DB, no multi-tenancy yet — just doors that open the right directio
 ---
 
 *End of spec. Phase 0 complete upon merge. No runtime change until Phase 1.*
+
+---
+
+## 16. v1.1 — CBP-hybrid soul schema (2026-04-18)
+
+Soul JSON schema bumped from 1.0 → 1.1 for all three companions. Additive only — no legacy keys removed. The upgrade introduces a CBP-inspired graph shape inside each soul file so provenance, conditional rule activation, fallibility, and intellectual lineage are first-class.
+
+**CBP integration status.** The Context Binding Protocol is at **v0.8.1** (2026-04-17). Hydra already runs the CBP sidecar (`cbp-runner`) in production for cross-session companion memory via `hydra_companions/cbp_client.py` — see the `v2.12.0` CHANGELOG entry. The sidecar exposes the full v0.8 REST surface (`POST/PUT/PATCH/GET` for nodes, edges, frames, with ACL enforcement and idempotent upserts). For v1.1 soul graphs we still author flat JSON with CBP-shaped additions rather than serializing through the sidecar — a deliberate choice to keep the soul files hand-editable and version-controlled in `hydra_companions/souls/`. Migrating soul graphs to sidecar-backed storage is tracked as future work; when done, the hand-authored semantic-slug ids on every node and edge will be replaced by BLAKE3-derived ids via `PUT /v1/node/:id` (the serializer already exists; see `context-binding-protocol/CHANGELOG.md` v0.8.0).
+
+### New top-level sections (all optional; compiler gates rendering on presence)
+
+| Section | Purpose | Shape |
+|---|---|---|
+| `intellectual_lineage` | Mentors / authors / sources with what was taken and what was rejected | Array of CBP entity nodes: `{id, type:"entity", val:{author,key_work,chapter_or_concept,what_*_took,what_*_rejected}, w, decay, tags}` |
+| `formative_incidents` | Dated, weighted narratives with explicit lessons | Array of CBP state nodes: `{id, type:"state", val:{date,title,narrative,lesson}, w, decay, tags}` |
+| `beliefs` | Weighted, decay-tagged held convictions | Array of CBP state nodes: `{id, type:"state", val:"<statement>", w, decay, decay_trigger?, tags}` |
+| `past_selves` | Prior versions of the persona linked via `supersedes` edges | Array of CBP entity nodes |
+| `provenance_edges` | Typed, directional, optionally conditional edges connecting rules → incidents → mentors | Array of CBP edges using the standard-8 vocab (`causes, correlates, contradicts, qualifies, supersedes, requires, inhibits, amplifies`) with `strength ∈ [-1,1]` and `conditional` expressions |
+| `conditional_rules` | Behavioral rules with CBP `conditional` activation expressions | Array of `{base_rule_id, condition_label, conditional, modified_template, note?, invokes_protocol?}` |
+| `fallibility` | Self-correction protocol for known biases | `{stance, known_biases[], self_correction_protocol:{id, title, triggered_when, protocol, recovery_phrase}}` |
+| `non_trading_interests` | Interests that bear on the companion's thinking | Array of `{interest, depth, bears_on_trading}` |
+| `internal_tensions` | Honest tradeoffs / costs of the persona | Array of `{tension, cost, honest_acknowledgment}` |
+| `capabilities` | Per-soul tool allowlist | `{tool_access:[], tool_access_note?, preferred_intents_for_tool_use:[]}` |
+| `voice.modes` | Multi-mode voice register with switching rules | `{default_mode_id, modes_available:[{id,when,register,median_words,capitalization,example}], switching_rules:[]}` |
+
+### Conditional expression syntax
+
+Mirrors `spec/schemas/edge.schema.json` in the CBP repo:
+- Literal `"always"` = unconditional.
+- Leaf: `{field:"<type>:<id>.<path>", op, value}` with ops `eq|ne|lt|lte|gt|gte|in|contains|matches|exists`.
+- Combinators: `{all:[...]}`, `{any:[...]}`, `{not:...}`.
+
+The compiler renders these to plain English via `_render_condition_plain` for prompt inclusion. Runtime evaluation lands when the CBP resolver lands.
+
+### Compiler additions (`hydra_companions/compiler.py`)
+
+New rendered blocks (per-soul, gated on field presence):
+- `## Voice modes` (from `voice.modes`)
+- `## How I got here (formative incidents)` (top 3 by `w`)
+- `## Where my rules come from` (from `intellectual_lineage`)
+- `## Gated rules (conditional activation)` (from `conditional_rules`)
+- `## Known fallibilities` (from `fallibility`)
+- `## Human texture` (condensed from `non_trading_interests` + `internal_tensions`)
+
+`CompiledSoul` dataclass gained four fields: `tool_access` (frozenset), `voice_modes` (tuple), `has_formative_incidents`, `has_intellectual_lineage`, `has_fallibility_protocol`. All backwards-compatible defaults.
+
+### New read-only tools (`hydra_companions/tools_readonly.py`)
+
+| Tool | Purpose |
+|---|---|
+| `get_order_journal(pair?, side?, strategy?, state?, since_iso?, limit=50)` | Full journal read with filters. Memory-first (broadcast snapshot tail), disk-fallback (`hydra_order_journal.json`). **Always returns ascending by `placed_at`** — matches Apex's chronological-before-indictment protocol. Limit capped at 200 with `truncated: bool` flag. |
+| `get_chart_snapshot(pair)` | Ultra-tight structural fingerprint — regime, strategy, last signal, RSI / ATR% / BB position, BB touch recency, ATR expansion ratio vs median. No raw OHLCV. |
+| `get_chart_summary(pair, lookback_n=50)` | Richer timeframe metrics — swing H/L, realized range, RSI range, ATR% median + current, BB touch counts, directional bias (linear fit slope). Lookback capped at 200. No raw OHLCV. |
+
+### Per-soul allowlist enforcement
+
+`check_tool_access(soul, tool_name)` and `enforce_tool_access(soul, tool_name)` read `capabilities.tool_access` from the soul JSON. Deny-by-default: a soul without a `capabilities` block has no tool access. In v1.1 all three souls grant the full 9-tool set; future revocations take effect without code changes.
+
+`compose_context_blob` (the Phase-1 injection path) honors the allowlist: chart and journal data are only injected for souls granted the corresponding tools.
+
+### Routing changes (`hydra_companions/model_routing.json` v1.0 → v1.1)
+
+- **New intent:** `chart_analysis` (`depth: medium`, `tools: true`, `default_max_tokens: 500`). Classifier heuristic matches chart / candles / tape-read language.
+- **Apex migration:** `market_state_query`, `teaching_explanation`, `trade_proposal`, `ladder_proposal`, `chart_analysis` all move from `anthropic:claude-sonnet-4-6` to `xai:grok-4.20-0309-reasoning`. Sonnet remains Athena's primary; Broski unchanged.
+- **New Apex rotation pools:** `apex.teaching_explanation`, `apex.market_state_query`, `apex.chart_analysis` rotate between Grok reasoning (≥0.75 weight) and Grok fast (≤0.25). Execution-class intents (`trade_proposal`, `ladder_proposal`) stay 100% reasoning — no variance on trade-building calls.
+
+### Companion turn flow (`hydra_companions/companion.py`)
+
+`respond()` now passes the soul's tool_access list into `compose_context_blob` and enables chart / journal inclusion flags when the intent is `chart_analysis`, `trade_proposal`, or `ladder_proposal`. Data injection is still gated by the allowlist.
+
+### Test coverage (113 passing)
+
+- `tests/test_companion_compiler.py` — v1.1 hybrid-section presence, voice modes, condition rendering, per-soul content checks (new 11 tests).
+- `tests/test_companion_router.py` — `chart_analysis` routing, Apex Grok migration, Sonnet retention for Athena (new 7 tests).
+- `tests/test_apex_tools.py` — journal filters + chronological sort, chart snapshot shape, chart summary shape + lookback clamp, allowlist grant/deny, `compose_context_blob` gating + max_bytes (new 19 tests).
+
+### Migration note
+
+The CBP reference implementation shipped in v0.4 (serializer) and is now at v0.8.1 (live REST API with ACL-enforced idempotent upserts). Node and edge ids on these soul files can be rederived to BLAKE3 at any time via the sidecar's `PUT /v1/node/:id` and `PUT /v1/edge/:id` endpoints per `spec/wire-format.md` §1. Migrating soul graphs from flat JSON to sidecar-backed storage is future work; the hand-authored slugs are a transitional convenience until that decision is made. The schema itself does not need to change — `id` is already a string field in both the soul JSON and the CBP node schema (`^[0-9a-f]{8,64}$` pattern for BLAKE3 ids, human-readable accepted via the `CbpNodeInput` relaxed schema added in v0.8.1).
+
