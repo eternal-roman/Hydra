@@ -2731,6 +2731,192 @@ function PendingProposalsPanel({ proposals, sendMessage }) {
   );
 }
 
+function LaddersPanel({ ladders, max, sendMessage }) {
+  const [pair, setPair] = useState("BTC/USDC");
+  const [side, setSide] = useState("BUY");
+  const [total, setTotal] = useState("");
+  const [nRungs, setNRungs] = useState(5);
+  const [topPx, setTopPx] = useState("");
+  const [botPx, setBotPx] = useState("");
+  const [stop, setStop] = useState("");
+  const [expiryHrs, setExpiryHrs] = useState(24);
+  const [reasoning, setReasoning] = useState("");
+
+  const canSubmit = total && topPx && botPx && Number(total) > 0 &&
+                    Number(topPx) > 0 && Number(botPx) > 0;
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const totalSz = Number(total);
+    const n = Math.max(1, Math.min(20, Number(nRungs) || 5));
+    const top = Number(topPx), bot = Number(botPx);
+    const hi = Math.max(top, bot), lo = Math.min(top, bot);
+    const sizePerRung = totalSz / n;
+    const rungs = [];
+    for (let i = 0; i < n; i++) {
+      // Distribute prices evenly. For BUY, start high; for SELL, start low.
+      const frac = n === 1 ? 0 : i / (n - 1);
+      const price = side === "BUY" ? hi - (hi - lo) * frac : lo + (hi - lo) * frac;
+      rungs.push({ price: Number(price.toFixed(8)), size: sizePerRung });
+    }
+    sendMessage({
+      type: "thesis_create_ladder",
+      pair, side, total_size: totalSz,
+      rungs,
+      stop_loss_price: stop ? Number(stop) : null,
+      expiry_hours: Number(expiryHrs) || 24,
+      expiry_action: "cancel",
+      reasoning,
+      creator: "user:dashboard",
+    });
+    setTotal(""); setTopPx(""); setBotPx(""); setStop(""); setReasoning("");
+  };
+
+  const active = (ladders || []).filter((l) => l.status === "ACTIVE");
+  const rest = (ladders || []).filter((l) => l.status !== "ACTIVE");
+
+  return (
+    <ThesisCard title="Active Ladders" accent={active.length > 0 ? COLORS.warn : COLORS.textDim}>
+      <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono,
+                    lineHeight: 1.6, marginBottom: 12 }}>
+        Multi-tick capital deployment with predetermined total size,
+        stop-loss, and rung prices. Orders matching a pending rung stamp
+        the journal with (ladder_id, rung_idx); non-matching trades stay
+        legal but flag adhoc=true. Set <code>HYDRA_THESIS_LADDERS=1</code> on the
+        agent to activate journal-schema changes.
+      </div>
+      {active.length === 0 && rest.length === 0 && (
+        <div style={{ fontSize: 12, color: COLORS.textDim, fontFamily: mono,
+                      padding: "8px 0 16px" }}>
+          No ladders — author one below.
+        </div>
+      )}
+      {[...active, ...rest].map((l) => (
+        <div key={l.ladder_id}
+             style={{ border: `1px solid ${COLORS.panelBorder}`,
+                      borderRadius: 6, padding: 10, marginBottom: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between",
+                        fontFamily: mono, fontSize: 11, marginBottom: 6 }}>
+            <span style={{ color: COLORS.text, fontWeight: 700 }}>
+              {l.pair} {l.side} · {l.total_size}
+            </span>
+            <span style={{ color: l.status === "ACTIVE" ? COLORS.warn
+                                 : l.status === "STOPPED_OUT" ? COLORS.danger
+                                 : COLORS.textDim }}>
+              {l.status}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap" }}>
+            {(l.rungs || []).map((r) => (
+              <span key={r.rung_idx}
+                    style={{ fontSize: 10, fontFamily: mono,
+                             padding: "2px 5px", borderRadius: 3,
+                             background: r.status === "FILLED" ? `${COLORS.accent}20`
+                                         : r.status === "PLACED" ? `${COLORS.blue}20`
+                                         : r.status === "CANCELLED" ? `${COLORS.panelBorder}`
+                                         : `${COLORS.warn}10`,
+                             color: r.status === "FILLED" ? COLORS.accent
+                                   : r.status === "PLACED" ? COLORS.blue
+                                   : r.status === "CANCELLED" ? COLORS.textDim
+                                   : COLORS.warn }}>
+                {r.price}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: COLORS.textDim, fontFamily: mono,
+                        display: "flex", justifyContent: "space-between" }}>
+            <span>stop: {l.stop_loss_price ?? "—"} · expires: {l.expires_at}</span>
+            {l.status === "ACTIVE" && (
+              <button onClick={() => sendMessage({
+                type: "thesis_cancel_ladder", ladder_id: l.ladder_id,
+              })}
+                style={{ background: "transparent", color: COLORS.danger,
+                         border: `1px solid ${COLORS.danger}40`, borderRadius: 3,
+                         padding: "1px 8px", cursor: "pointer", fontFamily: mono,
+                         fontSize: 10 }}>
+                cancel
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {/* Composer */}
+      <div style={{ marginTop: 14, paddingTop: 14,
+                    borderTop: `1px solid ${COLORS.panelBorder}` }}>
+        <FieldLabel>New ladder</FieldLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <div>
+            <FieldLabel labelSize={9}>Pair</FieldLabel>
+            <StyledSelect
+              value={pair} onChange={setPair}
+              options={["BTC/USDC", "SOL/USDC", "SOL/BTC"].map((v) => ({ value: v, label: v }))}
+            />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Side</FieldLabel>
+            <StyledSelect
+              value={side} onChange={setSide}
+              options={[{ value: "BUY", label: "BUY" }, { value: "SELL", label: "SELL" }]}
+            />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Total size</FieldLabel>
+            <StyledInput value={total} onChange={setTotal} placeholder="0.005" type="number" />
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <div>
+            <FieldLabel labelSize={9}>Rungs</FieldLabel>
+            <StyledInput
+              value={String(nRungs)}
+              onChange={(v) => setNRungs(Number(v) || 5)}
+              type="number"
+            />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Top px</FieldLabel>
+            <StyledInput value={topPx} onChange={setTopPx} placeholder="74000" type="number" />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Bot px</FieldLabel>
+            <StyledInput value={botPx} onChange={setBotPx} placeholder="73000" type="number" />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Stop px</FieldLabel>
+            <StyledInput value={stop} onChange={setStop} placeholder="72000" type="number" />
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 3fr", gap: 10, marginBottom: 10 }}>
+          <div>
+            <FieldLabel labelSize={9}>Expiry (hrs)</FieldLabel>
+            <StyledInput value={String(expiryHrs)}
+                         onChange={(v) => setExpiryHrs(Number(v) || 24)}
+                         type="number" />
+          </div>
+          <div>
+            <FieldLabel labelSize={9}>Reasoning (why this ladder)</FieldLabel>
+            <StyledInput value={reasoning} onChange={setReasoning}
+                         placeholder='e.g. "Cowen Apr memo → partial on-chain reset"' />
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <button onClick={submit} disabled={!canSubmit}
+            style={{ padding: "8px 18px",
+                     background: canSubmit ? `${COLORS.warn}20` : "transparent",
+                     color: canSubmit ? COLORS.warn : COLORS.textDim,
+                     border: `1px solid ${canSubmit ? COLORS.warn + "60" : COLORS.panelBorder}`,
+                     borderRadius: 4, cursor: canSubmit ? "pointer" : "not-allowed",
+                     fontFamily: mono, fontSize: 11, fontWeight: 700,
+                     letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            Author ladder
+          </button>
+        </div>
+      </div>
+    </ThesisCard>
+  );
+}
+
 function IntentPromptsPanel({ intents, max, sendMessage }) {
   const [draft, setDraft] = useState("");
   const [scope, setScope] = useState("*");
@@ -3094,16 +3280,11 @@ function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
           max={knobs.intent_prompt_max_active ?? 5}
           sendMessage={sendMessage}
         />
-        <ThesisCard title="Active Ladders (Phase D)" muted>
-          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
-            Multi-tick capital deployment with predetermined total size,
-            stop-loss, and rung prices. Every rung stamped in the journal so
-            the tape tells a story. Ad-hoc trades stay legal — just flagged.
-          </div>
-          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
-            Current: {(thesisState.active_ladders || []).length} active
-          </div>
-        </ThesisCard>
+        <LaddersPanel
+          ladders={thesisState.active_ladders || []}
+          max={knobs.max_active_ladders_per_pair ?? 3}
+          sendMessage={sendMessage}
+        />
         <ThesisCard title="Thesis Timeline (Phase B)" muted>
           <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
             Posterior gauge, 90-day drift chart, checklist scorecard, evidence
@@ -4477,7 +4658,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.13.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.13.3 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

@@ -599,12 +599,13 @@ class ThesisTracker:
     # ─── Tick-local helpers ───────────────────────────────────────
 
     def on_tick(self, now_ts: float) -> None:
-        """Called once per agent tick. Phase B: sweep expired intent prompts.
-        Phase D adds ladder expiry; Phase C drains Grok processor queue.
-        Kept lightweight — runs every tick."""
+        """Called once per agent tick. Sweeps expired intent prompts (Phase
+        B) and expired ladders (Phase D, feature-flagged). Kept lightweight
+        — runs every tick."""
         if self._disabled:
             return
         self._sweep_expired_intents(now_ts)
+        self._sweep_expired_ladders(now_ts)
 
     def _sweep_expired_intents(self, now_ts: float) -> None:
         intents = self._state.get("active_intents", []) or []
@@ -837,6 +838,337 @@ class ThesisTracker:
         self._state["active_intents"] = new_intents
         self.save()
         return True
+
+    # ─── Ladder CRUD + journal-stamping match (Phase D) ──────────
+    #
+    # Phase D scope: the Ladder primitive makes *intent* first-class in the
+    # journal. A user authors a multi-tick plan (total size, stop-loss,
+    # predetermined rung prices) and every subsequent placed order whose
+    # (pair, side, price) matches a pending rung gets stamped with
+    # (ladder_id, rung_idx). Orders that don't match any rung stamp
+    # adhoc=true — they stay legal (Hydra is the flywheel). The journal
+    # now distinguishes planned deployment from tactical opportunism.
+    #
+    # Stop-loss + 24h expiry are advisory in Phase D — on breach/expire,
+    # the ladder transitions to STOPPED_OUT / CANCELLED and remaining
+    # pending rungs mark CANCELLED. Kraken-side cancellation of already-
+    # placed rung orders is a separate concern (the agent's shutdown
+    # path already cancels resting limits). Future phases may auto-sell
+    # filled positions on stop breach — not in v2.13.3.
+
+    # Match tolerance: within 0.5% of rung price counts as a hit. Tight
+    # enough to preclude false positives; loose enough to catch orders
+    # that round to the pair's native decimal precision.
+    RUNG_PRICE_TOLERANCE_PCT = 0.005
+
+    def _ladders_enabled(self) -> bool:
+        """Phase D is feature-flagged so users can opt in via env AND the
+        tracker is enabled AND the user has at least one active ladder.
+        This keeps the journal schema stable for everyone who hasn't
+        opted in."""
+        return (
+            not self._disabled
+            and bool(os.environ.get("HYDRA_THESIS_LADDERS"))
+        )
+
+    def list_ladders(self) -> List[Dict[str, Any]]:
+        if self._disabled:
+            return []
+        return [dict(l) for l in (self._state.get("active_ladders", []) or [])]
+
+    def create_ladder(
+        self,
+        pair: str,
+        side: str,
+        total_size: float,
+        rungs_spec: List[Dict[str, Any]],
+        stop_loss_price: Optional[float] = None,
+        expiry_hours: Optional[int] = None,
+        expiry_action: str = "cancel",
+        reasoning: str = "",
+        creator: str = "user:dashboard",
+    ) -> Optional[Dict[str, Any]]:
+        """Author a new Ladder. rungs_spec is a list of {price, size} dicts.
+        Sizes need not sum exactly to total_size (we surface the discrepancy
+        in a warning and scale proportionally).
+
+        Returns the Ladder dict on success. None on validation failure or
+        disabled.
+        """
+        if self._disabled:
+            return None
+        if not pair or side not in ("BUY", "SELL"):
+            return None
+        if not rungs_spec or not isinstance(rungs_spec, list):
+            return None
+
+        knobs = self._state.get("knobs") or {}
+        cap_per_pair = int(knobs.get("max_active_ladders_per_pair",
+                                     DEFAULT_MAX_ACTIVE_LADDERS_PER_PAIR))
+        existing = self.list_ladders()
+        active_on_pair = sum(
+            1 for l in existing
+            if l.get("pair") == pair and l.get("status") == LadderStatus.ACTIVE.value
+        )
+        if active_on_pair >= cap_per_pair:
+            print(f"  [THESIS] cap reached for {pair}: {active_on_pair}/{cap_per_pair}")
+            return None
+
+        hours = int(expiry_hours or knobs.get(
+            "ladder_default_expiry_hours", DEFAULT_LADDER_EXPIRY_HOURS,
+        ))
+        hours = max(1, min(168, hours))
+        created_ts = time.time()
+        expires_ts = created_ts + hours * 3600
+        expires_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_ts))
+        created_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_ts))
+
+        # Build rungs
+        rungs: List[Dict[str, Any]] = []
+        for idx, spec in enumerate(rungs_spec):
+            try:
+                price = float(spec.get("price"))
+                size = float(spec.get("size"))
+            except (TypeError, ValueError):
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            rungs.append(asdict(Rung(rung_idx=idx, price=price, size=size)))
+        if not rungs:
+            return None
+
+        # Optional: scale rung sizes to sum to total_size if they don't
+        try:
+            total = float(total_size)
+            sum_sz = sum(r["size"] for r in rungs)
+            if total > 0 and sum_sz > 0 and abs(sum_sz - total) > 1e-9:
+                factor = total / sum_sz
+                for r in rungs:
+                    r["size"] = r["size"] * factor
+        except (TypeError, ValueError):
+            total = sum(r["size"] for r in rungs)
+
+        ladder = asdict(Ladder(
+            ladder_id=_ulid(),
+            created_at=created_iso,
+            expires_at=expires_iso,
+            pair=str(pair),
+            side=side,
+            total_size=float(total),
+            stop_loss_price=float(stop_loss_price) if stop_loss_price else None,
+            rungs=rungs,
+            expiry_action=(expiry_action if expiry_action in ("cancel", "convert_to_market")
+                           else "cancel"),
+            posture_at_creation=self._state.get("posture", Posture.PRESERVATION.value),
+            reasoning=str(reasoning or "")[:500],
+            creator=str(creator or "user:dashboard")[:64],
+            status=LadderStatus.ACTIVE.value,
+        ))
+        ladders = list(self._state.get("active_ladders", []) or [])
+        ladders.append(ladder)
+        self._state["active_ladders"] = ladders
+        self.save()
+        return dict(ladder)
+
+    def cancel_ladder(self, ladder_id: str, reason: str = "user_request") -> bool:
+        """Flip a ladder's status to CANCELLED. Remaining pending rungs
+        are also flipped. No Kraken-side cancel is sent — agent shutdown
+        handles resting-order cleanup."""
+        if self._disabled or not ladder_id:
+            return False
+        ladders = list(self._state.get("active_ladders", []) or [])
+        hit = False
+        for l in ladders:
+            if l.get("ladder_id") != ladder_id:
+                continue
+            if l.get("status") != LadderStatus.ACTIVE.value:
+                continue
+            l["status"] = LadderStatus.CANCELLED.value
+            for r in l.get("rungs", []) or []:
+                if r.get("status") == RungStatus.PENDING.value:
+                    r["status"] = RungStatus.CANCELLED.value
+            hit = True
+        if hit:
+            self.save()
+        return hit
+
+    def match_rung(
+        self, pair: str, side: str, price: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Return {"ladder_id": ..., "rung_idx": ...} when (pair, side, price)
+        aligns with a PENDING rung of an ACTIVE ladder. None otherwise.
+        Phase D match uses RUNG_PRICE_TOLERANCE_PCT as the tolerance band."""
+        if not self._ladders_enabled():
+            return None
+        try:
+            price_f = float(price)
+        except (TypeError, ValueError):
+            return None
+        ladders = self._state.get("active_ladders", []) or []
+        for l in ladders:
+            if l.get("status") != LadderStatus.ACTIVE.value:
+                continue
+            if l.get("pair") != pair or l.get("side") != side:
+                continue
+            for r in l.get("rungs", []) or []:
+                if r.get("status") != RungStatus.PENDING.value:
+                    continue
+                rp = float(r.get("price", 0) or 0)
+                if rp <= 0:
+                    continue
+                tol = abs(rp) * self.RUNG_PRICE_TOLERANCE_PCT
+                if abs(price_f - rp) <= tol:
+                    return {"ladder_id": l.get("ladder_id"),
+                            "rung_idx": r.get("rung_idx")}
+        return None
+
+    def record_rung_placement(
+        self, ladder_id: str, rung_idx: int,
+        userref: Optional[int] = None,
+    ) -> bool:
+        """Transition a rung PENDING → PLACED after _place_order succeeds."""
+        if self._disabled or not ladder_id:
+            return False
+        ladders = list(self._state.get("active_ladders", []) or [])
+        hit = False
+        for l in ladders:
+            if l.get("ladder_id") != ladder_id:
+                continue
+            for r in l.get("rungs", []) or []:
+                if r.get("rung_idx") != rung_idx:
+                    continue
+                r["status"] = RungStatus.PLACED.value
+                if userref is not None:
+                    r["placed_as_userref"] = int(userref)
+                hit = True
+        if hit:
+            self.save()
+        return hit
+
+    def record_rung_fill(
+        self, ladder_id: str, rung_idx: int, filled_price: float,
+    ) -> bool:
+        """Transition a rung PLACED → FILLED and mark Ladder FILLED when
+        all rungs have terminated."""
+        if self._disabled or not ladder_id:
+            return False
+        ladders = list(self._state.get("active_ladders", []) or [])
+        hit = False
+        for l in ladders:
+            if l.get("ladder_id") != ladder_id:
+                continue
+            for r in l.get("rungs", []) or []:
+                if r.get("rung_idx") != rung_idx:
+                    continue
+                r["status"] = RungStatus.FILLED.value
+                r["filled_at"] = _iso_now()
+                try:
+                    r["filled_price"] = float(filled_price)
+                except (TypeError, ValueError):
+                    pass
+                hit = True
+            # Advance ladder status if every rung terminated
+            rungs = l.get("rungs", []) or []
+            if rungs and all(
+                r.get("status") in (RungStatus.FILLED.value, RungStatus.CANCELLED.value)
+                for r in rungs
+            ):
+                if any(r.get("status") == RungStatus.FILLED.value for r in rungs):
+                    l["status"] = LadderStatus.FILLED.value
+                else:
+                    l["status"] = LadderStatus.CANCELLED.value
+        if hit:
+            self.save()
+        return hit
+
+    def check_stop_loss(
+        self, pair: str, price: float,
+    ) -> List[str]:
+        """Find ACTIVE BUY ladders on `pair` whose stop_loss_price has been
+        breached by `price`. Transitions matching ladders to STOPPED_OUT
+        and cancels their PENDING rungs. Returns list of ladder_ids that
+        flipped. Phase D is advisory — no SELL is placed on the filled
+        portion; that's a user decision surfaced via WS alert."""
+        if not self._ladders_enabled():
+            return []
+        try:
+            price_f = float(price)
+        except (TypeError, ValueError):
+            return []
+        ladders = self._state.get("active_ladders", []) or []
+        breached: List[str] = []
+        for l in ladders:
+            if l.get("status") != LadderStatus.ACTIVE.value:
+                continue
+            if l.get("pair") != pair:
+                continue
+            stop = l.get("stop_loss_price")
+            if stop is None:
+                continue
+            try:
+                stop_f = float(stop)
+            except (TypeError, ValueError):
+                continue
+            side = l.get("side")
+            # BUY ladder stops when price drops below stop_loss
+            # SELL ladder stops when price rises above stop_loss
+            breach = (side == "BUY" and price_f <= stop_f) or \
+                     (side == "SELL" and price_f >= stop_f)
+            if not breach:
+                continue
+            # Only trip if we've actually filled something (Athena's point:
+            # an unfilled ladder that moves against you is fine to cancel,
+            # but "stopped out" should imply capital was committed).
+            any_fill = any(
+                r.get("status") == RungStatus.FILLED.value
+                for r in (l.get("rungs", []) or [])
+            )
+            l["status"] = (LadderStatus.STOPPED_OUT.value if any_fill
+                           else LadderStatus.CANCELLED.value)
+            for r in l.get("rungs", []) or []:
+                if r.get("status") == RungStatus.PENDING.value:
+                    r["status"] = RungStatus.CANCELLED.value
+            breached.append(l.get("ladder_id"))
+        if breached:
+            self.save()
+        return breached
+
+    def _sweep_expired_ladders(self, now_ts: float) -> List[str]:
+        """Flip ACTIVE ladders whose expires_at has passed. Returns list
+        of ladder_ids that expired. Respects expiry_action: "cancel" is
+        honored today; "convert_to_market" is parked for a future phase
+        (flagged in the log and treated as cancel for safety)."""
+        if not self._ladders_enabled():
+            return []
+        try:
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts))
+        except (OverflowError, OSError):
+            now_iso = _iso_now()
+        ladders = self._state.get("active_ladders", []) or []
+        expired: List[str] = []
+        for l in ladders:
+            if l.get("status") != LadderStatus.ACTIVE.value:
+                continue
+            exp = l.get("expires_at")
+            if not exp:
+                continue
+            try:
+                if exp > now_iso:
+                    continue
+            except Exception:
+                continue
+            action = l.get("expiry_action", "cancel")
+            if action == "convert_to_market":
+                print(f"  [THESIS] ladder {l.get('ladder_id')} expired with "
+                      f"convert_to_market — Phase D treats this as cancel (future work)")
+            l["status"] = LadderStatus.CANCELLED.value
+            for r in l.get("rungs", []) or []:
+                if r.get("status") == RungStatus.PENDING.value:
+                    r["status"] = RungStatus.CANCELLED.value
+            expired.append(l.get("ladder_id"))
+        if expired:
+            self.save()
+        return expired
 
     # ─── Document + proposal handling (Phase C) ───────────────────
 

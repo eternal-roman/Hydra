@@ -210,6 +210,19 @@ that makes the brain smarter, not more restrictive.
   enforced via FIFO eviction. `on_tick` sweeps expired prompts once per
   tick. Three WS routes wired: `thesis_create_intent`, `thesis_delete_intent`,
   `thesis_update_intent`.
+- Ladder primitive (v2.13.3, Phase D — feature-flagged via `HYDRA_THESIS_LADDERS=1`):
+  `ThesisTracker.create_ladder / list_ladders / cancel_ladder /
+  match_rung / record_rung_placement / record_rung_fill /
+  check_stop_loss`. Per-pair cap via `knobs.max_active_ladders_per_pair`.
+  Rung match uses 0.5% price tolerance; `_place_order` calls
+  `_journal_ladder_stamp(pair, side, price)` to stamp
+  `decision.ladder_id / rung_idx / adhoc` on every placement. Stop-loss
+  is ADVISORY: on breach with any FILLED rung the ladder flips to
+  STOPPED_OUT, pending rungs CANCELLED; filled positions are NOT
+  auto-sold (deliberate non-goal). Expiry sweep runs per-tick when
+  the flag is set; `convert_to_market` variant is logged + treated as
+  cancel in Phase D. Two WS routes: `thesis_create_ladder`,
+  `thesis_cancel_ladder`.
 - Document processor (v2.13.2, Phase C): `hydra_thesis_processor.py` +
   `ThesisProcessorWorker` (daemon). Pulls uploaded research from a
   bounded queue, calls **Grok 4 reasoning** (xAI) to synthesize
@@ -399,6 +412,7 @@ Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumula
 - `HYDRA_BRAIN_TOOLS_ENABLED=1` — enables Anthropic tool-use for Analyst + Risk Manager (Grok stays text-only). Off by default; when on, per-agent quotas apply.
 - `HYDRA_THESIS_DISABLED=1` — kill switch for the thesis layer (§Thesis Layer). Tracker returns inert defaults and `save()` is a no-op; `tests/test_thesis_drift.py` enforces v2.12.5 bit-identical behavior on every commit.
 - `HYDRA_THESIS_PROCESSOR_DISABLED=1` — disable Grok 4 document processor (v2.13.2+). Worker never starts; upload routes still persist the document to `hydra_thesis_documents/` but no proposal is generated.
+- `HYDRA_THESIS_LADDERS=1` — opt in to Ladder primitive journal-schema fields (v2.13.3+). Without it, ladder CRUD still works but `match_rung` is a no-op and `_place_order` writes v2.13.2-shaped journal entries. Opt in once you're ready for `decision.ladder_id / rung_idx / adhoc` to land on every placement.
 
 ### Dashboard
 `dashboard/src/App.jsx` gained tab switcher (LIVE / BACKTEST / COMPARE), `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, and `ReviewPanel`. Shared primitives `RegimeBadge` and `SignalChip` prevent drift between LIVE and observer regime/signal styling. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU-ish) to prevent long-session memory growth. Typed-message fallback to `applyLiveState` is gated on absence of a `type` field AND presence of a `LIVE_STATE_KEYS` member — a malformed typed message can't corrupt LIVE. `compareInFlight` + `viewInFlight` states debounce repeat clicks. `DashboardBroadcaster` in `hydra_agent.py` refactored with `compat_mode=True` dual-emit (raw state + `{type, data}` wrapper) for one-release backward compatibility.
