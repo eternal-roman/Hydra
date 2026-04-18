@@ -825,6 +825,7 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
     { key: "BACKTEST", label: "BACKTEST", color: COLORS.blue },
     { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
+    { key: "THESIS",   label: "THESIS",   color: COLORS.warn },
   ];
   return (
     // Gap: 10 puts visible air between each tab so the row breathes.
@@ -2482,6 +2483,366 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v2.13.0 — Thesis tab (Golden Unicorn Phase A)
+// ═══════════════════════════════════════════════════════════════
+// Scope in Phase A: posture + knobs + hard rules + deadline are functional;
+// other sub-panels (documents, pending proposals, intents, ladders, timeline)
+// are scaffolded placeholders that light up in Phases B–E. Any change here
+// MUST preserve the "augment, don't restrict" stance from the design memory.
+
+function ThesisCard({ title, children, accent = COLORS.warn, muted = false }) {
+  return (
+    <div style={{
+      background: COLORS.panel,
+      border: `1px solid ${muted ? COLORS.panelBorder : accent + "40"}`,
+      borderRadius: 8, padding: 16, marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 11, color: muted ? COLORS.textDim : accent,
+                    textTransform: "uppercase", letterSpacing: "0.12em",
+                    fontFamily: mono, fontWeight: 700, marginBottom: 12 }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function PostureBadge({ posture }) {
+  const colorMap = {
+    PRESERVATION: COLORS.warn,
+    TRANSITION: COLORS.blue,
+    ACCUMULATION: COLORS.accent,
+  };
+  const c = colorMap[posture] || COLORS.textDim;
+  return (
+    <span style={{
+      display: "inline-block", padding: "4px 10px",
+      background: `${c}20`, border: `1px solid ${c}60`,
+      borderRadius: 4, color: c, fontFamily: mono,
+      fontSize: 11, fontWeight: 700, letterSpacing: "0.1em",
+    }}>
+      {posture || "—"}
+    </span>
+  );
+}
+
+function RangeSlider({ label, value, onCommit, min, max, step = 0.01, format = (v) => v.toFixed(2) }) {
+  const [local, setLocal] = useState(value);
+  useEffect(() => { setLocal(value); }, [value]);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between",
+                    fontFamily: mono, fontSize: 11, marginBottom: 4 }}>
+        <span style={{ color: COLORS.textDim, textTransform: "uppercase",
+                       letterSpacing: "0.08em" }}>{label}</span>
+        <span style={{ color: COLORS.text, fontWeight: 700 }}>{format(local)}</span>
+      </div>
+      <input
+        type="range" min={min} max={max} step={step} value={local}
+        onChange={(e) => setLocal(parseFloat(e.target.value))}
+        onMouseUp={(e) => onCommit(parseFloat(e.target.value))}
+        onTouchEnd={(e) => onCommit(parseFloat(e.target.value))}
+        style={{ width: "100%", accentColor: COLORS.warn }}
+      />
+    </div>
+  );
+}
+
+function ThesisPanel({ thesisState, sendMessage }) {
+  // Before the first thesis_state response, show a loading shell.
+  if (thesisState == null) {
+    return (
+      <div style={{ padding: "24px 24px", color: COLORS.textDim, fontFamily: mono, fontSize: 13 }}>
+        Awaiting thesis_state from agent…
+      </div>
+    );
+  }
+  if (thesisState.disabled) {
+    return (
+      <div style={{ padding: "24px 24px", fontFamily: mono }}>
+        <ThesisCard title="Kill switch active" accent={COLORS.danger}>
+          <div style={{ color: COLORS.text, fontSize: 13, lineHeight: 1.6 }}>
+            <code>HYDRA_THESIS_DISABLED=1</code> is set on the agent. The thesis
+            layer is inert — live behavior matches v2.12.5 bit-for-bit. Unset
+            the env var and restart the agent to enable thesis features.
+          </div>
+        </ThesisCard>
+      </div>
+    );
+  }
+
+  const knobs = thesisState.knobs || {};
+  const rules = thesisState.hard_rules || {};
+  const deadline = thesisState.deadline || {};
+  const posterior = thesisState.posterior || {};
+  const checklist = thesisState.checklist || {};
+  const checklistKeys = Object.keys(checklist);
+  const checklistMetCount = checklistKeys.filter(
+    (k) => (checklist[k]?.status || "") === "MET"
+  ).length;
+
+  const updateKnob = (patch) =>
+    sendMessage({ type: "thesis_update_knobs", knobs: patch });
+  const updatePosture = (p) =>
+    sendMessage({ type: "thesis_update_posture", posture: p });
+  const updateHardRule = (patch) =>
+    sendMessage({ type: "thesis_update_hard_rules", hard_rules: patch });
+
+  const sizeRange = Array.isArray(knobs.size_hint_range)
+    ? knobs.size_hint_range : [0.85, 1.15];
+
+  return (
+    <div style={{ padding: "16px 24px", maxWidth: 1400, margin: "0 auto" }}>
+      {/* Header: posture + posterior + checklist summary */}
+      <ThesisCard title="Posture & Posterior">
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap",
+                      alignItems: "center", marginBottom: 10 }}>
+          <div>
+            <FieldLabel>Posture</FieldLabel>
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              {["PRESERVATION", "TRANSITION", "ACCUMULATION"].map((p) => {
+                const active = thesisState.posture === p;
+                return (
+                  <button key={p} onClick={() => updatePosture(p)}
+                    style={{
+                      padding: "6px 12px", fontFamily: mono, fontSize: 11,
+                      fontWeight: 700, letterSpacing: "0.08em",
+                      borderRadius: 4, cursor: "pointer",
+                      background: active ? `${COLORS.warn}20` : "transparent",
+                      color: active ? COLORS.warn : COLORS.textDim,
+                      border: `1px solid ${active ? COLORS.warn + "60" : COLORS.panelBorder}`,
+                    }}>
+                    {p}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <FieldLabel>Active</FieldLabel>
+            <div style={{ marginTop: 6 }}><PostureBadge posture={thesisState.posture} /></div>
+          </div>
+          <div>
+            <FieldLabel>Posterior</FieldLabel>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, marginTop: 8 }}>
+              {posterior.regime || "—"} · <span style={{ color: COLORS.textDim }}>
+                {typeof posterior.confidence === "number"
+                  ? posterior.confidence.toFixed(2) : "—"}</span>
+            </div>
+          </div>
+          <div>
+            <FieldLabel>Checklist</FieldLabel>
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.text, marginTop: 8 }}>
+              {checklistMetCount}/{checklistKeys.length} met
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono,
+                      marginTop: 10, lineHeight: 1.6 }}>
+          Posture is user-set in Phase A. Grok-assisted recommendations land in
+          Phase C; opt-in enforcement lands in Phase E. Current default is
+          <code> advisory </code>— posture surfaces in brain context, it never
+          blocks a trade. Hydra is the flywheel.
+        </div>
+      </ThesisCard>
+
+      {/* Knobs — every field persisted to hydra_thesis.json on commit */}
+      <ThesisCard title="Ideological Knobs">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+          <div>
+            <RangeSlider
+              label="Conviction floor adjustment"
+              value={Number(knobs.conviction_floor_adjustment ?? 0)}
+              min={-0.10} max={0.15} step={0.01}
+              format={(v) => (v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2))}
+              onCommit={(v) => updateKnob({ conviction_floor_adjustment: v })}
+            />
+            <RangeSlider
+              label="Size hint min"
+              value={Number(sizeRange[0] ?? 0.85)}
+              min={0.50} max={1.50} step={0.01}
+              onCommit={(v) => updateKnob({ size_hint_range: [v, sizeRange[1]] })}
+            />
+            <RangeSlider
+              label="Size hint max"
+              value={Number(sizeRange[1] ?? 1.15)}
+              min={0.50} max={1.50} step={0.01}
+              onCommit={(v) => updateKnob({ size_hint_range: [sizeRange[0], v] })}
+            />
+          </div>
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <FieldLabel hint="off = surface only · advisory = show in brain context · binding = apply daily entry caps (opt-in, Phase E)">
+                Posture enforcement
+              </FieldLabel>
+              <StyledSelect
+                value={knobs.posture_enforcement || "advisory"}
+                onChange={(v) => updateKnob({ posture_enforcement: v })}
+                options={[
+                  { value: "off", label: "off" },
+                  { value: "advisory", label: "advisory (default)" },
+                  { value: "binding", label: "binding (Phase E)" },
+                ]}
+              />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <FieldLabel>Max ladders / pair</FieldLabel>
+                <StyledInput
+                  type="number"
+                  value={String(knobs.max_active_ladders_per_pair ?? 3)}
+                  onChange={(v) => updateKnob({ max_active_ladders_per_pair: parseInt(v) || 0 })}
+                />
+              </div>
+              <div>
+                <FieldLabel>Ladder expiry (hrs)</FieldLabel>
+                <StyledInput
+                  type="number"
+                  value={String(knobs.ladder_default_expiry_hours ?? 24)}
+                  onChange={(v) => updateKnob({ ladder_default_expiry_hours: parseInt(v) || 1 })}
+                />
+              </div>
+              <div>
+                <FieldLabel>Intent max active</FieldLabel>
+                <StyledInput
+                  type="number"
+                  value={String(knobs.intent_prompt_max_active ?? 5)}
+                  onChange={(v) => updateKnob({ intent_prompt_max_active: parseInt(v) || 0 })}
+                />
+              </div>
+              <div>
+                <FieldLabel>Grok $/day cap</FieldLabel>
+                <StyledInput
+                  type="number"
+                  value={String(knobs.grok_processing_budget_usd_per_day ?? 5)}
+                  onChange={(v) => updateKnob({ grok_processing_budget_usd_per_day: parseFloat(v) || 0 })}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </ThesisCard>
+
+      {/* Hard rules — ledger shield is floored at 0.20 on the agent side */}
+      <ThesisCard title="Hard Rules (absolute — only place BLOCK lives)" accent={COLORS.danger}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+          <div>
+            <FieldLabel hint="Untouchable long-term hold. Floor is 0.20 BTC — the agent rejects lower values.">
+              Ledger shield (BTC)
+            </FieldLabel>
+            <StyledInput
+              type="number"
+              value={String(rules.ledger_shield_btc ?? 0.20)}
+              onChange={(v) => updateHardRule({ ledger_shield_btc: parseFloat(v) || 0.20 })}
+            />
+          </div>
+          <div>
+            <FieldLabel hint="Minimum realized gain in USD before an exit is considered worth the tax friction.">
+              Tax friction floor (USD)
+            </FieldLabel>
+            <StyledInput
+              type="number"
+              value={String(rules.tax_friction_min_realized_pnl_usd ?? 50)}
+              onChange={(v) => updateHardRule({ tax_friction_min_realized_pnl_usd: parseFloat(v) || 0 })}
+            />
+          </div>
+          <div>
+            <FieldLabel hint="No alts until ASI > 75 AND BTC dominance < 57.">
+              No-altcoin gate
+            </FieldLabel>
+            <div style={{ marginTop: 6 }}>
+              <Checkbox
+                checked={Boolean(rules.no_altcoin_gate)}
+                onChange={(v) => updateHardRule({ no_altcoin_gate: v })}
+                label={rules.no_altcoin_gate ? "enabled" : "disabled"}
+              />
+            </div>
+          </div>
+        </div>
+      </ThesisCard>
+
+      {/* Deadline — diagnostic only, never coerces trades */}
+      <ThesisCard title="Accumulation Deadline (diagnostic)">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20,
+                      fontFamily: mono, fontSize: 12, color: COLORS.text }}>
+          <div>
+            <div style={{ color: COLORS.textDim, fontSize: 10,
+                          textTransform: "uppercase", letterSpacing: "0.1em",
+                          marginBottom: 4 }}>Near target</div>
+            <div>{deadline.near_btc_target ?? "—"} BTC by {deadline.near_iso || "—"}</div>
+          </div>
+          <div>
+            <div style={{ color: COLORS.textDim, fontSize: 10,
+                          textTransform: "uppercase", letterSpacing: "0.1em",
+                          marginBottom: 4 }}>Far target</div>
+            <div>{deadline.far_btc_target ?? "—"} BTC by {deadline.far_iso || "—"}</div>
+          </div>
+        </div>
+      </ThesisCard>
+
+      {/* Placeholder sub-panels for Phases B–E. Showing the target shape now
+          so the UX contract is clear and future phases slot in without layout
+          churn. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <ThesisCard title="Document Library (Phase C)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Upload Cowen memos, FOMC minutes, research. Grok 4 reasoning
+            synthesizes each into a pending ProposedThesisUpdate for your
+            review. Lands in Phase C alongside the processor pipeline.
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
+            Current library: {thesisState.document_library_count ?? 0} document(s)
+          </div>
+        </ThesisCard>
+        <ThesisCard title="Pending Proposals (Phase C)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Grok-authored thesis updates awaiting your approval. Posterior
+            shifts above 0.30 require an explicit "regime-change claim"
+            checkbox regardless of auto-apply setting.
+          </div>
+        </ThesisCard>
+        <ThesisCard title="Active Intent Prompts (Phase B)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Author text prompts — "lean defensive ahead of CPI", "favor BTC
+            accumulation on dips below 75k". Priority-ranked, scoped per pair,
+            injected verbatim into the Analyst's prompt. Lands in Phase B.
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
+            Current: {(thesisState.active_intents || []).length} / {knobs.intent_prompt_max_active ?? 5}
+          </div>
+        </ThesisCard>
+        <ThesisCard title="Active Ladders (Phase D)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Multi-tick capital deployment with predetermined total size,
+            stop-loss, and rung prices. Every rung stamped in the journal so
+            the tape tells a story. Ad-hoc trades stay legal — just flagged.
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
+            Current: {(thesisState.active_ladders || []).length} active
+          </div>
+        </ThesisCard>
+        <ThesisCard title="Thesis Timeline (Phase B)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Posterior gauge, 90-day drift chart, checklist scorecard, evidence
+            log. Populates as evidence accumulates.
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
+            Evidence log: {thesisState.evidence_log_count ?? 0} entries
+          </div>
+        </ThesisCard>
+        <ThesisCard title="FOMC Window (Phase C)" muted>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
+            Pre-FOMC / post-FOMC / inter-meeting phase with 25/60/15 reserve
+            split per user's stated rule. User-maintained calendar (auto-fetch
+            is post-Phase E).
+          </div>
+        </ThesisCard>
+      </div>
+    </div>
+  );
+}
+
 function ConnectionStatus({ connected, tick }) {
   // The colored, optionally-pulsing dot conveys the live/disconnected state
   // visually. The text redundantly saying "LIVE" on top of that competes
@@ -2513,7 +2874,11 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [orderJournal, setOrderJournal] = useState([]);
   // Phase 8: tab switcher + backtest message stash
-  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | BACKTEST | COMPARE
+  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | BACKTEST | COMPARE | THESIS
+  // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
+  // null until agent responds to thesis_get_state; {disabled:true} when
+  // HYDRA_THESIS_DISABLED=1 is set on the agent.
+  const [thesisState, setThesisState] = useState(null);
   const [btProgress, setBtProgress] = useState({});     // experiment_id -> progress msg
   const [btResults, setBtResults] = useState({});       // experiment_id -> result summary
   const [btReviews, setBtReviews] = useState({});       // experiment_id -> review
@@ -2863,6 +3228,11 @@ export default function App() {
               }].slice(-200));
               return;
             }
+            case "thesis_state":
+              // v2.13.0: THESIS tab snapshot. `msg.data` follows the shape
+              // returned by ThesisTracker.current_state() (Python side).
+              if (msg.data) setThesisState(msg.data);
+              return;
             case "error":
               // Backtest channel errors land here; keep quiet otherwise.
               if (msg.channel === "backtest") setBtLastAck(msg);
@@ -3120,6 +3490,16 @@ export default function App() {
     if (activeTab === "COMPARE" && connected) fetchLibrary();
   }, [activeTab, connected, fetchLibrary]);
 
+  // v2.13.0 (Golden Unicorn Phase A): fetch thesis_state on connect and on
+  // THESIS tab activation. Agent responds with a typed thesis_state message
+  // we handle in the WS switch above.
+  useEffect(() => {
+    if (connected) sendMessage({ type: "thesis_get_state" });
+  }, [connected, sendMessage]);
+  useEffect(() => {
+    if (activeTab === "THESIS" && connected) sendMessage({ type: "thesis_get_state" });
+  }, [activeTab, connected, sendMessage]);
+
   // Compare only works on experiments that are in a comparable state —
   // the run must be "complete" AND have at least one non-null primary metric.
   // Any other state (running, pending, failed, cancelled, or complete-but-
@@ -3289,6 +3669,9 @@ export default function App() {
                   }}
                 />
               </div>
+            )}
+            {activeTab === "THESIS" && (
+              <ThesisPanel thesisState={thesisState} sendMessage={sendMessage} />
             )}
             {activeTab === "COMPARE" && (
               <div style={{ padding: "16px 24px" }}>
@@ -3790,7 +4173,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.12.5 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.13.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

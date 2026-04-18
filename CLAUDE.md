@@ -77,7 +77,9 @@ Each edit was overwritten on the next tick.
 
 Hydra state-file owners: `hydra_agent.py` owns
 `hydra_session_snapshot.json`, `hydra_order_journal.json`,
-`hydra_params_*.json`, `hydra_errors.log`. The CBP sidecar
+`hydra_params_*.json`, `hydra_errors.log`, `hydra_thesis.json`,
+`hydra_thesis_documents/`, `hydra_thesis_processed/`,
+`hydra_thesis_pending/`, `hydra_thesis_evidence_archive/`. The CBP sidecar
 (`cbp-runner/state/`) is owned by `cbp-runner/supervisor.py` — see
 [HYDRA_MEMORY.md](HYDRA_MEMORY.md) for kill switches.
 
@@ -132,6 +134,9 @@ hydra_backtest_tool.py     — Anthropic tool-use schemas + dispatcher + quota t
 hydra_experiments.py       — Experiment dataclass + ExperimentStore + presets + sweep/compare
 hydra_reviewer.py          — AI Reviewer (7 code-enforced rigor gates, PR-draft only)
 hydra_shadow_validator.py  — Single-slot FIFO live-parallel validation before param writes
+hydra_thesis.py            — Thesis layer (v2.13.0+): ThesisTracker, Ladder, IntentPrompt,
+                             Evidence dataclasses. Golden Unicorn initiative — slow-moving
+                             persistent worldview + user-authored intent. See §Thesis Layer.
 journal_maintenance.py     — Order journal compaction / rotation
 hydra_journal_migrator.py  — One-shot legacy hydra_trades_live.json → hydra_order_journal.json migration
 dashboard/src/App.jsx      — React dashboard (single-file, all inline styles)
@@ -160,6 +165,50 @@ Per-user `.claude/settings.local.json` and runtime `.claude/scheduled_tasks.lock
 - `hydra_companions.cbp_client.CbpClient` reads `state/ready.json` on every call (tokens rotate).
 - Authoritative wiring spec: [HYDRA_MEMORY.md](HYDRA_MEMORY.md). Sidecar invariants live in `cbp-runner/CLAUDE.md`.
 - Kill switches: `CBP_SIDECAR_ENABLED=0` env or `state/_disabled` flag file. Hydra's memory path falls through to JSONL-only with no interruption — never block on the sidecar.
+
+## Thesis Layer (v2.13.0+, Golden Unicorn)
+
+Slow-moving persistent worldview + user-authored intent that sits *above*
+the per-tick engine and the stateless 3-agent brain. Phase A (this
+release) ships the foundational surface; Phases B–E extend brain context,
+add Grok 4 reasoning document processing, the Ladder primitive, and
+opt-in posture enforcement. Module: `hydra_thesis.py`. Plan file:
+`~/.claude/plans/athena-shared-some-interesting-sleepy-seal.md`.
+
+Design stance — **Hydra is the flywheel, not the shield.** The thesis
+layer augments brain reasoning and surfaces user intent. It does not
+throttle trading. `BLOCK` is reserved for the small set of hard rules:
+ledger shield (0.20 BTC, user's long-term hold), tax friction floor
+($50 realized gain), no-altcoin gate. Everything else is advisory context
+that makes the brain smarter, not more restrictive.
+
+- State file: `hydra_thesis.json` (atomic `.tmp` → `os.replace()` writes
+  mirroring `_save_snapshot`). Gitignored. Subdirs
+  `hydra_thesis_documents/` / `hydra_thesis_processed/` /
+  `hydra_thesis_pending/` / `hydra_thesis_evidence_archive/` are lazy,
+  also gitignored.
+- Schema version: `THESIS_SCHEMA_VERSION = "1.0.0"` in `hydra_thesis.py`;
+  bump independently when `ThesisState` JSON schema changes.
+- Snapshot integration: `_save_snapshot` writes `thesis_state`;
+  `_load_snapshot` calls `thesis.restore(...)`. Missing key is fail-soft.
+- WS routes: `thesis_get_state`, `thesis_update_knobs`,
+  `thesis_update_posture`, `thesis_update_hard_rules`. All handlers
+  broadcast the new `thesis_state` message so every client stays in sync.
+- Dashboard: new **THESIS** tab sibling to LIVE / BACKTEST / COMPARE.
+  Phase A is functional for posture + knobs + hard rules + deadline;
+  Phase B–E sub-panels are scaffolded placeholders.
+- Kill switch: `HYDRA_THESIS_DISABLED=1` (see §Env flags).
+- Hard-rule floor enforcement: `ledger_shield_btc` cannot be lowered
+  below 0.20 BTC via the API — a dashboard typo or malicious WS payload
+  cannot reduce the protected BTC. Test in `test_thesis_tracker.py`.
+- Drift invariant: `tests/test_thesis_drift.py` enforces that
+  `context_for` returns `None` and `size_hint_for` returns `1.0` in both
+  disabled and default-enabled modes in Phase A. Any future phase that
+  begins influencing the tick MUST preserve this for the disabled case.
+
+Authoritative design spec: `docs/THESIS_SPEC.md` (arrives with Phase B
+when brain integration lands). User runbook: `docs/THESIS.md`
+(same timeline).
 
 ## Companion Subsystem
 
@@ -317,6 +366,7 @@ Brain and reviewer both implement a one-shot per-UTC-day disclosure: when cumula
 ### Env flags
 - `HYDRA_BACKTEST_DISABLED=1` — kill switch. Disables worker pool, WS handlers reject backtest messages.
 - `HYDRA_BRAIN_TOOLS_ENABLED=1` — enables Anthropic tool-use for Analyst + Risk Manager (Grok stays text-only). Off by default; when on, per-agent quotas apply.
+- `HYDRA_THESIS_DISABLED=1` — kill switch for the thesis layer (§Thesis Layer). Tracker returns inert defaults and `save()` is a no-op; `tests/test_thesis_drift.py` enforces v2.12.5 bit-identical behavior on every commit.
 
 ### Dashboard
 `dashboard/src/App.jsx` gained tab switcher (LIVE / BACKTEST / COMPARE), `BacktestControlPanel`, `ObserverModal` (dual-state), `ExperimentLibrary`, `CompareResults`, and `ReviewPanel`. Shared primitives `RegimeBadge` and `SignalChip` prevent drift between LIVE and observer regime/signal styling. Equity history capped at `MAX_EQUITY_HISTORY_EXPERIMENTS=10` (LRU-ish) to prevent long-session memory growth. Typed-message fallback to `applyLiveState` is gated on absence of a `type` field AND presence of a `LIVE_STATE_KEYS` member — a malformed typed message can't corrupt LIVE. `compareInFlight` + `viewInFlight` states debounce repeat clicks. `DashboardBroadcaster` in `hydra_agent.py` refactored with `compat_mode=True` dual-emit (raw state + `{type, data}` wrapper) for one-release backward compatibility.
