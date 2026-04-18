@@ -596,31 +596,280 @@ class ThesisTracker:
         self.save()
         return {"hard_rules": rules, "_meta": {"skipped": skipped}}
 
-    # ─── Tick-local helpers (Phase A: no-op; Phases B–E extend) ───
+    # ─── Tick-local helpers ───────────────────────────────────────
 
     def on_tick(self, now_ts: float) -> None:
-        """Called once per agent tick. Phase A: no-op. Phase D adds ladder
-        expiry sweeps; Phase C drains Grok processor result queue."""
+        """Called once per agent tick. Phase B: sweep expired intent prompts.
+        Phase D adds ladder expiry; Phase C drains Grok processor queue.
+        Kept lightweight — runs every tick."""
         if self._disabled:
             return
-        # Reserved for future phases. Keep lightweight — runs every tick.
-        return
+        self._sweep_expired_intents(now_ts)
 
-    def context_for(self, pair: str, signal: Optional[Dict[str, Any]] = None) -> Optional[ThesisContext]:
-        """Return a ThesisContext the brain can consume. Phase A returns None
-        unconditionally — Phase B wires real context into ANALYST_PROMPT."""
+    def _sweep_expired_intents(self, now_ts: float) -> None:
+        intents = self._state.get("active_intents", []) or []
+        if not intents:
+            return
+        kept: List[Dict[str, Any]] = []
+        dropped = 0
+        for it in intents:
+            if not isinstance(it, dict):
+                continue
+            exp = it.get("expires_at")
+            if not exp:
+                kept.append(it)
+                continue
+            try:
+                # ISO-8601 compare as string: YYYY-MM-DDTHH:MM:SSZ sorts lexicographically
+                if exp < _iso_now():
+                    dropped += 1
+                    continue
+            except Exception:
+                pass
+            kept.append(it)
+        if dropped:
+            self._state["active_intents"] = kept
+            self.save()
+
+    def context_for(
+        self,
+        pair: str,
+        signal: Optional[Dict[str, Any]] = None,
+    ) -> Optional[ThesisContext]:
+        """Return a ThesisContext the brain can consume.
+
+        Phase B wiring: surfaces posture, posterior summary, checklist summary,
+        intent prompts scoped to this pair, and any hard-rule warnings that
+        apply to the current signal. Active ladders and real-evidence summary
+        arrive in Phases D and C respectively — fields present but empty.
+
+        Returns None only when the tracker is disabled (kill switch).
+        """
         if self._disabled:
             return None
-        # Phase A: brain not yet wired to thesis context; keep inert.
-        return None
+        s = self._state
+        posture = s.get("posture", Posture.PRESERVATION.value)
+        knobs = s.get("knobs") or asdict(ThesisKnobs())
+        posterior = s.get("posterior") or {}
+        checklist = s.get("checklist") or {}
 
-    def size_hint_for(self, pair: str, signal: Optional[Dict[str, Any]] = None) -> float:
-        """Multiplicative size modifier for execute_signal. Phase A always
-        returns 1.0 (no sizing change) regardless of posture — Phase B wires
-        the real hint bounded by knobs.size_hint_range."""
+        # Posterior summary: "LATE_CYCLE_DIGESTION @ 0.62"
+        pos_regime = posterior.get("regime", "UNKNOWN")
+        pos_conf = posterior.get("confidence")
+        try:
+            pos_conf_f = float(pos_conf) if pos_conf is not None else 0.0
+        except (TypeError, ValueError):
+            pos_conf_f = 0.0
+        posterior_summary = f"{pos_regime} @ {pos_conf_f:.2f}"
+
+        # Checklist summary: "2/5 met"
+        keys = list(checklist.keys())
+        met = [k for k in keys if (checklist[k] or {}).get("status") == "MET"]
+        checklist_summary = f"{len(met)}/{len(keys)} met" + (
+            f" ({', '.join(met)})" if met else ""
+        )
+
+        # Active intents scoped to this pair or "*"
+        active_intents = [
+            IntentPrompt(
+                intent_id=i.get("intent_id", ""),
+                created_at=i.get("created_at", ""),
+                prompt_text=i.get("prompt_text", ""),
+                pair_scope=i.get("pair_scope") or ["*"],
+                expires_at=i.get("expires_at"),
+                author=i.get("author", "user"),
+                priority=int(i.get("priority", 3)),
+            )
+            for i in self._active_intents_raw_for_pair(pair)
+        ]
+        # Sort by priority desc so most prominent surfaces first.
+        active_intents.sort(key=lambda ip: -ip.priority)
+
+        # Hard-rule warnings (non-blocking in Phase B — brain reads and reasons).
+        warnings = self._hard_rule_warnings(pair, signal)
+
+        return ThesisContext(
+            posture=posture,
+            posture_enforcement=knobs.get("posture_enforcement", DEFAULT_POSTURE_ENFORCEMENT),
+            posterior_summary=posterior_summary,
+            checklist_summary=checklist_summary,
+            active_intents=active_intents,
+            recent_evidence_summary="",  # Phase C populates from Grok processor
+            active_ladder_for_pair=None,  # Phase D populates from active_ladders match
+            hard_rule_warnings=warnings,
+            size_hint=self.size_hint_for(pair, signal),
+            conviction_floor_adjustment=float(knobs.get("conviction_floor_adjustment", 0.0)),
+        )
+
+    def size_hint_for(
+        self,
+        pair: str,
+        signal: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        """Multiplicative size modifier for execute_signal.
+
+        Phase B contract: returns 1.0 when posture_enforcement is "off" or
+        "advisory" (the default). Only "binding" mode (opt-in, Phase E)
+        derives a real multiplier from knobs.size_hint_range + posture.
+
+        This preserves the design stance that Phase B is pure brain context
+        augmentation — it cannot alter live sizing until the user explicitly
+        opts into binding enforcement.
+        """
         if self._disabled:
             return 1.0
-        return 1.0
+        knobs = self._state.get("knobs") or {}
+        enforcement = knobs.get("posture_enforcement", DEFAULT_POSTURE_ENFORCEMENT)
+        if enforcement != "binding":
+            return 1.0
+        # Phase E path (reserved): interpolate by posture within size_hint_range.
+        rng = knobs.get("size_hint_range") or list(DEFAULT_SIZE_HINT_RANGE)
+        try:
+            lo, hi = float(rng[0]), float(rng[1])
+        except (TypeError, ValueError, IndexError):
+            lo, hi = DEFAULT_SIZE_HINT_RANGE
+        mid = (lo + hi) / 2.0
+        posture = self._state.get("posture", Posture.PRESERVATION.value)
+        if posture == Posture.PRESERVATION.value:
+            hint = lo
+        elif posture == Posture.ACCUMULATION.value:
+            hint = hi
+        else:
+            hint = mid
+        hard_lo, hard_hi = SIZE_HINT_HARD_BOUNDS
+        return _clamp(hint, hard_lo, hard_hi)
+
+    def _active_intents_raw_for_pair(self, pair: str) -> List[Dict[str, Any]]:
+        """Return raw intent dicts whose pair_scope covers this pair."""
+        intents = self._state.get("active_intents", []) or []
+        out: List[Dict[str, Any]] = []
+        for it in intents:
+            if not isinstance(it, dict):
+                continue
+            scope = it.get("pair_scope") or ["*"]
+            if "*" in scope or pair in scope:
+                out.append(it)
+        return out
+
+    def _hard_rule_warnings(
+        self,
+        pair: str,
+        signal: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """Surface advisory messages about hard-rule exposure on this signal.
+        Never blocks — brain reads and reasons. Phase E opts into binding
+        enforcement; even then, only true ledger-shield violations BLOCK."""
+        rules = self._state.get("hard_rules") or {}
+        warnings: List[str] = []
+        if pair == "BTC/USDC" and signal and signal.get("action") == "SELL":
+            shield = rules.get("ledger_shield_btc", DEFAULT_LEDGER_SHIELD_BTC)
+            warnings.append(f"ledger_shield: {shield} BTC is long-term hold (untouchable)")
+        tax_floor = rules.get("tax_friction_min_realized_pnl_usd")
+        if tax_floor and signal and signal.get("action") == "SELL":
+            warnings.append(f"tax_friction: realized gains below ${tax_floor} are not worth the tax")
+        return warnings
+
+    # ─── Intent prompt CRUD (Phase B) ─────────────────────────────
+
+    def list_intents(self) -> List[Dict[str, Any]]:
+        """Return shallow copies of all active intent records."""
+        if self._disabled:
+            return []
+        return [dict(i) for i in (self._state.get("active_intents", []) or [])]
+
+    def add_intent(
+        self,
+        prompt_text: str,
+        pair_scope: Optional[List[str]] = None,
+        priority: int = 3,
+        expires_at: Optional[str] = None,
+        author: str = "user",
+    ) -> Optional[Dict[str, Any]]:
+        """Create a new intent prompt. Enforces knobs.intent_prompt_max_active
+        — if the cap is reached, the oldest intent (by created_at) is evicted
+        to make room, mirroring a FIFO circular buffer. Returns the created
+        intent dict (or None when disabled / empty text)."""
+        if self._disabled:
+            return None
+        text = (prompt_text or "").strip()
+        if not text:
+            return None
+        intents = list(self._state.get("active_intents", []) or [])
+        knobs = self._state.get("knobs") or {}
+        cap = int(knobs.get("intent_prompt_max_active", DEFAULT_INTENT_PROMPT_MAX_ACTIVE))
+        if cap > 0:
+            while len(intents) >= cap:
+                # Evict oldest
+                intents.pop(0)
+        # Validate pair_scope
+        scope = pair_scope or ["*"]
+        if not isinstance(scope, list) or not scope:
+            scope = ["*"]
+        # Coerce priority into [1, 5]
+        try:
+            prio = int(priority)
+        except (TypeError, ValueError):
+            prio = 3
+        prio = max(1, min(5, prio))
+        new_intent = {
+            "intent_id": _ulid(),
+            "created_at": _iso_now(),
+            "prompt_text": text[:2000],  # bound context bloat
+            "pair_scope": [str(p) for p in scope],
+            "expires_at": expires_at if isinstance(expires_at, str) else None,
+            "author": str(author or "user")[:64],
+            "priority": prio,
+        }
+        intents.append(new_intent)
+        self._state["active_intents"] = intents
+        self.save()
+        return dict(new_intent)
+
+    def remove_intent(self, intent_id: str) -> bool:
+        """Delete an intent by ID. Returns True on success, False when no
+        match or disabled."""
+        if self._disabled or not intent_id:
+            return False
+        intents = list(self._state.get("active_intents", []) or [])
+        new_intents = [i for i in intents if (i or {}).get("intent_id") != intent_id]
+        if len(new_intents) == len(intents):
+            return False
+        self._state["active_intents"] = new_intents
+        self.save()
+        return True
+
+    def update_intent(self, intent_id: str, patch: Dict[str, Any]) -> bool:
+        """Edit an existing intent. Only prompt_text, pair_scope, priority,
+        expires_at are mutable — intent_id, created_at, author are frozen."""
+        if self._disabled or not intent_id or not isinstance(patch, dict):
+            return False
+        intents = list(self._state.get("active_intents", []) or [])
+        hit = False
+        for i in intents:
+            if (i or {}).get("intent_id") != intent_id:
+                continue
+            if "prompt_text" in patch:
+                text = str(patch["prompt_text"] or "").strip()
+                if text:
+                    i["prompt_text"] = text[:2000]
+            if "pair_scope" in patch:
+                scope = patch["pair_scope"]
+                if isinstance(scope, list) and scope:
+                    i["pair_scope"] = [str(p) for p in scope]
+            if "priority" in patch:
+                try:
+                    p = max(1, min(5, int(patch["priority"])))
+                    i["priority"] = p
+                except (TypeError, ValueError):
+                    pass
+            if "expires_at" in patch:
+                exp = patch["expires_at"]
+                i["expires_at"] = exp if isinstance(exp, str) or exp is None else None
+            hit = True
+            break
+        if hit:
+            self.save()
+        return hit
 
     # ─── State snapshots for dashboard broadcast ──────────────────
 

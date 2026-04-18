@@ -1894,6 +1894,33 @@ class HydraAgent:
         except Exception as e:
             print(f"  [SNAPSHOT] Load failed: {e}, starting fresh.")
 
+    # ─── Thesis journal helpers (v2.13.1, Phase B) ────────────────────
+
+    def _journal_thesis_posture(self) -> Optional[str]:
+        """Posture stamp for journal entries — None when thesis disabled."""
+        t = getattr(self, "thesis", None)
+        if t is None or t.disabled:
+            return None
+        return t.posture
+
+    def _journal_intents_active(self, ai: Optional[Dict[str, Any]]) -> Optional[List[str]]:
+        """List of intent_ids the analyst consulted. Prefers the analyst's
+        self-reported list (thesis_alignment.intent_prompts_consulted) — the
+        agent doesn't second-guess the LLM's attribution. Returns None when
+        thesis is disabled OR the analyst didn't report anything."""
+        if not isinstance(ai, dict):
+            return None
+        t = getattr(self, "thesis", None)
+        if t is None or t.disabled:
+            return None
+        ta = ai.get("thesis_alignment")
+        if not isinstance(ta, dict):
+            return None
+        consulted = ta.get("intent_prompts_consulted") or []
+        if not isinstance(consulted, list):
+            return None
+        return [str(x) for x in consulted]
+
     # ─── Thesis WS routes (v2.13.0, Phase A) ──────────────────────────
     # Handlers let the dashboard read/update knobs, posture, and hard rules.
     # Each handler broadcasts the new thesis_state so every connected client
@@ -1937,6 +1964,37 @@ class HydraAgent:
         self.thesis.update_hard_rules(patch)
         self._broadcast_thesis_state()
 
+    def _handle_thesis_create_intent(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        self.thesis.add_intent(
+            prompt_text=p.get("prompt_text", ""),
+            pair_scope=p.get("pair_scope"),
+            priority=p.get("priority", 3),
+            expires_at=p.get("expires_at"),
+            author=p.get("author", "user"),
+        )
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_delete_intent(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        intent_id = (payload or {}).get("intent_id")
+        if intent_id:
+            self.thesis.remove_intent(intent_id)
+        self._broadcast_thesis_state()
+
+    def _handle_thesis_update_intent(self, payload: Dict[str, Any]) -> None:
+        if not self.thesis:
+            return
+        p = payload or {}
+        intent_id = p.get("intent_id")
+        patch = p.get("patch") or {}
+        if intent_id and patch:
+            self.thesis.update_intent(intent_id, patch)
+        self._broadcast_thesis_state()
+
     def _mount_thesis_routes(self) -> None:
         """Wire thesis WS handlers into the broadcaster. Safe on repeat
         invocation — register_handler overwrites prior mappings."""
@@ -1944,6 +2002,10 @@ class HydraAgent:
         self.broadcaster.register_handler("thesis_update_knobs", self._handle_thesis_update_knobs)
         self.broadcaster.register_handler("thesis_update_posture", self._handle_thesis_update_posture)
         self.broadcaster.register_handler("thesis_update_hard_rules", self._handle_thesis_update_hard_rules)
+        # v2.13.1 (Phase B) — intent prompt CRUD.
+        self.broadcaster.register_handler("thesis_create_intent", self._handle_thesis_create_intent)
+        self.broadcaster.register_handler("thesis_delete_intent", self._handle_thesis_delete_intent)
+        self.broadcaster.register_handler("thesis_update_intent", self._handle_thesis_update_intent)
 
     def _merge_order_journal(self):
         """Merge on-disk journal files into self.order_journal.
@@ -2450,12 +2512,28 @@ class HydraAgent:
                         ai = state.get("ai_decision", {})
                         engine = self.engines[pair]
                         pre_trade_snap = engine.snapshot_position()
+                        # v2.13.1 (Phase B): compose brain's size_multiplier
+                        # with thesis size_hint. In default advisory mode,
+                        # size_hint is 1.0 so composition is a no-op and
+                        # Phase A behavior is preserved. Only binding
+                        # enforcement (Phase E, opt-in) moves size_hint off
+                        # 1.0. Final product is clamped to [0.0, 1.5] so
+                        # no stacked modifiers can exceed Kelly's hard cap.
+                        thesis_attr = getattr(self, "thesis", None)
+                        _size_hint = 1.0
+                        if thesis_attr is not None and not thesis_attr.disabled:
+                            try:
+                                _size_hint = thesis_attr.size_hint_for(pair, sig)
+                            except Exception as te:
+                                print(f"  [THESIS] size_hint_for error ({type(te).__name__}: {te})")
+                        _brain_mult = float(ai.get("size_multiplier", 1.0) or 1.0)
+                        _final_mult = max(0.0, min(1.5, _brain_mult * _size_hint))
                         trade = engine.execute_signal(
                             action=sig.get("action", "HOLD"),
                             confidence=sig.get("confidence", 0),
                             reason=sig.get("reason", ""),
                             strategy=state.get("strategy", "MOMENTUM"),
-                            size_multiplier=ai.get("size_multiplier", 1.0),
+                            size_multiplier=_final_mult,
                         )
                         if trade is None and sig.get("action") in ("BUY", "SELL") and ai:
                             print(f"  [BRAIN] {pair}: {sig['action']} signal did not execute "
@@ -2749,6 +2827,17 @@ class HydraAgent:
         if self._portfolio_guidance:
             state["portfolio_guidance"] = self._portfolio_guidance
 
+        # v2.13.1 (Phase B): inject ThesisContext so the analyst can reason
+        # with the persistent thesis layer. Absent → empty string block in
+        # the prompt, matching v2.12.5 output byte-for-byte.
+        thesis_attr = getattr(self, "thesis", None)
+        if thesis_attr is not None and not thesis_attr.disabled:
+            try:
+                state["thesis_context"] = thesis_attr.context_for(pair, state.get("signal"))
+            except Exception as te:
+                print(f"  [THESIS] context_for error ({type(te).__name__}: {te})")
+                state["thesis_context"] = None
+
         # Fetch spread data for risk assessment. Prefer WS ticker (no API call).
         try:
             ticker = self.ticker_stream.latest_ticker(pair) or {}
@@ -2777,6 +2866,8 @@ class HydraAgent:
                 "fallback": decision.fallback,
                 "tokens_used": decision.tokens_used,
                 "latency_ms": round(decision.latency_ms, 0),
+                # v2.13.1: thesis alignment (None when thesis absent).
+                "thesis_alignment": decision.thesis_alignment,
             }
             # Cache for dashboard persistence on ticks where brain doesn't fire
             self._last_ai_decision[pair] = state["ai_decision"]
@@ -3060,6 +3151,12 @@ class HydraAgent:
                 "book_confidence_modifier": book_mod,
                 "brain_verdict": brain_verdict,
                 "swap_id": trade.get("swap_id"),
+                # v2.13.1 (Phase B): stamp thesis posture at decision time +
+                # list of intent-prompt IDs that the analyst consulted. None
+                # when thesis is disabled/absent — matching v2.12.5 shape.
+                "thesis_posture": self._journal_thesis_posture(),
+                "thesis_intents_active": self._journal_intents_active(ai),
+                "thesis_alignment": (ai or {}).get("thesis_alignment") if isinstance(ai, dict) else None,
             },
             "order_ref": {"order_userref": None, "order_id": None},
             "lifecycle": {
@@ -4362,7 +4459,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.0",
+            "version": "2.13.1",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

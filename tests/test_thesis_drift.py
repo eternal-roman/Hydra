@@ -1,22 +1,22 @@
 """
-HYDRA Thesis Drift Regression Test (Phase A invariant)
+HYDRA Thesis Drift Regression Test (Phase B invariant)
 
-Locks the Phase A contract: HYDRA_THESIS_DISABLED=1 and default-enabled
-produce bit-identical live behavior because Phase A doesn't wire thesis into
-the tick path. Any future phase that begins influencing the tick MUST
-preserve this for the disabled case.
+Locks the drift contract: HYDRA_THESIS_DISABLED=1 produces v2.12.5
+bit-identical behavior. Default-enabled Phase B now surfaces real thesis
+context to the brain — but size_hint stays 1.0 under the default advisory
+enforcement, so *live sizing and placement* remain unchanged. Only
+binding enforcement (opt-in, Phase E) can alter sizes.
 
 Specifically verifies:
 1. ThesisTracker(disabled=True) returns context_for = None, size_hint = 1.0
-2. Default ThesisTracker (no knob changes) ALSO returns context_for = None
-   and size_hint = 1.0 in Phase A — because the brain wiring has not landed.
-3. on_tick does not mutate any observable state in either mode.
-4. Importing hydra_thesis does not write any files to the save_dir.
-5. No thesis-owned state files appear on disk until ThesisTracker.save() is
-   explicitly called by a user-initiated knob update.
-
-Subsequent phases will extend this test to exercise the full tick path and
-compare resulting order journals bit-for-bit between disabled and default.
+2. Default ThesisTracker (advisory) returns a real context (not None) but
+   size_hint stays 1.0 — brain augmentation without sizing change.
+3. Flipping enforcement to "binding" with the default size_hint_range and
+   PRESERVATION posture begins to move size_hint away from 1.0. That path
+   is opt-in; it is NOT exercised on default installs.
+4. on_tick does not mutate observable state in either mode.
+5. Loading hydra_thesis does not write any files to the save_dir.
+6. No thesis subdir appears until explicitly used in later phases.
 """
 
 import os
@@ -31,23 +31,50 @@ from hydra_thesis import (
 )
 
 
-def _assert_inert(t: ThesisTracker, label: str):
-    assert t.context_for("BTC/USDC") is None, f"{label}: context_for must be None in Phase A"
-    assert t.context_for("SOL/USDC", {"action": "BUY"}) is None, f"{label}: context_for must be None in Phase A"
-    assert t.size_hint_for("BTC/USDC") == 1.0, f"{label}: size_hint must be 1.0 in Phase A"
-    assert t.size_hint_for("SOL/USDC", {"action": "BUY"}) == 1.0, f"{label}: size_hint must be 1.0 in Phase A"
-    # on_tick must not raise and must not flip inertness
+def _assert_fully_inert(t: ThesisTracker, label: str):
+    """Disabled mode contract: context_for is None, size_hint is 1.0."""
+    assert t.context_for("BTC/USDC") is None, f"{label}: context_for must be None"
+    assert t.context_for("SOL/USDC", {"action": "BUY"}) is None, f"{label}: context_for must be None"
+    assert t.size_hint_for("BTC/USDC") == 1.0, f"{label}: size_hint must be 1.0"
+    assert t.size_hint_for("SOL/USDC", {"action": "BUY"}) == 1.0, f"{label}: size_hint must be 1.0"
     t.on_tick(1_700_000_000.0)
     assert t.context_for("BTC/USDC") is None
     assert t.size_hint_for("BTC/USDC") == 1.0
 
 
-def test_disabled_vs_default_are_both_inert():
+def _assert_sizing_invariant(t: ThesisTracker, label: str):
+    """Phase B augmentation contract: context_for returns real data but
+    size_hint stays 1.0 under default advisory enforcement — so live
+    placement math is unchanged from v2.12.5."""
+    ctx = t.context_for("BTC/USDC", {"action": "BUY"})
+    assert ctx is not None, f"{label}: context_for must surface a ThesisContext"
+    assert t.size_hint_for("BTC/USDC") == 1.0, f"{label}: size_hint must be 1.0 under advisory"
+    assert t.size_hint_for("SOL/USDC", {"action": "BUY"}) == 1.0, f"{label}: size_hint must be 1.0"
+
+
+def test_disabled_is_fully_inert():
     with tempfile.TemporaryDirectory() as d:
         disabled = ThesisTracker.load_or_default(save_dir=d, disabled=True)
+        _assert_fully_inert(disabled, "disabled")
+
+
+def test_default_enforcement_preserves_sizing():
+    with tempfile.TemporaryDirectory() as d:
         default = ThesisTracker.load_or_default(save_dir=d, disabled=False)
-        _assert_inert(disabled, "disabled")
-        _assert_inert(default, "default-enabled")
+        _assert_sizing_invariant(default, "default-advisory")
+
+
+def test_binding_enforcement_begins_moving_sizing():
+    """Proves the opt-in path: only flipping to binding changes sizing.
+    This is the Phase E entry gate — off by default."""
+    with tempfile.TemporaryDirectory() as d:
+        t = ThesisTracker.load_or_default(save_dir=d, disabled=False)
+        t.update_knobs({"posture_enforcement": "binding"})
+        # Default size_hint_range is (0.85, 1.15) and default posture is PRESERVATION
+        # → size_hint should be the low end, 0.85.
+        hint = t.size_hint_for("BTC/USDC")
+        assert hint != 1.0, "binding mode must begin moving size_hint"
+        assert 0.84 < hint < 0.86, f"expected ~0.85 under PRESERVATION, got {hint}"
 
 
 def test_import_creates_no_files():
@@ -90,7 +117,9 @@ def test_schema_version_stable():
 
 def run_tests():
     fns = [
-        test_disabled_vs_default_are_both_inert,
+        test_disabled_is_fully_inert,
+        test_default_enforcement_preserves_sizing,
+        test_binding_enforcement_begins_moving_sizing,
         test_import_creates_no_files,
         test_disabled_save_never_writes,
         test_explicit_save_creates_only_one_file,

@@ -2549,6 +2549,120 @@ function RangeSlider({ label, value, onCommit, min, max, step = 0.01, format = (
   );
 }
 
+function IntentPromptsPanel({ intents, max, sendMessage }) {
+  const [draft, setDraft] = useState("");
+  const [scope, setScope] = useState("*");
+  const [priority, setPriority] = useState(3);
+  const sorted = [...(intents || [])].sort((a, b) => (b.priority || 3) - (a.priority || 3));
+  const full = sorted.length >= (max ?? 5);
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    sendMessage({
+      type: "thesis_create_intent",
+      prompt_text: text,
+      pair_scope: scope === "*" ? ["*"] : [scope],
+      priority: Number(priority) || 3,
+      author: "user:dashboard",
+    });
+    setDraft("");
+  };
+
+  return (
+    <ThesisCard title="Active Intent Prompts">
+      <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono,
+                    lineHeight: 1.6, marginBottom: 12 }}>
+        Author text prompts — injected verbatim into the Analyst's prompt,
+        priority-ranked, scoped per pair. This is how you tell Hydra's brain
+        "lean defensive ahead of CPI" or "favor BTC accumulation on dips
+        below 75k" without touching a knob.
+      </div>
+      {/* List */}
+      {sorted.length === 0 && (
+        <div style={{ fontSize: 12, color: COLORS.textDim, fontFamily: mono,
+                      padding: "12px 0" }}>
+          No active intents — compose one below.
+        </div>
+      )}
+      {sorted.map((it) => (
+        <div key={it.intent_id}
+             style={{ display: "flex", alignItems: "flex-start", gap: 10,
+                      padding: "8px 0", borderBottom: `1px solid ${COLORS.panelBorder}`,
+                      fontFamily: mono, fontSize: 12 }}>
+          <span style={{ padding: "2px 6px", background: `${COLORS.warn}20`,
+                         color: COLORS.warn, borderRadius: 3, fontWeight: 700,
+                         minWidth: 18, textAlign: "center" }}>
+            {it.priority}
+          </span>
+          <span style={{ padding: "2px 6px", background: `${COLORS.blue}10`,
+                         color: COLORS.blue, borderRadius: 3, fontSize: 10,
+                         alignSelf: "center" }}>
+            {(it.pair_scope || ["*"]).join(",")}
+          </span>
+          <span style={{ flex: 1, color: COLORS.text }}>{it.prompt_text}</span>
+          <span style={{ color: COLORS.textDim, fontSize: 10, alignSelf: "center" }}>
+            {it.author || "user"}
+          </span>
+          <button
+            onClick={() => sendMessage({ type: "thesis_delete_intent", intent_id: it.intent_id })}
+            style={{ background: "transparent", color: COLORS.danger,
+                     border: `1px solid ${COLORS.danger}40`, borderRadius: 3,
+                     padding: "2px 8px", cursor: "pointer", fontFamily: mono,
+                     fontSize: 10 }}>
+            delete
+          </button>
+        </div>
+      ))}
+      {/* Composer */}
+      <div style={{ marginTop: 14, paddingTop: 14,
+                    borderTop: `1px solid ${COLORS.panelBorder}` }}>
+        <FieldLabel hint={`${sorted.length} / ${max ?? 5} active${full ? " — next add will evict oldest" : ""}`}>
+          New intent
+        </FieldLabel>
+        <StyledTextarea
+          value={draft}
+          onChange={setDraft}
+          placeholder='e.g. "lean defensive ahead of the Apr 30 FOMC release"'
+          minHeight={60}
+        />
+        <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "center" }}>
+          <StyledSelect
+            value={scope}
+            onChange={setScope}
+            options={[
+              { value: "*", label: "all pairs" },
+              { value: "BTC/USDC", label: "BTC/USDC only" },
+              { value: "SOL/USDC", label: "SOL/USDC only" },
+              { value: "SOL/BTC", label: "SOL/BTC only" },
+            ]}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>priority:</span>
+            <StyledSelect
+              value={String(priority)}
+              onChange={(v) => setPriority(Number(v))}
+              options={[1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: String(n) }))}
+            />
+          </div>
+          <button
+            onClick={submit}
+            disabled={!draft.trim()}
+            style={{ marginLeft: "auto", padding: "8px 16px",
+                     background: draft.trim() ? `${COLORS.warn}20` : "transparent",
+                     color: draft.trim() ? COLORS.warn : COLORS.textDim,
+                     border: `1px solid ${draft.trim() ? COLORS.warn + "60" : COLORS.panelBorder}`,
+                     borderRadius: 4, cursor: draft.trim() ? "pointer" : "not-allowed",
+                     fontFamily: mono, fontSize: 11, fontWeight: 700,
+                     letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            Add intent
+          </button>
+        </div>
+      </div>
+    </ThesisCard>
+  );
+}
+
 function ThesisPanel({ thesisState, sendMessage }) {
   // Before the first thesis_state response, show a loading shell.
   if (thesisState == null) {
@@ -2802,16 +2916,11 @@ function ThesisPanel({ thesisState, sendMessage }) {
             checkbox regardless of auto-apply setting.
           </div>
         </ThesisCard>
-        <ThesisCard title="Active Intent Prompts (Phase B)" muted>
-          <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
-            Author text prompts — "lean defensive ahead of CPI", "favor BTC
-            accumulation on dips below 75k". Priority-ranked, scoped per pair,
-            injected verbatim into the Analyst's prompt. Lands in Phase B.
-          </div>
-          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.textDim, fontFamily: mono }}>
-            Current: {(thesisState.active_intents || []).length} / {knobs.intent_prompt_max_active ?? 5}
-          </div>
-        </ThesisCard>
+        <IntentPromptsPanel
+          intents={thesisState.active_intents || []}
+          max={knobs.intent_prompt_max_active ?? 5}
+          sendMessage={sendMessage}
+        />
         <ThesisCard title="Active Ladders (Phase D)" muted>
           <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
             Multi-tick capital deployment with predetermined total size,
@@ -4173,7 +4282,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.13.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.13.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
