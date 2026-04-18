@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.1] — 2026-04-17
+
+Follow-up patch to v2.12.0.
+
+### Fixed
+
+- **`hydra_companions/cbp_client.py` — CbpClient._request no-raise
+  contract.** In v2.12.0 the `json.dumps(body)` call ran outside the
+  method's try/except, so a non-serializable body (e.g., a caller
+  passing an `object()` or a `set()` inside the node payload) would
+  propagate a `TypeError` to the companion loop and violate the
+  sidecar's "clients MUST NOT block" invariant. Serialization and
+  request construction now run inside the try block, and a
+  `(TypeError, ValueError)` handler returns `(0, reason)` like every
+  other failure path. Regression test `test_non_serializable_body_does_not_raise`
+  in `tests/test_cbp_client.py` exercises the path directly.
+
 ## [2.12.0] — 2026-04-17
 
 Cross-session memory via CBP sidecar.

@@ -186,6 +186,31 @@ def test_no_ready_file_returns_none_silently():
         assert c.recall(tag="x") is None
 
 
+def test_non_serializable_body_does_not_raise():
+    """_request honors the no-raise contract even if json.dumps fails.
+
+    Regression: in v2.12.0, json.dumps ran outside _request's try/except,
+    so a non-serializable body could propagate a TypeError and violate the
+    'clients MUST NOT block on the sidecar' invariant. v2.12.1 moves the
+    serialization inside the try block and adds a (TypeError, ValueError)
+    catch; this test locks the contract in.
+    """
+    srv, addr, _ = _start_server()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            _prep_runner_dir(pathlib.Path(td), addr)
+            c = CbpClient(runner_dir=pathlib.Path(td))
+            # object() is not JSON-serializable.
+            ready = {"addr": addr, "token": "unit-test-token", "frame_id": "x"}
+            status, detail = c._request(
+                ready, "PUT", "/v1/node/x", body={"bad": object()},
+            )
+            assert status == 0
+            assert "TypeError" in str(detail)
+    finally:
+        srv.shutdown()
+
+
 def test_network_failure_returns_none_silently():
     # Point at a bogus port — expect None, not an exception.
     with tempfile.TemporaryDirectory() as td:
