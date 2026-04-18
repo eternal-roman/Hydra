@@ -1,7 +1,7 @@
 {
-  "schema_version": "1.0",
-  "updated": "2026-04-17",
-  "comment": "Per-intent per-companion model routing. Deterministic. Retune without code changes. Every routing decision logs to .hydra-companions/routing.jsonl for auditing.",
+  "schema_version": "1.1",
+  "updated": "2026-04-18",
+  "comment": "Per-intent per-companion model routing. Deterministic. Retune without code changes. Every routing decision logs to .hydra-companions/routing.jsonl for auditing. v1.1: added chart_analysis intent + classifier heuristic; Apex migrated from Sonnet to Grok reasoning for deep intents (Sonnet remains Athena's primary); rotation pools added for Apex non-execution intents.",
 
   "providers": {
     "anthropic": {
@@ -60,6 +60,7 @@
     "banter_humor": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
     "adherence_nudge": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
     "idle_proactive_nudge": { "depth": "shallow", "tools": true, "default_max_tokens": 250 },
+    "chart_analysis": { "depth": "medium", "tools": true, "default_max_tokens": 500, "note": "v1.1 — summary-only chart reads; tools get_chart_snapshot + get_chart_summary (no raw OHLCV)" },
     "council_multi_agent": { "depth": "deep", "tools": true, "default_max_tokens": 1200 },
     "unknown": { "depth": "medium", "tools": false, "default_max_tokens": 300, "note": "fallback when classifier returns low confidence" }
   },
@@ -77,21 +78,23 @@
       "banter_humor": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.7, "note": "athena rarely banters — low weight on this intent" },
       "adherence_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.4 },
       "idle_proactive_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.5 },
-      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.4 }
+      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.4 },
+      "chart_analysis": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.3 }
     },
     "apex": {
       "greeting": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
       "small_talk": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.4 },
       "ack_confirmation": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.2 },
-      "market_state_query": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.3 },
-      "teaching_explanation": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.4 },
-      "trade_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.15 },
-      "ladder_proposal": { "primary": "anthropic:claude-sonnet-4-6", "temperature": 0.15 },
+      "market_state_query": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.3, "note": "v1.1: migrated from Sonnet to Grok reasoning" },
+      "teaching_explanation": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.4, "note": "v1.1: migrated from Sonnet to Grok reasoning" },
+      "trade_proposal": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.15, "note": "v1.1: migrated from Sonnet; no rotation on execution-class calls" },
+      "ladder_proposal": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.15, "note": "v1.1: migrated from Sonnet; no rotation on execution-class calls" },
       "post_trade_reaction": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
       "banter_humor": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.6, "note": "dry only" },
       "adherence_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
       "idle_proactive_nudge": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.3 },
-      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.3 }
+      "council_multi_agent": { "primary": "xai:grok-4.20-multi-agent-0309", "temperature": 0.3 },
+      "chart_analysis": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.3, "note": "v1.1: new intent; Grok reasoning for structural chart reads" }
     },
     "broski": {
       "greeting": { "primary": "xai:grok-4-1-fast-reasoning", "temperature": 0.8 },
@@ -111,12 +114,13 @@
         "when": "soul.mode == serious",
         "temperature_delta": -0.2,
         "note": "when broski flips to serious mode, temperatures drop so output is calmer/tighter"
-      }
+      },
+      "chart_analysis": { "primary": "xai:grok-4.20-0309-reasoning", "temperature": 0.4 }
     }
   },
 
   "rotation_pools": {
-    "comment": "Optional: rotate among models for an intent to prevent pattern fatigue. Weights sum to 1.0 per intent. Seeded per-day so a single conversation stays coherent.",
+    "comment": "Optional: rotate among models for an intent to prevent pattern fatigue. Weights sum to 1.0 per intent. Seeded per-day so a single conversation stays coherent. v1.1: Apex gets rotation on non-execution intents (teaching, market_state, chart_analysis); trade_proposal and ladder_proposal stay 100% reasoning (execution-class, no variance).",
     "broski.banter_humor": [
       { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.75 },
       { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.25 }
@@ -124,6 +128,18 @@
     "broski.idle_proactive_nudge": [
       { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.8 },
       { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.2 }
+    ],
+    "apex.teaching_explanation": [
+      { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.85 },
+      { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.15 }
+    ],
+    "apex.market_state_query": [
+      { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.75 },
+      { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.25 }
+    ],
+    "apex.chart_analysis": [
+      { "model": "xai:grok-4.20-0309-reasoning", "weight": 0.8 },
+      { "model": "xai:grok-4-1-fast-reasoning", "weight": 0.2 }
     ]
   },
 
@@ -190,6 +206,7 @@
       { "intent": "ladder_proposal", "match": ["/\\b(ladder|scale in|scale out|rungs|dca)\\b/i"] },
       { "intent": "teaching_explanation", "match": ["/\\b(explain|how does|what is|teach me|why does|help me understand)\\b/i"] },
       { "intent": "market_state_query", "match": ["/\\b(what's (happening|going on)|how's|tape|regime|current state|show me|positions|balance)\\b/i"] },
+      { "intent": "chart_analysis", "match": ["/\\b(chart|candles|tape read|15m|1h|daily|read the chart|how does it look on|what's the setup|structural read|bb touch|rsi (range|reading|now)|atr expansion|swing (high|low))\\b/i"] },
       { "intent": "banter_humor", "match": ["/\\b(lol|lmao|bruh|bro|fam|dude|haha|😂|💀)\\b/i"] }
     ],
     "llm_fallback_when": "heuristic_confidence_lt:0.7",

@@ -86,6 +86,69 @@ def test_daily_budget_nonzero():
         assert r.daily_budget_usd(cid) > 0
 
 
+# ───────────────────────────────────────────────────────────────
+# v1.1 — chart_analysis intent + Apex Grok migration
+# ───────────────────────────────────────────────────────────────
+
+def test_v11_chart_analysis_intent_resolves_for_all_souls():
+    r = Router()
+    for cid in ("athena", "apex", "broski"):
+        d = r.pick(cid, "chart_analysis")
+        assert d.provider in ("anthropic", "xai")
+        assert d.model_id
+        assert d.intent == "chart_analysis"
+
+
+def test_v11_apex_trade_proposal_uses_grok_reasoning():
+    """v1.1 migration: Apex execution-class calls move to Grok reasoning."""
+    r = Router()
+    d = r.pick("apex", "trade_proposal", seed=0)
+    assert d.provider == "xai"
+    assert "reasoning" in d.model_id
+
+
+def test_v11_apex_ladder_proposal_uses_grok_reasoning():
+    r = Router()
+    d = r.pick("apex", "ladder_proposal", seed=0)
+    assert d.provider == "xai"
+    assert "reasoning" in d.model_id
+
+
+def test_v11_apex_teaching_rotates_grok():
+    """Apex teaching has a rotation pool between Grok reasoning and Grok fast."""
+    r = Router()
+    # Deterministic via seed — verify the pool is used (xai, not anthropic).
+    d = r.pick("apex", "teaching_explanation", seed=0)
+    assert d.provider == "xai"
+
+
+def test_v11_athena_keeps_sonnet_on_teaching_and_trade():
+    """Sonnet remains Athena's primary for deep intents."""
+    r = Router()
+    assert r.pick("athena", "teaching_explanation").provider == "anthropic"
+    assert r.pick("athena", "trade_proposal").provider == "anthropic"
+    assert r.pick("athena", "chart_analysis").provider == "anthropic"
+
+
+def test_v11_apex_chart_analysis_primary_is_grok_reasoning():
+    r = Router()
+    d = r.pick("apex", "chart_analysis", seed=0)
+    assert d.provider == "xai"
+
+
+def test_v11_intent_classifier_has_chart_analysis_heuristic():
+    """Classifier heuristics include a chart_analysis rule in v1.1."""
+    from hydra_companions.intent_classifier import IntentClassifier
+    ic = IntentClassifier()
+    # Loosely validate the heuristic rules list has a chart_analysis entry.
+    import json, pathlib
+    cfg_path = pathlib.Path(__file__).resolve().parent.parent / "hydra_companions" / "model_routing.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    rules = cfg["intent_classifier"]["heuristic_rules"]
+    intents = {r["intent"] for r in rules}
+    assert "chart_analysis" in intents
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
