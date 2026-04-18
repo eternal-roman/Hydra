@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.12.3] — 2026-04-17
+
+Patch for a cmd.exe batch-parser bug that prevented the agent from
+launching under `start_all.bat` on Windows.
+
+### Fixed
+
+- **`start_all.bat` / `start_hydra.bat` — escape parens inside `if (…)`
+  block.** The CBP sidecar kick added in v2.12.0 included lines like
+  `echo Starting CBP sidecar (detached) via %CBP_RUNNER_DIR%` inside
+  an `if exist … (…)` block. `cmd.exe` does not treat `(` / `)` as
+  literal inside an `if` body — the first `)` terminates the block, so
+  the remainder of the `echo` line (`via %CBP_RUNNER_DIR%`) was parsed
+  as a new command, failing with `"via was unexpected at this time"`
+  and aborting the whole batch. Python was never reached, which is why
+  no `hydra_agent.log` was produced and the LIVE tab stayed offline
+  despite the v2.12.2 UTF-8 fix. Parens in the affected echo lines are
+  now `^(` / `^)` so cmd treats them as literal characters.
+
 ## [2.12.2] — 2026-04-17
 
 Patch for a latent Windows-only crash in the LIVE tick loop.
