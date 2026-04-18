@@ -147,23 +147,43 @@ class TestWorkerPoolLifecycle(_PoolFixture):
         self.assertFalse(self.pool.cancel("no-such-id"))
 
     def test_queue_full_raises(self):
-        # Make a small pool + queue depth to force saturation quickly
+        # Make a small pool + queue depth to force saturation quickly.
+        # Hold the running worker on a threading.Event so the queue
+        # actually saturates before submission #3 (otherwise on fast CI
+        # runners worker #1 finishes before #3 is submitted and the
+        # queue is never full — flaky in CI prior to the v2.13.5 audit).
+        import threading
+        from unittest.mock import patch
         self.pool.shutdown(timeout=1.0)
         pool = BacktestWorkerPool(
             max_workers=1, store=self.store, broadcaster=self.bc,
             queue_depth=1, error_log_dir=self.tmp,
         )
+        hold = threading.Event()
+        original_run = __import__("hydra_backtest", fromlist=["BacktestRunner"]).BacktestRunner.run
+
+        def blocking_run(self_runner, *args, **kwargs):
+            hold.wait(timeout=5.0)
+            return original_run(self_runner, *args, **kwargs)
+
         try:
-            cfg = make_quick_config(name="wlq", n_candles=5000, seed=1)
-            cfg = replace(cfg, coordinator_enabled=False)
-            # First one goes to the running worker; second fills the queue;
-            # third should raise queue.Full when the queue is saturated.
-            pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 1")
-            pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 2")
-            with self.assertRaises(queue.Full):
-                pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 3")
+            with patch("hydra_backtest.BacktestRunner.run", blocking_run):
+                cfg = make_quick_config(name="wlq", n_candles=5000, seed=1)
+                cfg = replace(cfg, coordinator_enabled=False)
+                # First one goes to the running worker (now blocked);
+                # second fills the queue; third should raise queue.Full.
+                pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 1")
+                pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 2")
+                # Give the worker a beat to pick up #1 and start blocking
+                # so the queue accounting reflects #2 sitting in the queue.
+                deadline = time.time() + 2.0
+                while time.time() < deadline and pool.snapshot().get("queue_size", 0) < 1:
+                    time.sleep(0.01)
+                with self.assertRaises(queue.Full):
+                    pool.submit_config(cfg, triggered_by="cli", hypothesis="queue saturate 3")
         finally:
-            pool.shutdown(timeout=2.0)
+            hold.set()
+            pool.shutdown(timeout=5.0)
 
     def test_shutdown_stops_workers(self):
         alive_before = sum(1 for t in self.pool._workers if t.is_alive())
