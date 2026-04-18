@@ -285,12 +285,14 @@ def compile_soul(soul: dict) -> CompiledSoul:
     # Mode rules (Broski only)
     if mode_rules:
         triggers = mode_rules.get("triggers_for_serious_mode", [])
+        _default_transition = "ok for real real \u2014 "
+        _transition_phrase = mode_rules.get("transition_phrase", _default_transition)
         blocks.append(
             "## Two modes\n"
             f"You default to bro-vibes. You flip to **serious mode** the moment real risk is on the table. "
             f"Serious triggers: {', '.join(triggers)}. "
             f"In serious mode: no emoji, no bro phrases, short sentences, plain english. "
-            f"Use the transition phrase '{mode_rules.get('transition_phrase', 'ok for real real \u2014 ')}' when flipping. "
+            f"Use the transition phrase '{_transition_phrase}' when flipping. "
             f"Warm back up over 2-3 messages once the risk moment passes."
         )
 
