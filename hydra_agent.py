@@ -3083,6 +3083,40 @@ class HydraAgent:
 
         try:
             decision = self.brain.deliberate(state)
+
+            # v2.14 W3: API-down safety. When the brain has fallen back
+            # specifically because the LLM API is unreachable (api_available
+            # is False, i.e. we are inside the 60-tick backoff window after
+            # 3+ consecutive failures), block NEW entries and let exits
+            # pass through. An unvetted BUY during an Anthropic outage can
+            # print money on the wrong side of a regime flip that the Quant
+            # would have flagged; an unvetted SELL only ever reduces risk
+            # and is therefore safe to pass to the engine.
+            # Budget-exceeded fallbacks (api_available=True, budget capped)
+            # are deliberate and do NOT trigger the block.
+            api_down = decision.fallback and not self.brain.api_available
+            blocked_by_api_down = False
+            if api_down and state["signal"]["action"] == "BUY":
+                blocked_by_api_down = True
+                original_reason = state["signal"].get("reason", "")
+                state["signal"]["action"] = "HOLD"
+                state["signal"]["reason"] = (
+                    f"[API DOWN BLOCK] LLM unreachable; entry suppressed "
+                    f"(retry_at_tick={self.brain.retry_at_tick}). Original: {original_reason}"
+                )
+                try:
+                    self.brain._log_jsonl({
+                        "event": "api_down_block",
+                        "pair": pair,
+                        "tick": state.get("tick", 0),
+                        "blocked_action": "BUY",
+                        "original_reason": original_reason,
+                        "consecutive_failures": self.brain.consecutive_failures,
+                        "retry_at_tick": self.brain.retry_at_tick,
+                    })
+                except Exception:
+                    pass
+
             state["ai_decision"] = {
                 "action": decision.action,
                 "final_signal": decision.final_signal,
@@ -3096,6 +3130,7 @@ class HydraAgent:
                 "risk_flags": decision.risk_flags,
                 "portfolio_health": decision.portfolio_health,
                 "fallback": decision.fallback,
+                "api_down_block": blocked_by_api_down,
                 "tokens_used": decision.tokens_used,
                 "latency_ms": round(decision.latency_ms, 0),
                 # v2.13.1: thesis alignment (None when thesis absent).
@@ -3115,7 +3150,9 @@ class HydraAgent:
             # Brain controls sizing via size_multiplier only — engine confidence
             # passes through untouched to Kelly criterion.  confidence_adj is
             # preserved in state["ai_decision"] for dashboard/logging.
-            if decision.action == "OVERRIDE":
+            if blocked_by_api_down:
+                pass  # state["signal"] already rewritten above; skip OVERRIDE/ADJUST below
+            elif decision.action == "OVERRIDE":
                 state["signal"]["action"] = decision.final_signal
                 state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
             elif decision.action == "ADJUST":

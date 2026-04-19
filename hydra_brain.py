@@ -296,7 +296,10 @@ class HydraBrain:
         self.api_available = True
         self.retry_at_tick = 0
         self.last_decision: Optional[BrainDecision] = None
-        self._lock = threading.Lock()  # Thread safety for parallel brain calls
+        # RLock (reentrant) because _fallback() takes the lock to update
+        # daily_fallbacks but can be called from within the main deliberate()
+        # critical section (API-down and budget-exceeded paths).
+        self._lock = threading.RLock()
 
         # v2.14: structured JSONL audit log of every deliberate() and fallback.
         # One line per call. Enables A/B analysis (brain vs engine-only) and
