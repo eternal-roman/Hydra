@@ -12,6 +12,8 @@ build/
 .env
 *.env
 credentials.json
+hydra_ws_token.json
+dashboard/public/hydra_ws_token.json
 
 # Node
 node_modules/

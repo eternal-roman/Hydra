@@ -7,6 +7,11 @@ import "./App.css";
 
 // Override at build time with VITE_HYDRA_WS_URL for non-localhost deployments.
 const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
+// WS auth token file is written by the agent at startup to
+// dashboard/public/hydra_ws_token.json. Vite serves public/ at root,
+// so a plain fetch returns the current token. Rotates every agent
+// restart — a stale cache returns auth_required and we refetch.
+const WS_TOKEN_URL = "/hydra_ws_token.json";
 
 const COLORS = {
   bg: "#0a0a0f",
@@ -3433,6 +3438,10 @@ export default function App() {
   const pendingTimeoutsRef = useRef({});  // { [msgId]: timeoutHandle }
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // Per-session WS auth token. Fetched lazily on first send (and on
+  // auth_required retry); cached across reconnects unless agent
+  // restarts rotate it.
+  const wsTokenRef = useRef(null);
   // Latest `connect` closure — the setTimeout reconnect callback reads
   // through this ref instead of the stale closure it captured at
   // definition-time (otherwise ESLint flags a use-before-declare and the
@@ -3459,7 +3468,13 @@ export default function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
-    ws.onopen = () => { if (mountedRef.current) setConnected(true); };
+    ws.onopen = () => {
+      if (mountedRef.current) setConnected(true);
+      // Refresh the auth token on every (re)connect: the agent rotates
+      // it at each restart so a cached token would start returning
+      // auth_required until the user reloaded the page.
+      refreshWsToken();
+    };
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
       try {
@@ -3510,6 +3525,7 @@ export default function App() {
                 try {
                   wsRef.current.send(JSON.stringify({
                     type: "experiment_list_request", limit: 100,
+                    auth: wsTokenRef.current || "",
                   }));
                 } catch { /* swallow — next tab switch will refetch */ }
               }
@@ -3749,17 +3765,37 @@ export default function App() {
       reconnectRef.current = setTimeout(() => connectRef.current?.(), 3000);
     };
     ws.onerror = () => { ws.close(); };
-  }, [applyLiveState]);
+  }, [applyLiveState, refreshWsToken]);
 
   // Keep `connectRef` pointing at the freshest connect closure
   useEffect(() => { connectRef.current = connect; }, [connect]);
 
+  // Fetch the per-session WS auth token and cache in a ref. Eagerly
+  // called on mount and on every WS open so sendMessage can stay
+  // synchronous for the many callers that still check its boolean
+  // return value. If the token fetch fails, sends still go through
+  // without an auth field and the server rejects with auth_required —
+  // user-visible but non-destructive.
+  const refreshWsToken = useCallback(async () => {
+    try {
+      const r = await fetch(WS_TOKEN_URL, { cache: "no-store" });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const j = await r.json();
+      wsTokenRef.current = j.token || "";
+    } catch (e) {
+      console.error("[HYDRA] WS token fetch failed:", e);
+    }
+  }, []);
+
+  useEffect(() => { refreshWsToken(); }, [refreshWsToken]);
+
   // Phase 8: send a typed WS message (used by BacktestControlPanel).
+  // v2.15.0: every send carries the per-session auth token.
   const sendMessage = useCallback((msg) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     try {
-      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify({ ...msg, auth: wsTokenRef.current || "" }));
       return true;
     } catch (e) {
       console.error("[HYDRA] WS send error:", e);
@@ -4882,7 +4918,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.14.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.15.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

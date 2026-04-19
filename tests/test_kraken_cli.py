@@ -377,6 +377,60 @@ class TestFeeTierExtraction:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Shell-injection hardening (v2.15.0)
+# ═══════════════════════════════════════════════════════════════
+
+class TestShellInjection:
+    """KrakenCLI._run builds a `bash -c` string. v2.15.0 runs every
+    arg through shlex.quote so a crafted string cannot escape into
+    the shell. These tests cover the injection boundary without
+    actually invoking subprocess — they monkey-patch subprocess.run
+    and inspect the cmd vector that would have been executed."""
+
+    def _capture_cmd(self, args):
+        import subprocess as _sp
+        captured = {}
+
+        class _FakeCompleted:
+            stdout = '{"ok":1}'
+            returncode = 0
+
+        def fake_run(cmd, **_kw):
+            captured["cmd"] = list(cmd)
+            return _FakeCompleted()
+
+        orig = _sp.run
+        _sp.run = fake_run
+        try:
+            KrakenCLI._run(args)
+        finally:
+            _sp.run = orig
+        return captured["cmd"]
+
+    def test_metachar_args_are_quoted(self):
+        payload = "SOL/USDC; rm -rf /tmp/pwn"
+        cmd = self._capture_cmd(["add_order", "--pair", payload])
+        bash_str = cmd[-1]
+        # The injected payload must appear wrapped in single quotes
+        # (shlex.quote form) so bash sees it as one literal token.
+        assert f"'{payload}'" in bash_str
+        # And the outer command still routes through `kraken`.
+        assert " kraken " in bash_str
+
+    def test_backtick_command_substitution_quoted(self):
+        cmd = self._capture_cmd(["add_order", "--pair", "`id`"])
+        bash_str = cmd[-1]
+        # shlex.quote wraps backticks in single quotes so the shell
+        # never evaluates them
+        assert "'`id`'" in bash_str
+
+    def test_dollar_paren_quoted(self):
+        cmd = self._capture_cmd(["add_order", "--pair", "$(cat /etc/passwd)"])
+        bash_str = cmd[-1]
+        assert "'$(cat /etc/passwd)'" in bash_str
+
+
+# ═══════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════
 
@@ -395,6 +449,7 @@ def run_tests():
         TestAssetPairs,
         TestSystemStatus,
         TestFeeTierExtraction,
+        TestShellInjection,
     ]
 
     for cls in test_classes:

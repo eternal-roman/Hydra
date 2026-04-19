@@ -243,6 +243,44 @@ class TestPersistence:
 
         t = ParameterTracker(pair="SOL/USDC", save_dir=d)
         assert t.current_params == DEFAULT_PARAMS
+        # v2.15.0: corrupt file is quarantined, not silently re-read.
+        assert not os.path.exists(path)
+        rejected = [f for f in os.listdir(d) if f.startswith(
+            "hydra_params_SOL_USDC.json.rejected.")]
+        assert len(rejected) == 1
+
+    def test_load_quarantines_non_object_top_level(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "hydra_params_SOL_USDC.json")
+        with open(path, "w") as f:
+            f.write("[1, 2, 3]")
+        t = ParameterTracker(pair="SOL/USDC", save_dir=d)
+        assert t.current_params == DEFAULT_PARAMS
+        assert not os.path.exists(path)
+
+    def test_load_clamps_out_of_bounds_kelly(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "hydra_params_SOL_USDC.json")
+        # volatile_atr_mult bounds are (0.5, 4.0); write 99.0
+        import json as _j
+        with open(path, "w") as f:
+            _j.dump({"params": {"volatile_atr_mult": 99.0},
+                     "update_count": 5}, f)
+        t = ParameterTracker(pair="SOL/USDC", save_dir=d)
+        lo, hi = PARAM_BOUNDS["volatile_atr_mult"]
+        assert lo <= t.current_params["volatile_atr_mult"] <= hi
+        assert t.update_count == 5
+
+    def test_load_rejects_nan(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "hydra_params_SOL_USDC.json")
+        import json as _j
+        with open(path, "w") as f:
+            _j.dump({"params": {"volatile_atr_mult": "NaN"}}, f)
+        t = ParameterTracker(pair="SOL/USDC", save_dir=d)
+        # Default is restored for the NaN param
+        assert t.current_params["volatile_atr_mult"] == DEFAULT_PARAMS[
+            "volatile_atr_mult"]
 
     def test_reset_deletes_file(self):
         d = tempfile.mkdtemp()
