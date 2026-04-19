@@ -1866,6 +1866,14 @@ class HydraAgent:
                 stream.stop()
             except Exception as e:
                 print(f"  [HYDRA] {label} stop failed: {e}")
+        # v2.14: shut down the Kraken Futures derivatives poller. Daemon
+        # thread so process exit would kill it, but signal _stop cleanly
+        # so a lingering kraken subprocess doesn't outlive us.
+        if self.derivatives_stream is not None:
+            try:
+                self.derivatives_stream.stop()
+            except Exception as e:
+                print(f"  [HYDRA] DerivativesStream stop failed: {e}")
         # Drain the backtest worker pool (daemon threads — best-effort join).
         if self.backtest_pool is not None:
             try:

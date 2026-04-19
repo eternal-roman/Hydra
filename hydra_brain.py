@@ -73,6 +73,11 @@ class BrainDecision:
     # (str), posterior_shift_request (float). Surfaces on the dashboard
     # AI decision card and is stamped onto the journal entry for audit.
     thesis_alignment: Optional[Dict[str, Any]] = None
+    # v2.14: Quant's positioning_bias surfaced so the agent's rules layer
+    # can evaluate R8 (contrarian edge when engine direction fades the
+    # crowded side). BrainDecision is what the agent sees post-deliberate;
+    # without this field, analyst_output is lost and R8 silently dies.
+    positioning_bias: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -631,6 +636,9 @@ class HydraBrain:
                 # matches the dataclass default and signals "thesis absent
                 # from this deliberation."
                 thesis_alignment=analyst_output.get("thesis_alignment"),
+                # v2.14: pass positioning_bias through so the agent's
+                # quant_rules layer can fire R8 (contrarian edge).
+                positioning_bias=str(analyst_output.get("positioning_bias") or ""),
             )
 
             # Bookkeeping: shared state writes under lock
