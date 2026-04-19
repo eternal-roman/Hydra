@@ -171,15 +171,23 @@ def test_find_quarterly_returns_none_when_no_match(stream):
 
 
 def test_compute_basis_annualizes_premium(stream):
+    """30 days to expiry, 2% premium ⇒ ~24.33% APR.
+
+    v2.14.1: the fake `now` passed to `_compute_basis` is derived from
+    the same anchor as the expiry suffix, so this test is independent of
+    wall-clock drift (previously the test computed expiry from real
+    `datetime.now()` and then passed a real `time.time()`, which drifts
+    across midnight / leap-second / clock-sync jitter)."""
     snap = stream._snapshots["BTC/USDC"]
-    # 30 days to expiry → 2% premium → 24% APR
     import datetime
-    expiry_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
+    # Pick a fixed anchor we fully control — avoids any real-clock dependency.
+    anchor = datetime.datetime(2026, 6, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    expiry_dt = anchor + datetime.timedelta(days=30)
     suffix = expiry_dt.strftime("%y%m%d")
     q_symbol = f"PI_XBTUSD_{suffix}"
     perp_tick = {"markPrice": "100.0"}
     q_tick = {"markPrice": "102.0"}
-    stream._compute_basis(snap, perp_tick, q_tick, q_symbol, time.time())
+    stream._compute_basis(snap, perp_tick, q_tick, q_symbol, anchor.timestamp())
     # Expected: (102 - 100) / 100 = 0.02 → 0.02 * 365/30 * 100 ≈ 24.33%
     assert snap.basis_apr_pct is not None
     assert 23.0 < snap.basis_apr_pct < 26.0

@@ -13,6 +13,7 @@ Usage:
 """
 
 import math
+import sys
 import time
 from enum import Enum
 from dataclasses import dataclass, field
@@ -1327,7 +1328,10 @@ class HydraEngine:
             px_norm = abs(sum(px_seg) / len(px_seg)) or 1.0
             diffs.append((cvd_slope / cvd_norm) - (px_slope / px_norm))
 
-        if len(diffs) < 4:
+        # v2.14.1: require at least 8 diff windows (so history has >=7
+        # samples for pstdev). Below that the z-score is unstable and
+        # can swing to extreme values from a single volatile candle.
+        if len(diffs) < 8:
             return None
 
         import statistics
@@ -1885,8 +1889,10 @@ class HydraEngine:
         # HF-004 fix: restore trades list. Defensive: tolerate legacy snapshots
         # (no trades key), malformed rows, and missing optional fields.
         self.trades = []
+        dropped_trades = 0
         for raw in snapshot.get("trades", []):
             if not isinstance(raw, dict):
+                dropped_trades += 1
                 continue
             try:
                 self.trades.append(Trade(
@@ -1903,18 +1909,28 @@ class HydraEngine:
                     params_at_entry=raw.get("params_at_entry"),
                 ))
             except (TypeError, ValueError, KeyError):
-                continue  # silently drop malformed rows; don't crash tick loop
+                dropped_trades += 1
+                continue  # drop malformed rows; don't crash tick loop
+        if dropped_trades:
+            print(
+                f"  [restore_runtime] {self.asset}: dropped "
+                f"{dropped_trades} malformed trade row(s) from snapshot",
+                file=sys.stderr,
+            )
         self.candles = []
         self.prices = []
         self.signed_volumes = []
+        dropped_candles = 0
         for raw in snapshot.get("candles", []):
             if not isinstance(raw, dict):
+                dropped_candles += 1
                 continue
             # Skip candles without a timestamp rather than fabricating
             # time.time() — injecting "now" on restore corrupts the time
             # ordering the Sharpe calculation and ATR-series rely on.
             ts_raw = raw.get("timestamp")
             if ts_raw is None:
+                dropped_candles += 1
                 continue
             try:
                 c = Candle(
@@ -1930,7 +1946,14 @@ class HydraEngine:
                 # not after another candle_interval × 8 of warmup.
                 self.signed_volumes.append(_chaikin_signed_volume(c))
             except (TypeError, ValueError, KeyError):
-                continue  # silently drop malformed candle rows
+                dropped_candles += 1
+                continue  # drop malformed candle rows
+        if dropped_candles:
+            print(
+                f"  [restore_runtime] {self.asset}: dropped "
+                f"{dropped_candles} malformed candle row(s) from snapshot",
+                file=sys.stderr,
+            )
 
     def _candle_status(self) -> str:
         """Check if the latest candle is still forming or closed."""
