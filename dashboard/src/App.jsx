@@ -4079,7 +4079,7 @@ export default function App() {
               the brain is active so it pops cleanly against the blue-tinted
               pill background instead of blending with the blue border/text. */}
           <div title={aiBrain
-                ? "Claude Analyst + Risk Manager + Grok Strategist are reasoning over engine signals."
+                ? "Market Quant (Claude) + Risk Manager (Claude) + Grok Strategist are reasoning over engine signals."
                 : "Pure engine execution — no AI brain attached. Signals run straight from the engine to the order layer."}
                style={{ padding: "0 14px", minHeight: 38, borderRadius: 4,
                         fontSize: 12, fontWeight: 700, fontFamily: mono,
@@ -4377,9 +4377,15 @@ export default function App() {
                             <span style={{ fontSize: 8, fontFamily: mono, color: COLORS.textMuted, marginLeft: "auto" }}>{ps.ai_decision.latency_ms}ms</span>
                           )}
                         </div>
-                        <div style={{ fontSize: 10, fontFamily: mono, color: COLORS.text, lineHeight: 1.4 }}>{ps.ai_decision.analyst_reasoning}</div>
+                        <div style={{ marginTop: 2 }}>
+                          <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.blue, textTransform: "uppercase", marginRight: 6 }}>QUANT</span>
+                          <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.text, lineHeight: 1.4 }}>{ps.ai_decision.analyst_reasoning}</span>
+                        </div>
                         {ps.ai_decision.risk_reasoning && (
-                          <div style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, marginTop: 3, lineHeight: 1.3 }}>{ps.ai_decision.risk_reasoning}</div>
+                          <div style={{ marginTop: 3 }}>
+                            <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.textMuted, textTransform: "uppercase", marginRight: 6 }}>RISK</span>
+                            <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, lineHeight: 1.3 }}>{ps.ai_decision.risk_reasoning}</span>
+                          </div>
                         )}
                         {ps.ai_decision.escalated && ps.ai_decision.strategist_reasoning && (
                           <div style={{ marginTop: 4, padding: "4px 6px", background: `${COLORS.warn}10`, borderRadius: 3 }}>

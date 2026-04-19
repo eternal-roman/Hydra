@@ -2,12 +2,20 @@
 """
 HYDRA Brain — Multi-Agent AI Reasoning Layer (3-Agent Pipeline)
 
-Agent 1: Market Analyst (Claude Sonnet) — fast technical analysis
-Agent 2: Risk Manager (Claude Sonnet) — risk assessment and approval
-Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested decisions
+Agent 1: Market Quant (Claude Sonnet) — quantitative market analysis with
+         derivatives positioning (funding, OI regime, basis) and CVD
+         divergence; outputs scenario probabilities + size_multiplier.
+         Historically named "Analyst"; the journal / WS field
+         `analyst_reasoning` is preserved for back-compat.
+Agent 2: Risk Manager (Claude Sonnet) — Jane-Street / Deribit institutional
+         rigor: structured risk metrics, stress-scenario loss, liquidity
+         score, correlation cluster; outputs decision + size_multiplier.
+Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested
+         decisions (OVERRIDE or ADJUST from Risk Manager, or low-conviction
+         disagreement between Quant and engine).
 
-Grok fires on genuine disagreements: Risk Manager OVERRIDE or ADJUST, or
-analyst disagrees with engine at low conviction (< 0.50).
+All agents read derivatives data for SIGNAL INPUT ONLY. Hydra never
+places orders on Kraken Futures. SPOT-ONLY invariant — see CLAUDE.md.
 
 Usage:
     brain = HydraBrain(anthropic_key="sk-ant-...", xai_key="xai-...")
@@ -71,7 +79,7 @@ class BrainDecision:
 # SYSTEM PROMPTS
 # ═══════════════════════════════════════════════════════════════
 
-ANALYST_PROMPT = """You are HYDRA's Market Analyst, an expert crypto technical analyst inside an autonomous trading system. Analyze the market snapshot and evaluate the engine's signal.
+QUANT_PROMPT = """You are HYDRA's Market Quant, a quantitative market analyst inside an autonomous SPOT-ONLY crypto trading system. You trade Kraken spot pairs (SOL/USDC, SOL/BTC, BTC/USDC); derivatives data is SIGNAL INPUT ONLY — Hydra never places futures or options orders. Analyze the market snapshot and evaluate the engine's signal.
 
 Your analysis must be:
 1. CONCISE — max 3 sentences for the thesis
@@ -148,7 +156,7 @@ Think step by step. Then respond ONLY with this JSON:
   "decision": "CONFIRM" or "OVERRIDE"
 }"""
 
-# Appended to ANALYST_PROMPT / RISK_MANAGER_PROMPT when tool-use is enabled.
+# Appended to QUANT_PROMPT / RISK_MANAGER_PROMPT when tool-use is enabled.
 # Keeps the base prompts untouched for the no-tools path (drift-sensitive —
 # existing prompt wording is load-bearing for the JSON output contract).
 TOOLS_GUIDANCE = """
@@ -363,8 +371,8 @@ class HydraBrain:
         total_tokens_out = 0
 
         try:
-            # Agent 1: Market Analyst (Claude)
-            analyst_output, a_in, a_out = self._run_analyst(state)
+            # Agent 1: Market Quant (Claude)
+            analyst_output, a_in, a_out = self._run_quant(state)
             total_tokens_in += a_in
             total_tokens_out += a_out
             if analyst_output is None:
@@ -619,7 +627,7 @@ class HydraBrain:
         Invariants:
           - Never raises. On unexpected exceptions returns ("", 0, 0, 0)
             so the caller falls back to engine-only reasoning (same
-            pattern as _call_llm's outer try in _run_analyst).
+            pattern as _call_llm's outer try in _run_quant).
           - Primary provider MUST be "anthropic" — caller is responsible
             for checking self._tool_use_enabled before calling.
           - Dispatcher errors are marshaled into tool_result content
@@ -751,20 +759,20 @@ class HydraBrain:
 
     # ─── Agent runners ───
 
-    def _run_analyst(self, state: Dict) -> tuple:
-        """Market Analyst (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
+    def _run_quant(self, state: Dict) -> tuple:
+        """Market Quant (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
         user_msg = self._build_analyst_prompt(state)
         if self._tool_use_enabled:
             from hydra_backtest_tool import BACKTEST_TOOLS
             text, tok_in, tok_out, _tool_calls = self._call_llm_with_tools(
-                ANALYST_PROMPT + TOOLS_GUIDANCE,
+                QUANT_PROMPT + TOOLS_GUIDANCE,
                 user_msg,
                 BACKTEST_TOOLS,
                 caller="brain:analyst",
                 max_tokens=500,  # headroom over plain 400 for tool_result context
             )
         else:
-            text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 400)
+            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 400)
         return self._parse_json(text), tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:

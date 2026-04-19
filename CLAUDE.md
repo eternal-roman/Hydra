@@ -60,7 +60,9 @@ regression bug, not a style issue.
 
 ## Cross-cutting invariants (HIGH severity if violated)
 
+- **SPOT-ONLY execution** — Hydra places orders ONLY on Kraken spot pairs (SOL/USDC, SOL/BTC, BTC/USDC). Derivatives data (Kraken Futures funding/OI via `kraken futures tickers` CLI) is SIGNAL INPUT ONLY. No futures, no options, no margin orders placed. `hydra_derivatives_stream.py` is read-only by construction; its test suite greps for authenticated subcommand names and fails if any appear.
 - **Limit post-only, never market** — deliberate design choice
+- **No REST for market data** — all Kraken market data flows through the WebSocket streams or the `kraken` CLI (WSL Ubuntu). Only the CBP sidecar (localhost IPC) uses REST. New data sources must use CLI or WS.
 - **2s REST floor** — Kraken throttles or bans below this
 - **15% drawdown kills engine for session** — both `tick()` and `_maybe_execute` check
 - **RSI/ATR = Wilder exponential smoothing, NOT SMA** (Bollinger = population variance)
