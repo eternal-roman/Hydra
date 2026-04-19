@@ -6,8 +6,8 @@ Agent 1: Market Analyst (Claude Sonnet) — fast technical analysis
 Agent 2: Risk Manager (Claude Sonnet) — risk assessment and approval
 Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested decisions
 
-Grok only fires on genuine disagreements: Risk Manager OVERRIDE, or analyst
-disagrees with engine at low conviction (< 0.50). ADJUST does not trigger Grok.
+Grok fires on genuine disagreements: Risk Manager OVERRIDE or ADJUST, or
+analyst disagrees with engine at low conviction (< 0.50).
 
 Usage:
     brain = HydraBrain(anthropic_key="sk-ant-...", xai_key="xai-...")
@@ -213,14 +213,17 @@ class HydraBrain:
     # per UTC day. Decoupled from max_daily_cost: a caller can disable budget
     # enforcement (enforce_budget=False, e.g., backtest context) and the
     # user still gets disclosure.
-    COST_ALERT_USD = 10.0
+    # v2.14: lowered 10.0 → 3.0 to match the tuned Sonnet-4.6 daily target.
+    # Meaningful 3-agent activity (Quant + Risk + occasional Grok) lands
+    # well under $3/day; anything higher is a signal to investigate.
+    COST_ALERT_USD = 3.0
 
     def __init__(
         self,
         anthropic_key: str = "",
         openai_key: str = "",
         xai_key: str = "",
-        max_daily_cost: float = 10.0,
+        max_daily_cost: float = 3.0,
         tool_dispatcher: Optional[Any] = None,
         enable_tool_use: Optional[bool] = None,
         enforce_budget: bool = True,
@@ -383,13 +386,13 @@ class HydraBrain:
             analyst_conviction = analyst_output.get("conviction", 0.0)
             needs_strategist = (
                 self.has_strategist and not cooldown_active and (
-                    risk_decision == "OVERRIDE" or
+                    risk_decision in ("OVERRIDE", "ADJUST") or
                     (not analyst_agrees and analyst_conviction < 0.50)
                 )
             )
             if cooldown_active and self.has_strategist:
                 would_escalate = (
-                    risk_decision == "OVERRIDE" or
+                    risk_decision in ("OVERRIDE", "ADJUST") or
                     (not analyst_agrees and analyst_conviction < 0.50)
                 )
                 if would_escalate:
