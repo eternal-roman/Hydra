@@ -1,8 +1,8 @@
-<!-- NOTE: This spec was written for v1.0. Core formulas (position sizing, ATR)
-     and trading pairs have been updated inline, but file structure, pseudocode
-     examples, and feature coverage do not reflect v2.x additions (AI brain,
-     self-tuning, order reconciler, session snapshots). See CLAUDE.md for
-     current authoritative reference. -->
+<!-- CLAUDE.md is the current authoritative reference. This file is the
+     agent-readable trading spec (frontmatter + English narrative);
+     formulas and pair lists are kept current, but architecture detail
+     (AI brain, self-tuning, reconciler, snapshots, companions, thesis
+     layer) lives in CLAUDE.md + CBP nodes, not here. -->
 ---
 name: hydra-regime-trader
 description: >
@@ -237,7 +237,7 @@ END LOOP
 hydra/
 ├── SKILL.md              # This file — agent instructions
 ├── README.md             # Project overview and setup guide
-├── AUDIT.md              # Technical audit and test results
+├── AUDIT_YYYY-MM-DD.md   # Latest post-release audit report
 ├── hydra_engine.py       # Strategy engine (indicators, regime detection, signals)
 ├── hydra_agent.py        # Agent loop (Kraken CLI, WebSocket, trade execution)
 ├── hydra_brain.py        # AI reasoning (Claude Analyst + Risk Manager + Grok Strategist)

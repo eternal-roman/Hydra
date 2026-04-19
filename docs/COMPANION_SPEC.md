@@ -1,7 +1,7 @@
 # HYDRA COMPANION — Master Specification
 
-**Status:** Phase 0 — spec only, no runtime code.
-**Branch:** `feat/companion-spec`
+**Status:** SHIPPED v1 (Phases 0–6 live; Phase 7–8 in §12 roadmap).
+**Branch:** `feat/companion-spec` (historical; merged across v2.10.4–v2.10.11)
 **Owners:** single-user (multi-user roadmap in §12)
 
 A live, in-dashboard trading partner. Three distinct souls today (Athena, Apex, Broski). Trained personalities tomorrow. Integrates without touching the engine, brain, or existing dashboard tabs.

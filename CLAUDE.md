@@ -101,13 +101,13 @@ shutdown) → `cbp --label hydra.engine_invariants` + `hydra.trading_invariants`
 ## Deep specs
 
 - `SKILL.md` — full trading specification (agent-readable)
-- `AUDIT.md` — technical audit + verification checklist
 - `CHANGELOG.md` — version history
 - `HYDRA_MEMORY.md` — memory wiring + CBP sidecar topology
 - `SECURITY.md` — security policy
 - `docs/BACKTEST.md` / `docs/BACKTEST_SPEC.md` — runbook + authoritative design
 - `docs/COMPANION_SPEC.md` — companion spec (authoritative)
-- `docs/THESIS_SPEC.md` / `docs/THESIS.md` — design spec + runbook
+- Thesis layer design → `cbp --label hydra.thesis_layer` (lives in CBP, no committed .md)
+- Latest post-release audit report lives in `AUDIT_YYYY-MM-DD.md` at root (keep only the most recent)
 
 ## CBP pointers (load on demand, one node per subsystem)
 
