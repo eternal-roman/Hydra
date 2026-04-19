@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.6] — 2026-04-18
+
+**CLAUDE.md hot/cold split + CBP becomes sole graph store.** Docs-only
+patch. Cold subsystem detail migrated out of the 38.5 KB hot file into
+CBP nodes, leaving a 15.5 KB index that stays in every session's
+context. No code or behavior change.
+
+**Migrated to CBP** (group `hydra_spec`, load on demand via
+`python C:/Users/elamj/Dev/cbp-runner/bin/memory-read.py --label <slug>`):
+
+- `hydra.engine_invariants` — indicators, regime, adaptive volatility
+- `hydra.trading_invariants` — sizing, minimums, precision, execution, resume, forex
+- `hydra.ai_brain` — Analyst / RM / Strategist + tool-use loop
+- `hydra.streams` — BaseStream + 5 instances
+- `hydra.thesis_layer` — posture, ladder, intent, doc processor
+- `hydra.backtest_platform` — I1–I12, rigor gates, reviewer, dashboard
+- `hydra.companion_subsystem` — orb default ON, live-exec opt-in
+- `hydra.tests_live_harness` — 33+ scenarios, smoke/mock/validate/live
+
+**Deleted** the `edges[]` block from CLAUDE.md — CBP already tracks the
+relational graph (272+ nodes, typed edges). One source of truth.
+
+**Kept hot** (needed every session to prevent concrete past failures):
+Operating Rules 1–5, cross-cutting invariants, module index, deep spec
+pointers, state files, env flags, version sites, release workflow,
+7-way audit partition, Windows/WSL gotchas, common pitfalls.
+
+**Also:** stale `version_pin: v2.13.4` in CLAUDE.md corrected to
+`v2.13.6` (prior release cycle missed the pin update).
+
+**Safety invariants:** no I1–I12 impact. No execution-path code touched.
+
+---
+
 ## [2.13.5] — 2026-04-18
 
 **Audit hardening + CI gate expansion.** Patch release driven by a
