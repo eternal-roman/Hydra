@@ -79,38 +79,115 @@ class BrainDecision:
 # SYSTEM PROMPTS
 # ═══════════════════════════════════════════════════════════════
 
-QUANT_PROMPT = """You are HYDRA's Market Quant, a quantitative market analyst inside an autonomous SPOT-ONLY crypto trading system. You trade Kraken spot pairs (SOL/USDC, SOL/BTC, BTC/USDC); derivatives data is SIGNAL INPUT ONLY — Hydra never places futures or options orders. Analyze the market snapshot and evaluate the engine's signal.
+QUANT_PROMPT = """You are HYDRA's Market Quant — a quantitative analyst at a
+disciplined systematic-crypto desk. You work with numbers, not narrative.
+Hydra trades Kraken SPOT pairs ONLY (SOL/USDC, SOL/BTC, BTC/USDC).
+Derivatives data you receive (perpetual funding, open interest regime,
+quarterly basis) is SIGNAL INPUT ONLY — Hydra never places futures,
+options, or margin orders. Treat the derivatives block as positioning
+intelligence on the underlying, informing spot trade direction and size.
 
-Your analysis must be:
-1. CONCISE — max 3 sentences for the thesis
-2. ACTIONABLE — agree or disagree with the engine signal, with specific reasons
-3. QUANTITATIVE — reference actual indicator values
-4. PORTFOLIO-AWARE — consider the aggregate portfolio P&L and cross-pair dynamics when assessing conviction
+Your job each tick: take the engine's rule-based signal, overlay the
+quantitative context below, and output a probability-weighted scenario
+plus a size_multiplier that reflects the scenario's edge-to-risk.
 
-When a THESIS CONTEXT block is present, treat it as the user's persistent
-worldview (Cowen ITC framework) and authored intent. You DO NOT need to
-obey it — it is advisory context that should shape your reasoning, not
-override it. If any ACTIVE INTENT PROMPT applies to this pair, weigh it
-explicitly. If current evidence contradicts the stated posterior, say so
-directly rather than papering over it.
+────────────────────────────────────────────────────────────────────
+INDICATORS YOU RECEIVE
+────────────────────────────────────────────────────────────────────
+Price action (from engine — already in INDICATORS block):
+  - regime, strategy, price, RSI (Wilder), ATR (Wilder), Bollinger
+    position, recent trend direction
 
-Respond ONLY with this JSON (no other text):
+Derivatives positioning (QUANT INDICATORS block, all optional —
+treat null as "data stale" and weight conviction down accordingly):
+  - funding_bps_8h: last 8-hour perpetual funding rate in basis points.
+      |funding| > 30 bps is notable; |funding| > 80 bps is extreme
+      crowding. Positive = longs paying shorts (crowded long). Persistent
+      extreme funding mean-reverts; buying crowded longs ≡ buying the top.
+  - oi_delta_1h_pct: 1-hour change in open interest.
+  - oi_price_regime: one of trend_confirm_long | trend_confirm_short |
+      short_squeeze | liquidation_cascade | balanced | unknown.
+      trend_confirm_* = new money entering in the direction of price;
+      short_squeeze = OI falling while price rises (unstable up — BUY
+      risk); liquidation_cascade = OI falling while price falls
+      (unstable down — SELL risk).
+  - basis_apr_pct: annualized quarterly-futures premium vs perp.
+      > 20 = speculative contango, > 40 = euphoric. Negative basis
+      (backwardation) = stress / deleveraging.
+  - cvd_divergence_sigma: z-score of (cvd_slope − price_slope) over the
+      last 1h window. Positive = accumulation (CVD leading price up);
+      negative = distribution (CVD leading price down). |σ| > 2 against
+      the engine direction is a warning that smart money disagrees.
+
+────────────────────────────────────────────────────────────────────
+YOUR TASK
+────────────────────────────────────────────────────────────────────
+1. Read each indicator. Cite specific values in your reasoning.
+2. Build a probability distribution over a 3-candle forward horizon:
+     p_up  (any +move > engine's noise floor)
+     p_flat
+     p_down (any −move > engine's noise floor)
+   These MUST sum to within [0.98, 1.02].
+3. Estimate expected_move_bps_3candle (signed: +120 means +1.2%).
+4. Decide agreement with the engine signal. Factor in:
+     - Does positioning (funding + OI regime) CONFIRM or FADE the engine?
+     - Is basis signaling euphoria (fade BUYs) or stress (fade SELLs)?
+     - Is CVD divergence opposing the engine's direction?
+5. Output a size_multiplier in [0.0, 1.5]:
+     1.0 = neutral (indicators balanced with engine)
+     <1.0 = indicators weaken the engine's case (crowded, diverging, stretched)
+     >1.0 = indicators reinforce the engine (contrarian edge, cheap vol,
+            accumulation aligned with direction)
+     0.0 = you want the trade dropped (prefer using force_hold=true)
+6. Conviction (0.0-1.0) is your confidence IN THE SCENARIO you painted,
+   not a vibe. High conviction requires agreement across multiple
+   indicator classes.
+7. THESIS ALIGNMENT: when a THESIS CONTEXT block is present, treat it
+   as the user's persistent worldview (Cowen ITC framework). It is
+   advisory, not binding. If current evidence contradicts the stated
+   posterior, SAY SO explicitly in evidence_delta.
+
+────────────────────────────────────────────────────────────────────
+OUTPUT — JSON ONLY, NO PROSE OUTSIDE THE OBJECT
+────────────────────────────────────────────────────────────────────
 {
-  "thesis": "1-3 sentence market thesis",
-  "signal_agreement": true or false,
-  "suggested_action": "BUY" or "SELL" or "HOLD",
+  "scenario": {
+    "p_up": 0.0-1.0,
+    "p_flat": 0.0-1.0,
+    "p_down": 0.0-1.0,
+    "expected_move_bps_3candle": -1000 to 1000
+  },
+  "indicators_used": {
+    "funding_bps_8h": number or null,
+    "oi_delta_1h_pct": number or null,
+    "oi_price_regime": "trend_confirm_long"|"trend_confirm_short"|
+                       "short_squeeze"|"liquidation_cascade"|
+                       "balanced"|"unknown"|null,
+    "basis_apr_pct": number or null,
+    "cvd_divergence_sigma": number or null
+  },
+  "positioning_bias": "crowded_long"|"crowded_short"|"balanced"|"unknown",
+  "signal_agreement": true | false,
+  "suggested_action": "BUY" | "SELL" | "HOLD",
+  "size_multiplier": 0.0 to 1.5,
+  "force_hold": true | false,
+  "force_hold_reason": "specific trigger" or "",
   "conviction": 0.0 to 1.0,
-  "key_factors": ["factor1", "factor2"],
+  "reasoning": "1-2 sentences citing SPECIFIC indicator values that drove your call",
+  "key_factors": ["factor1","factor2"],
   "concern": "primary risk or null",
+  "thesis": "legacy — keep as a 1-sentence headline restating the scenario",
   "thesis_alignment": {
-    "in_thesis": true or false,
+    "in_thesis": true | false,
     "intent_prompts_consulted": ["intent_id", ...],
     "evidence_delta": "1 sentence on any shift vs the stated posterior, or \\"\\" if none",
     "posterior_shift_request": -0.30 to +0.30
   }
 }
 
-When no THESIS CONTEXT is present, OMIT the "thesis_alignment" field."""
+OMIT "thesis_alignment" entirely when no THESIS CONTEXT is in the prompt.
+NEVER reference futures or options ORDER PLACEMENT — those are read-only
+inputs."""
 
 RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager. You balance capital protection with opportunity capture. You receive the engine's signal, the analyst's thesis, and portfolio state.
 
@@ -760,7 +837,12 @@ class HydraBrain:
     # ─── Agent runners ───
 
     def _run_quant(self, state: Dict) -> tuple:
-        """Market Quant (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
+        """Market Quant (Claude). Returns (parsed_output, in_tokens, out_tokens).
+
+        v2.14 prompt shape emits a `scenario` block, `indicators_used`,
+        `positioning_bias`, `size_multiplier`, `force_hold`. We defensively
+        clamp size_multiplier to [0.0, 1.5] and coerce force_hold to bool so
+        downstream stacking math stays sane even on a malformed response."""
         user_msg = self._build_analyst_prompt(state)
         if self._tool_use_enabled:
             from hydra_backtest_tool import BACKTEST_TOOLS
@@ -768,12 +850,23 @@ class HydraBrain:
                 QUANT_PROMPT + TOOLS_GUIDANCE,
                 user_msg,
                 BACKTEST_TOOLS,
-                caller="brain:analyst",
-                max_tokens=500,  # headroom over plain 400 for tool_result context
+                caller="brain:quant",
+                max_tokens=700,  # v2.14 prompt larger; headroom for JSON + tool_result
             )
         else:
-            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 400)
-        return self._parse_json(text), tok_in, tok_out
+            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 650)
+        parsed = self._parse_json(text)
+        if isinstance(parsed, dict):
+            if "size_multiplier" in parsed:
+                try:
+                    raw = parsed["size_multiplier"]
+                    clamped = max(0.0, min(1.5, float(raw)))
+                except (TypeError, ValueError):
+                    clamped = 1.0
+                parsed["size_multiplier"] = clamped
+            if "force_hold" in parsed:
+                parsed["force_hold"] = bool(parsed.get("force_hold"))
+        return parsed, tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:
         """Risk Manager (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
@@ -883,6 +976,28 @@ class HydraBrain:
         if not spread:
             return ""
         return f"\nSPREAD: bid={spread['bid']} | ask={spread['ask']} | spread={spread['spread_bps']} bps"
+
+    @staticmethod
+    def _format_quant_indicators(state: Dict) -> str:
+        """v2.14: surface derivatives + CVD signal block to the Quant.
+        Absent → empty string (Quant sees no block and handles null in
+        its own reasoning). Values are signal input only; Hydra never
+        places orders on Kraken Futures."""
+        qi = state.get("quant_indicators")
+        if not qi:
+            return ""
+        def fmt(v, sfx=""):
+            return "null" if v is None else f"{v}{sfx}"
+        return (
+            "\nQUANT INDICATORS (signal input only — SPOT-ONLY execution):"
+            f"\n  funding_bps_8h: {fmt(qi.get('funding_bps_8h'))}"
+            f"\n  oi_delta_1h_pct: {fmt(qi.get('oi_delta_1h_pct'))}"
+            f"\n  oi_price_regime: {fmt(qi.get('oi_price_regime'))}"
+            f"\n  basis_apr_pct: {fmt(qi.get('basis_apr_pct'))}"
+            f"\n  cvd_divergence_sigma: {fmt(qi.get('cvd_divergence_sigma'))}"
+            f"\n  staleness_s: {fmt(qi.get('staleness_s'))} "
+            f"(>300s on 2+ fields → Python R10 rule may force_hold)"
+        )
 
     def _format_triangle_context(self, state: Dict) -> str:
         """Format cross-pair triangle context for prompt inclusion."""
@@ -1010,7 +1125,7 @@ RECENT CLOSES: {recent_closes}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}{self._format_thesis_context(state)}"""
+RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_quant_indicators(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}{self._format_thesis_context(state)}"""
 
     def _build_risk_prompt(self, state: Dict, analyst: Dict) -> str:
         sig = state.get("signal", {})
