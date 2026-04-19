@@ -145,11 +145,16 @@ class KrakenCLI:
                 cmd, capture_output=True, text=True, timeout=timeout,
             )
             stdout = result.stdout.strip()
+            rc = result.returncode
             if not stdout:
-                return {"error": f"Empty response (exit code {result.returncode})"}
+                return {"error": f"Empty response (exit code {rc})"}
             data = json.loads(stdout)
             if isinstance(data, dict) and "error" in data:
                 return data
+            if rc != 0:
+                # Non-zero exit with parseable stdout: surface the failure so
+                # callers don't treat partial output as success.
+                return {"error": f"Non-zero exit code {rc}", "partial": data}
             return data
         except subprocess.TimeoutExpired:
             return {"error": "Command timed out", "retryable": True}
@@ -2693,10 +2698,17 @@ class HydraAgent:
                         if state["signal"]["action"] != "HOLD" and self.brain:
                             brain_pairs.append((pair, state))
                         else:
-                            # Inject cached brain decision for dashboard persistence
+                            # Inject cached brain decision for dashboard persistence.
+                            # v2.14.1: tag the replay with cached_at_tick so the
+                            # dashboard can distinguish a live decision from a
+                            # stale one replayed across a HOLD tick. Shallow-copy
+                            # so we don't mutate the cached payload in place.
                             cached = self._last_ai_decision.get(pair)
                             if cached and self.brain:
-                                state["ai_decision"] = cached
+                                replay = dict(cached)
+                                replay["cached"] = True
+                                replay["cached_at_tick"] = state.get("tick", 0)
+                                state["ai_decision"] = replay
                             all_states[pair] = state
 
                 if brain_pairs:
@@ -3176,46 +3188,59 @@ class HydraAgent:
             # quant × rm product. Force_hold from any rule forces the
             # action to HOLD. Rules fire on indicator VALUES, not LLM
             # interpretation — the guardrail LLMs cannot talk around.
+            #
+            # v2.14.1: rules now run even on fallback/api_down_block paths.
+            # R10 (staleness) and R3/R4 (OI regime) operate on indicator
+            # values alone and should still fire in those states — a stale
+            # or crashing data feed is MORE dangerous when the LLMs are
+            # also unavailable, not less. R8 (contrarian edge) needs
+            # positioning_bias, which is absent in fallback, so it simply
+            # won't fire — acceptable degradation.
             rules_triggered: list = []
             rules_force_hold = False
             rules_size_mult = 1.0
             rules_force_hold_reason = ""
-            if not decision.fallback and not blocked_by_api_down:
-                try:
-                    from hydra_quant_rules import apply_rules as _apply_quant_rules
-                    engine_action_for_rules = state["signal"]["action"]
-                    # Reconstruct the quant_output view from the brain's
-                    # decision. The brain doesn't surface raw analyst_output
-                    # through BrainDecision, so we use what's materially
-                    # relevant for rule evaluation: positioning_bias was
-                    # encoded into risk_flags/reasoning; for R8 we pull it
-                    # from the dashboard-facing block if present.
-                    quant_out_for_rules = {
-                        "positioning_bias": getattr(decision, "positioning_bias", None)
-                            or state.get("ai_positioning_bias") or "",
-                        "force_hold": False,  # already handled by brain layer
-                    }
-                    rule_result = _apply_quant_rules(
-                        engine_action=engine_action_for_rules,
-                        quant_output=quant_out_for_rules,
-                        quant_indicators=quant_indicators or None,
-                    )
-                    rules_triggered = [
-                        {"rule_id": f.rule_id, "name": f.name, "effect": f.effect,
-                         "size_mult": f.size_mult, "reason": f.reason}
-                        for f in rule_result.triggered
-                    ]
-                    rules_force_hold = rule_result.force_hold
-                    rules_force_hold_reason = rule_result.force_hold_reason
-                    rules_size_mult = rule_result.size_multiplier
-                except Exception as re:
-                    print(f"  [QUANT RULES] apply_rules error ({type(re).__name__}: {re})")
+            try:
+                from hydra_quant_rules import apply_rules as _apply_quant_rules
+                engine_action_for_rules = state["signal"]["action"]
+                quant_out_for_rules = {
+                    "positioning_bias": getattr(decision, "positioning_bias", None)
+                        or state.get("ai_positioning_bias") or "",
+                    "force_hold": False,  # already handled by brain layer
+                }
+                rule_result = _apply_quant_rules(
+                    engine_action=engine_action_for_rules,
+                    quant_output=quant_out_for_rules,
+                    quant_indicators=quant_indicators or None,
+                )
+                rules_triggered = [
+                    {"rule_id": f.rule_id, "name": f.name, "effect": f.effect,
+                     "size_mult": f.size_mult, "reason": f.reason}
+                    for f in rule_result.triggered
+                ]
+                rules_force_hold = rule_result.force_hold
+                rules_force_hold_reason = rule_result.force_hold_reason
+                rules_size_mult = rule_result.size_multiplier
+            except Exception as re:
+                print(f"  [QUANT RULES] apply_rules error ({type(re).__name__}: {re})")
 
             # Final stacked size: brain (quant × rm) × rules. Clamp once.
+            # v2.14.1: record the unclamped product so the dashboard can
+            # tell the operator when the [0, 1.5] ceiling was actually
+            # binding vs. merely a defensive guard.
             brain_size = float(decision.size_multiplier or 1.0)
-            final_size_multiplier = max(0.0, min(1.5, brain_size * rules_size_mult))
+            pre_clamp_product = brain_size * rules_size_mult
+            final_size_multiplier = max(0.0, min(1.5, pre_clamp_product))
+            size_clamp_applied = pre_clamp_product != final_size_multiplier
             if rules_force_hold:
                 final_size_multiplier = 0.0
+
+            # v2.14.1: preserve the original engine reason when W3 api-down
+            # block rewrote state["signal"]["reason"], so the dashboard can
+            # surface both threads without parsing the "Original: ..." tail.
+            api_down_original_reason = ""
+            if blocked_by_api_down:
+                api_down_original_reason = original_reason
 
             state["ai_decision"] = {
                 "action": decision.action,
@@ -3225,6 +3250,10 @@ class HydraAgent:
                 "size_multiplier": final_size_multiplier,
                 "size_multiplier_brain": brain_size,           # quant × rm
                 "size_multiplier_rules": rules_size_mult,      # R1-R10 stack
+                # v2.14.1: unclamped product and clamp-applied flag so the
+                # dashboard can distinguish "hit the ceiling" from "under".
+                "size_multiplier_unclamped": round(pre_clamp_product, 4),
+                "size_multiplier_clamped": size_clamp_applied,
                 "rules_triggered": rules_triggered,
                 "rules_force_hold": rules_force_hold,
                 "rules_force_hold_reason": rules_force_hold_reason,
@@ -3237,12 +3266,18 @@ class HydraAgent:
                 "portfolio_health": decision.portfolio_health,
                 "fallback": decision.fallback,
                 "api_down_block": blocked_by_api_down,
+                # v2.14.1: separate field for the pre-rewrite engine reason.
+                "api_down_original_reason": api_down_original_reason,
                 "tokens_used": decision.tokens_used,
                 "latency_ms": round(decision.latency_ms, 0),
                 # v2.13.1: thesis alignment (None when thesis absent).
                 "thesis_alignment": decision.thesis_alignment,
                 # v2.14: surface the indicator block that drove this decision
                 "quant_indicators": quant_indicators or None,
+                # v2.14.1: tick counter this decision was generated at.
+                # When the dashboard replays a cached decision on a pair
+                # that didn't re-deliberate, current_tick > this value.
+                "generated_at_tick": state.get("tick", 0),
             }
             # Cache for dashboard persistence on ticks where brain doesn't fire
             self._last_ai_decision[pair] = state["ai_decision"]
@@ -4860,7 +4895,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.14.0",
+            "version": "2.14.1",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

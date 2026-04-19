@@ -468,6 +468,17 @@ class HydraBrain:
             "HYDRA_BRAIN_JSONL",
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_brain.jsonl"),
         )
+        # v2.14.1: ensure parent dir exists so _log_jsonl doesn't silently
+        # drop events when HYDRA_BRAIN_JSONL points into a not-yet-created
+        # directory (e.g., containerized deployments mounting a sibling log volume).
+        try:
+            parent = os.path.dirname(self._jsonl_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except OSError:
+            # If we can't make the dir, _log_jsonl's own try/except will
+            # catch the eventual open() failure. No point crashing __init__.
+            pass
 
         # Per-pair strategist cooldown: suppress re-escalation for N deliberate()
         # calls after Grok fires.  With 3 pairs, tick_counter increments ~3×
@@ -493,6 +504,32 @@ class HydraBrain:
         )
         self._tool_iterations_cap = max(1, int(tool_iterations_cap))
         self._tool_use_calls = 0              # lifetime counter for diagnostics
+
+        # v2.14.1: when tool-use is on, verify every tool name mentioned in
+        # TOOLS_GUIDANCE actually exists in the BACKTEST_TOOLS schema list.
+        # A rename in one place without the other would cause the LLM to
+        # hallucinate calls to a non-existent tool; this fails loud instead.
+        # (BACKTEST_TOOLS is the Anthropic tool schema list, each entry has a
+        # "name" field — not a dict keyed by name.)
+        if self._tool_use_enabled:
+            try:
+                from hydra_backtest_tool import BACKTEST_TOOLS as _BT
+                guidance_names = {
+                    "run_backtest", "find_best", "list_experiments",
+                    "get_experiment", "compare_experiments",
+                    "sweep_param", "list_presets",
+                }
+                schema_names = {t.get("name") for t in _BT if isinstance(t, dict)}
+                missing = guidance_names - schema_names
+                if missing:
+                    raise RuntimeError(
+                        f"TOOLS_GUIDANCE references tools not in BACKTEST_TOOLS: {sorted(missing)}"
+                    )
+            except ImportError:
+                # Backtest tool module isn't always loadable (e.g., stripped
+                # test environments); the tool-use code paths also import
+                # defensively, so this is safe to ignore at __init__.
+                pass
 
     # ─── Main Entry Point ───
 
@@ -685,6 +722,11 @@ class HydraBrain:
                 "analyst_action": analyst_output.get("suggested_action", ""),
                 "analyst_agrees": analyst_output.get("signal_agreement", None),
                 "analyst_conviction": analyst_output.get("conviction", 0),
+                # v2.14.1: surface positioning_bias in the audit log so we
+                # can grep how often the Quant emits a valid crowded_*
+                # value — R8 only fires on those. Empty/missing string =
+                # R8 dead for that tick.
+                "positioning_bias": analyst_output.get("positioning_bias", ""),
                 "rm_decision": risk_output.get("decision", ""),
                 "rm_size_mult": risk_output.get("size_multiplier", 1.0),
                 "rm_portfolio_health": risk_output.get("portfolio_health", ""),

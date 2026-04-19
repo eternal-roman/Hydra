@@ -130,6 +130,7 @@ def test_cvd_divergence_none_with_short_history():
 def test_cvd_divergence_returns_float_with_adequate_history():
     e = HydraEngine(initial_balance=1000, asset="BTC/USD", candle_interval=15)
     # Need at least samples_1h * 8 = 32 candles plus enough diff windows
+    # (v2.14.1 bumped the diff-window minimum from 4 to 8 for pstdev stability).
     import random
     random.seed(0)
     for i in range(60):
@@ -140,7 +141,12 @@ def test_cvd_divergence_returns_float_with_adequate_history():
             "timestamp": i * 900.0,
         })
     sigma = e.cvd_divergence_sigma()
-    assert sigma is None or isinstance(sigma, float)
+    # v2.14.1: 60 candles with samples_1h=4 yields 56 diff windows,
+    # well above the minimum of 8. Assert we got a real float back.
+    assert isinstance(sigma, float)
+    # z-score of noise around zero should stay within a sane envelope
+    # given seeded RNG. If this ever flakes, investigate distribution.
+    assert -6.0 < sigma < 6.0
 
 
 def test_cvd_divergence_detects_bearish_divergence():
@@ -163,9 +169,8 @@ def test_cvd_divergence_detects_bearish_divergence():
             "volume": 500, "timestamp": i * 900.0,
         })
     sigma = e.cvd_divergence_sigma()
-    # With quiet seeding + 10 candles of concentrated bearish pressure,
-    # the recent diff should be clearly negative vs the quiet baseline.
-    # Tolerate None if window math doesn't accumulate enough variance
-    # samples (test environment edge), but when non-None must be <0.
-    if sigma is not None:
-        assert sigma < 0
+    # With 60 candles (samples_1h=4) we always produce 56 diff windows,
+    # well above the v2.14.1 minimum of 8. The concentrated bearish
+    # pressure in the last 10 candles should drive sigma clearly negative.
+    assert isinstance(sigma, float)
+    assert sigma < 0

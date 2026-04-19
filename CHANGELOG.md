@@ -6,7 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [2.14.0] — Unreleased (feat/brain-quant-v2.14)
+## [2.14.1] — 2026-04-19 (chore/audit-v2.14.1)
+
+**Post-release audit cleanup.** Seven-partition parallel audit surfaced 3 HIGH + 12 MEDIUM + 6 LOW findings; this release ships the actionable fixes. No invariant changes, no behavior changes that affect a healthy trading session — all fixes either harden error-handling around previously-silent failure modes or surface disclosure that the v2.14.0 agent was emitting but the dashboard wasn't rendering.
+
+### Added
+
+- **Dashboard size-breakdown block** under the QUANT reasoning card, rendering `brain × rules = final`, clamp indicator with unclamped value, per-rule pills (color-coded by effect: boost / penalty / force_hold), and the `rules_force_hold_reason` text. The v2.14.0 agent already emitted these fields; now the operator can see them.
+- **`size_multiplier_unclamped` + `size_multiplier_clamped`** on `state["ai_decision"]` — lets the dashboard distinguish "product hit the [0, 1.5] ceiling" from "comfortably under."
+- **`api_down_original_reason`** on `state["ai_decision"]` — pre-rewrite engine signal reason, preserved separately from the rewritten `"[API DOWN BLOCK] ... Original: ..."` string.
+- **`cached` / `cached_at_tick` / `generated_at_tick`** markers on replayed `ai_decision` payloads — dashboard can now identify a stale decision replayed across a HOLD tick instead of rendering it as fresh.
+- **`positioning_bias`** field in the brain's `deliberate` JSONL audit event — enables `grep` over the log to see how often the Quant emits a valid `crowded_long` / `crowded_short` value (R8's fire rate is bounded by this).
+- **`DerivativesSnapshot.fetch_error_streak`** — consecutive failed polls, resets on success. A stderr warning fires on the third consecutive failure per pair so a dark WSL/kraken-CLI bridge can't hide behind staleness alone.
+
+### Changed
+
+- **`apply_rules` runs in fallback and api-down paths.** Previously gated on `not decision.fallback and not blocked_by_api_down`. R10 staleness and R3/R4 OI-regime rules fire on indicator values alone and are arguably *more* important when the LLMs are unavailable, not less. R8 still doesn't fire in fallback (no `positioning_bias` → acceptable degradation).
+- **CVD divergence minimum sample count** bumped from 4 → 8 diff windows. Below that `pstdev` is unstable and a single volatile candle swings the z-score to extremes.
+- **`KrakenCLI._run`** now surfaces non-zero exit codes even when stdout parses cleanly. Previously a kraken CLI crash with partial JSON to stdout and stderr redirected to `/dev/null` was treated as success.
+- **`restore_runtime`** logs a `[restore_runtime] <pair>: dropped N malformed …` warning to stderr instead of silently `continue`-ing on corrupted snapshot rows.
+- **`_log_jsonl`** creates its parent directory at `HydraBrain.__init__` so `HYDRA_BRAIN_JSONL=/some/new/dir/log.jsonl` no longer silently drops every audit event.
+- **`TOOLS_GUIDANCE ↔ BACKTEST_TOOLS` drift assertion** runs at brain init when tool-use is enabled — a rename in one without the other now fails loud instead of letting the LLM hallucinate missing tools. (Phase-2 self-audit caught a self-inflicted regression here: `BACKTEST_TOOLS` is a list of Anthropic tool schemas, not a dict keyed by name. Fixed before shipping.)
+- **`DerivativesStream._run_loop`** prints exception type + message to stderr instead of a bare `pass`, so an unhealthy daemon thread surfaces immediately.
+
+### Fixed
+
+- Stray `_w3_result.txt` scratch artifact removed from repo root.
+
+### Tests
+
+- 1126/1126 full suite green, 35/35 live-harness mock, dashboard build green on patch.
+- `test_compute_basis_annualizes_premium` now anchors on a fixed UTC datetime instead of `datetime.now()`, removing wall-clock / midnight-crossing flakiness.
+- `test_cvd_divergence_returns_float_with_adequate_history` and `test_cvd_divergence_detects_bearish_divergence` strengthened from "None or float" tautology to `isinstance(sigma, float)` with bounded-range and sign assertions.
+
+### Notes
+
+- **No shutdown-order change.** The P2 audit suggested reversing teardown so `derivatives_stream.stop()` runs first; on inspection the existing order is correct — execution streams stop first to prevent new fills, derivatives stream stops last to avoid leaving a kraken WSL subprocess in limbo. Comment in `hydra_agent.py` already explains this.
+
+---
+
+## [2.14.0] — 2026-04-18 (feat/brain-quant-v2.14)
 
 **Quant overhaul — the AI brain grows real teeth and real data.** The v2.13 Analyst was a prose narrator with zero wire to trade sizing; v2.14 replaces it with a Market Quant consuming derivatives positioning + CVD divergence, layers an institutional-rigor Risk Manager on top, then enforces non-negotiable guardrails in Python after the LLMs are done. Final trade size = engine Kelly × Quant multiplier × Risk Manager multiplier × deterministic-rules multiplier, clamped [0.0, 1.5]. Any of Quant, Risk, or rules can set force_hold.
 

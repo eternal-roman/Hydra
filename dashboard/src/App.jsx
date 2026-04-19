@@ -4400,6 +4400,58 @@ export default function App() {
                             ))}
                           </div>
                         )}
+                        {/* v2.14.1: Size-multiplier breakdown. Shows how the
+                            final size was assembled: brain (quant × rm) × rules,
+                            with clamp indicator and triggered-rule list. */}
+                        {(typeof ps.ai_decision.size_multiplier === "number" ||
+                          (ps.ai_decision.rules_triggered && ps.ai_decision.rules_triggered.length > 0) ||
+                          ps.ai_decision.rules_force_hold) && (
+                          <div style={{ marginTop: 6, padding: "4px 6px", background: `${COLORS.panelBorder}15`, borderRadius: 3, fontFamily: mono, fontSize: 9 }}>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>SIZE</span>
+                              <span style={{ color: COLORS.text }}>
+                                brain ×{(ps.ai_decision.size_multiplier_brain ?? 1).toFixed(2)}
+                              </span>
+                              <span style={{ color: COLORS.textDim }}>·</span>
+                              <span style={{ color: COLORS.text }}>
+                                rules ×{(ps.ai_decision.size_multiplier_rules ?? 1).toFixed(2)}
+                              </span>
+                              <span style={{ color: COLORS.textDim }}>=</span>
+                              <span style={{ color: COLORS.accent, fontWeight: 700 }}>
+                                ×{(ps.ai_decision.size_multiplier ?? 1).toFixed(2)}
+                              </span>
+                              {ps.ai_decision.size_multiplier_clamped && (
+                                <span style={{ fontSize: 8, color: COLORS.warn, fontWeight: 700 }}>
+                                  CLAMPED (raw ×{(ps.ai_decision.size_multiplier_unclamped ?? 0).toFixed(2)})
+                                </span>
+                              )}
+                              {ps.ai_decision.rules_force_hold && (
+                                <span style={{ fontSize: 8, color: COLORS.sell, fontWeight: 700, padding: "1px 4px", borderRadius: 2, background: `${COLORS.sell}20` }}>
+                                  RULES FORCE-HOLD
+                                </span>
+                              )}
+                              {ps.ai_decision.cached && (
+                                <span style={{ fontSize: 8, color: COLORS.textMuted, fontStyle: "italic", marginLeft: "auto" }}>
+                                  cached @ tick {ps.ai_decision.generated_at_tick}
+                                </span>
+                              )}
+                            </div>
+                            {ps.ai_decision.rules_triggered && ps.ai_decision.rules_triggered.length > 0 && (
+                              <div style={{ display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap" }}>
+                                {ps.ai_decision.rules_triggered.map((r, ri) => (
+                                  <span key={ri} title={r.reason || ""} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: r.effect === "force_hold" ? `${COLORS.sell}20` : r.effect === "boost" ? `${COLORS.buy}20` : `${COLORS.warn}20`, color: r.effect === "force_hold" ? COLORS.sell : r.effect === "boost" ? COLORS.buy : COLORS.warn }}>
+                                    {r.rule_id}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {ps.ai_decision.rules_force_hold && ps.ai_decision.rules_force_hold_reason && (
+                              <div style={{ marginTop: 3, fontSize: 8, color: COLORS.sell, lineHeight: 1.3 }}>
+                                {ps.ai_decision.rules_force_hold_reason}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -4667,7 +4719,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.14.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.14.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

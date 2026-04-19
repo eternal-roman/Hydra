@@ -44,6 +44,7 @@ Spot-pair → derivatives mapping:
 
 import json
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -79,6 +80,12 @@ class DerivativesSnapshot:
     staleness_s: float = 0.0
     synthetic: bool = False
     fetch_errors: int = 0
+    # v2.14.1: consecutive-error streak (resets to 0 on successful populate).
+    # Distinguishes "a transient blip at offset 17" from "this pair has been
+    # dark for 4 polling cycles." R10 staleness already catches the latter,
+    # but exposing the streak lets the Quant/Risk Manager prompt weigh a
+    # fresh-but-suspicious-looking indicator differently from a steady one.
+    fetch_error_streak: int = 0
 
     def freshness_s(self, now: Optional[float] = None) -> float:
         if self.last_updated_ts == 0:
@@ -103,6 +110,10 @@ class DerivativesStream:
     # on noise produces false signals the Quant must reason around.
     OI_REGIME_OI_THRESHOLD_PCT = 0.5
     OI_REGIME_PX_THRESHOLD_PCT = 0.3
+
+    # v2.14.1: warn once per pair after this many consecutive failed polls
+    # so a dark WSL/kraken-CLI bridge doesn't hide behind staleness alone.
+    FETCH_ERROR_WARN_STREAK = 3
 
     def __init__(self, pairs: List[str]):
         self.pairs: List[str] = [p for p in pairs if p in SPOT_TO_DERIVATIVES]
@@ -159,9 +170,14 @@ class DerivativesStream:
         while not self._stop.is_set():
             try:
                 self.poll_once()
-            except Exception:
-                # Thread must never die — missing data is better than no data
-                pass
+            except Exception as e:
+                # Thread must never die — missing data is better than no data.
+                # Surface the exception to stderr once per type so a silent
+                # regression in parsing doesn't become an invisible outage.
+                print(
+                    f"  [DerivativesStream] poll_once raised {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
             self._stop.wait(self.POLL_INTERVAL_S)
 
     def poll_once(self) -> bool:
@@ -170,7 +186,7 @@ class DerivativesStream:
         if not tickers:
             with self._lock:
                 for snap in self._snapshots.values():
-                    snap.fetch_errors += 1
+                    self._record_fetch_error(snap)
             return False
 
         now = time.time()
@@ -189,11 +205,11 @@ class DerivativesStream:
                         self._populate_synthetic(snap, sol, btc, now)
                         updated = True
                     else:
-                        snap.fetch_errors += 1
+                        self._record_fetch_error(snap)
                     continue
                 tick = by_symbol.get(snap.perp_symbol or "")
                 if not tick:
-                    snap.fetch_errors += 1
+                    self._record_fetch_error(snap)
                     continue
                 self._populate_from_ticker(snap, tick, now)
                 q_prefix = SPOT_TO_DERIVATIVES[pair].get("quarterly_prefix")
@@ -202,6 +218,20 @@ class DerivativesStream:
                     self._compute_basis(snap, tick, by_symbol[q_symbol], q_symbol, now)
                 updated = True
         return updated
+
+    def _record_fetch_error(self, snap: DerivativesSnapshot) -> None:
+        """Increment error counter + streak. Emit a stderr warning the
+        first time streak crosses FETCH_ERROR_WARN_STREAK so the operator
+        notices a dark WSL bridge instead of watching staleness silently
+        grow. Caller must hold self._lock."""
+        snap.fetch_errors += 1
+        snap.fetch_error_streak += 1
+        if snap.fetch_error_streak == self.FETCH_ERROR_WARN_STREAK:
+            print(
+                f"  [DerivativesStream] {snap.pair} has failed "
+                f"{snap.fetch_error_streak} consecutive polls — check WSL/kraken CLI",
+                file=sys.stderr,
+            )
 
     # ─── CLI bridge (SPOT-ONLY: uses only public `futures tickers`) ──
 
@@ -279,6 +309,7 @@ class DerivativesStream:
 
         snap.last_updated_ts = now
         snap.fetch_errors = 0
+        snap.fetch_error_streak = 0
 
     def _populate_synthetic(
         self,
@@ -307,6 +338,7 @@ class DerivativesStream:
         snap.oi_price_regime = "balanced"
         snap.last_updated_ts = now
         snap.fetch_errors = 0
+        snap.fetch_error_streak = 0
 
     # ─── Regime classifier ───────────────────────────────────────
 
