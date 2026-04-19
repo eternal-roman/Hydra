@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.15.1] — 2026-04-19 (hotfix)
+
+**Dashboard blank-screen hotfix.** v2.15.0 introduced a `const` temporal-dead-zone bug in `dashboard/src/App.jsx`: the `connect` `useCallback` listed `refreshWsToken` in its deps array before `refreshWsToken` was declared later in the component body. At render time, React evaluates the deps array and hits TDZ → `ReferenceError: Cannot access 'refreshWsToken' before initialization` → blank page at `http://localhost:3000`. Fixed by hoisting the `refreshWsToken` declaration above `connect` and removing the duplicate. No behavior change beyond restoring render.
+
+### Fixed
+
+- `dashboard/src/App.jsx` — `refreshWsToken` now declared before `connect` so it is fully initialized when `connect`'s deps array is evaluated on first render.
+
+---
+
 ## [2.15.0] — 2026-04-19 (security/v2.15.0-hardening)
 
 **Security hardening bundle: WS auth, shell-injection defense, prompt-injection fencing.** A plugin-assisted global audit (three parallel lenses: architecture/design, security, live-money risk) found the live-money path clean but five HIGH/CRITICAL issues on the growing security surface — dashboard WS command channel, Kraken CLI argv handling, thesis-doc prompt injection, tuner state-file tampering, paper-mode intent hygiene. This release fixes all five. No live-money-path changes; drift tests pass bit-identical on execution.
