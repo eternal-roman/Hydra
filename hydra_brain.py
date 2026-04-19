@@ -347,6 +347,17 @@ COST_OPENAI = (2.0, 8.0)
 COST_XAI = (2.0, 6.0)            # Grok 4 reasoning
 
 
+def _coerce_size_mult(v, default: float = 1.0) -> float:
+    """v2.14 helper: treat missing or malformed size_multiplier as 1.0
+    (neutral) so stacking math stays well-defined. Clamp to [0.0, 1.5]."""
+    if v is None:
+        return default
+    try:
+        return max(0.0, min(1.5, float(v)))
+    except (TypeError, ValueError):
+        return default
+
+
 class HydraBrain:
     """3-agent AI reasoning: Claude Analyst + Claude Risk Manager + Grok Strategist.
     Grok only fires on genuine disagreements (OVERRIDE or analyst disagrees at low conviction)."""
@@ -561,19 +572,41 @@ class HydraBrain:
             # Build final decision — strategist overrides risk manager when present
             if needs_strategist and not strategist_output:
                 print(f"  [BRAIN] Strategist returned no usable output — falling back to Risk Manager")
-            if strategist_output:
-                # Grok arbitrates the contested point only (action + decision).
-                # Conviction stays from analyst; sizing stays from risk manager.
+            # v2.14 W2: Quant × Risk size multiplier stack — analyst teeth.
+            # Previously BrainDecision.size_multiplier was RM-only; the Quant's
+            # conviction and scenario probabilities had no wire to the actual
+            # trade size. Now both voices compose: quant_mult × rm_mult,
+            # clamped. The deterministic quant_rules layer (agent side) applies
+            # the final guardrail.
+            quant_size = _coerce_size_mult(analyst_output.get("size_multiplier"))
+            rm_size = _coerce_size_mult(risk_output.get("size_multiplier"))
+            brain_stacked_size = max(0.0, min(1.5, quant_size * rm_size))
+
+            # Quant or RM force_hold pulls the final action to HOLD regardless
+            # of Strategist verdict (RM hard mandate: RM cannot unblock Quant
+            # force_hold). size_multiplier becomes 0.0.
+            quant_force_hold = bool(analyst_output.get("force_hold"))
+            force_hold_reason = analyst_output.get("force_hold_reason", "") if quant_force_hold else ""
+
+            if strategist_output and not quant_force_hold:
+                # Grok arbitrates the contested point (action + decision).
+                # Size stays the quant × rm product.
                 final_action = strategist_output.get("final_action", risk_output.get("final_action", state["signal"]["action"]))
                 final_decision = strategist_output.get("decision", risk_output.get("decision", "CONFIRM"))
                 final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
-                final_size = risk_output.get("size_multiplier", 1.0)
+                final_size = brain_stacked_size
                 strategist_reasoning = strategist_output.get("reasoning", "")
+            elif quant_force_hold:
+                final_action = "HOLD"
+                final_decision = "OVERRIDE"
+                final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
+                final_size = 0.0
+                strategist_reasoning = strategist_output.get("reasoning", "") if strategist_output else ""
             else:
                 final_action = risk_output.get("final_action", state["signal"]["action"])
                 final_decision = risk_output.get("decision", "CONFIRM")
                 final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
-                final_size = risk_output.get("size_multiplier", 1.0)
+                final_size = brain_stacked_size
                 strategist_reasoning = ""
 
             all_tokens = total_tokens_in + total_tokens_out + strategist_tokens_in + strategist_tokens_out

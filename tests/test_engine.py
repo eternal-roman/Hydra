@@ -1019,7 +1019,7 @@ class TestBrain:
 
         risk_prompt = brain._build_risk_prompt(state, {"thesis": "test", "conviction": 0.7, "signal_agreement": True, "concern": None})
         assert "ENGINE SIGNAL" in risk_prompt
-        assert "ANALYST THESIS" in risk_prompt
+        assert "QUANT THESIS" in risk_prompt  # v2.14 renamed from "ANALYST THESIS"
         # New fields from enriched prompts
         assert "EMA20=" in prompt
         assert "ATR=" in prompt

@@ -1721,6 +1721,23 @@ class HydraAgent:
                 except Exception as e:
                     print(f"  [WARN] Brain init failed: {e}")
 
+        # v2.14: Derivatives stream (Kraken Futures via kraken CLI, read-only).
+        # Powers the Market Quant's QUANT INDICATORS block: funding, OI
+        # regime, basis. SPOT-ONLY invariant — no orders placed on futures.
+        # Kill switch: HYDRA_QUANT_INDICATORS_DISABLED=1. Failure is
+        # silent — falls through to null indicators, Quant's R10 rule
+        # handles stale-data force_hold.
+        self.derivatives_stream = None
+        if os.environ.get("HYDRA_QUANT_INDICATORS_DISABLED") != "1":
+            try:
+                from hydra_derivatives_stream import DerivativesStream
+                self.derivatives_stream = DerivativesStream(pairs=list(self.pairs))
+                self.derivatives_stream.start()
+                print(f"  [QUANT] DerivativesStream started for {len(self.pairs)} pairs (signal input only — SPOT-ONLY execution)")
+            except Exception as e:
+                print(f"  [QUANT] DerivativesStream init failed ({type(e).__name__}: {e}); quant indicators disabled")
+                self.derivatives_stream = None
+
         # ─── Companion subsystem (v2.10.3+) ────────────────────────────
         # Strictly additive. Off unless HYDRA_COMPANION_ENABLED=1.
         # Kill switch: HYDRA_COMPANION_DISABLED=1 wins over all.
@@ -3081,6 +3098,34 @@ class HydraAgent:
         except Exception:
             pass
 
+        # v2.14: inject QUANT INDICATORS block — DerivativesStream values
+        # plus engine's CVD divergence. Absent stream / stale data surface
+        # as None; the Quant prompt + Python R10 rule handle degradation.
+        quant_indicators: Dict[str, Any] = {}
+        if self.derivatives_stream is not None:
+            try:
+                snap = self.derivatives_stream.latest(pair)
+                if snap is not None:
+                    quant_indicators = {
+                        "funding_bps_8h": snap.funding_bps_8h,
+                        "funding_predicted_bps": snap.funding_predicted_bps,
+                        "oi_delta_1h_pct": snap.oi_delta_1h_pct,
+                        "oi_delta_24h_pct": snap.oi_delta_24h_pct,
+                        "oi_price_regime": snap.oi_price_regime,
+                        "basis_apr_pct": snap.basis_apr_pct,
+                        "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
+                    }
+            except Exception:
+                pass
+        try:
+            engine = self.engines.get(pair)
+            if engine is not None:
+                quant_indicators["cvd_divergence_sigma"] = engine.cvd_divergence_sigma()
+        except Exception:
+            pass
+        if quant_indicators:
+            state["quant_indicators"] = quant_indicators
+
         try:
             decision = self.brain.deliberate(state)
 
@@ -3117,11 +3162,64 @@ class HydraAgent:
                 except Exception:
                     pass
 
+            # v2.14 W1f: deterministic rule stack. Apply R1-R10 on the
+            # SAME engine signal + quant context the LLMs saw, producing a
+            # final size_multiplier that composes with the brain's
+            # quant × rm product. Force_hold from any rule forces the
+            # action to HOLD. Rules fire on indicator VALUES, not LLM
+            # interpretation — the guardrail LLMs cannot talk around.
+            rules_triggered: list = []
+            rules_force_hold = False
+            rules_size_mult = 1.0
+            rules_force_hold_reason = ""
+            if not decision.fallback and not blocked_by_api_down:
+                try:
+                    from hydra_quant_rules import apply_rules as _apply_quant_rules
+                    engine_action_for_rules = state["signal"]["action"]
+                    # Reconstruct the quant_output view from the brain's
+                    # decision. The brain doesn't surface raw analyst_output
+                    # through BrainDecision, so we use what's materially
+                    # relevant for rule evaluation: positioning_bias was
+                    # encoded into risk_flags/reasoning; for R8 we pull it
+                    # from the dashboard-facing block if present.
+                    quant_out_for_rules = {
+                        "positioning_bias": getattr(decision, "positioning_bias", None)
+                            or state.get("ai_positioning_bias") or "",
+                        "force_hold": False,  # already handled by brain layer
+                    }
+                    rule_result = _apply_quant_rules(
+                        engine_action=engine_action_for_rules,
+                        quant_output=quant_out_for_rules,
+                        quant_indicators=quant_indicators or None,
+                    )
+                    rules_triggered = [
+                        {"rule_id": f.rule_id, "name": f.name, "effect": f.effect,
+                         "size_mult": f.size_mult, "reason": f.reason}
+                        for f in rule_result.triggered
+                    ]
+                    rules_force_hold = rule_result.force_hold
+                    rules_force_hold_reason = rule_result.force_hold_reason
+                    rules_size_mult = rule_result.size_multiplier
+                except Exception as re:
+                    print(f"  [QUANT RULES] apply_rules error ({type(re).__name__}: {re})")
+
+            # Final stacked size: brain (quant × rm) × rules. Clamp once.
+            brain_size = float(decision.size_multiplier or 1.0)
+            final_size_multiplier = max(0.0, min(1.5, brain_size * rules_size_mult))
+            if rules_force_hold:
+                final_size_multiplier = 0.0
+
             state["ai_decision"] = {
                 "action": decision.action,
                 "final_signal": decision.final_signal,
                 "confidence_adj": decision.confidence_adj,
-                "size_multiplier": decision.size_multiplier,
+                # v2.14: three-layer size disclosure for auditability.
+                "size_multiplier": final_size_multiplier,
+                "size_multiplier_brain": brain_size,           # quant × rm
+                "size_multiplier_rules": rules_size_mult,      # R1-R10 stack
+                "rules_triggered": rules_triggered,
+                "rules_force_hold": rules_force_hold,
+                "rules_force_hold_reason": rules_force_hold_reason,
                 "analyst_reasoning": decision.analyst_reasoning,
                 "risk_reasoning": decision.risk_reasoning,
                 "strategist_reasoning": decision.strategist_reasoning,
@@ -3135,6 +3233,8 @@ class HydraAgent:
                 "latency_ms": round(decision.latency_ms, 0),
                 # v2.13.1: thesis alignment (None when thesis absent).
                 "thesis_alignment": decision.thesis_alignment,
+                # v2.14: surface the indicator block that drove this decision
+                "quant_indicators": quant_indicators or None,
             }
             # Cache for dashboard persistence on ticks where brain doesn't fire
             self._last_ai_decision[pair] = state["ai_decision"]
@@ -3152,6 +3252,11 @@ class HydraAgent:
             # preserved in state["ai_decision"] for dashboard/logging.
             if blocked_by_api_down:
                 pass  # state["signal"] already rewritten above; skip OVERRIDE/ADJUST below
+            elif rules_force_hold:
+                # v2.14: a deterministic rule trumped the LLM layer. Force
+                # HOLD and surface which rule, so audit is unambiguous.
+                state["signal"]["action"] = "HOLD"
+                state["signal"]["reason"] = f"[QUANT RULES FORCE_HOLD] {rules_force_hold_reason}"
             elif decision.action == "OVERRIDE":
                 state["signal"]["action"] = decision.final_signal
                 state["signal"]["reason"] = f"[AI OVERRIDE] {decision.combined_summary}"
