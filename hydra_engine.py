@@ -373,6 +373,36 @@ def _fmt_price(p: float) -> str:
     return f"{p:.0f}"
 
 
+def _chaikin_signed_volume(candle: "Candle") -> float:
+    """OHLC-based proxy for trade-tape CVD. Chaikin Money Flow multiplier:
+    signed_volume = volume × ((close − low) − (high − close)) / (high − low).
+    Positive when close is near the high (net buying pressure within the
+    candle); negative when close is near the low. Zero when high == low
+    (flat candle — neither side dominant). Returns 0.0 for zero-volume
+    candles so divergence math stays well-defined."""
+    rng = candle.high - candle.low
+    if rng <= 0 or candle.volume <= 0:
+        return 0.0
+    multiplier = ((candle.close - candle.low) - (candle.high - candle.close)) / rng
+    return candle.volume * multiplier
+
+
+def _linear_slope(values: List[float]) -> Optional[float]:
+    """Ordinary least-squares slope over evenly-spaced (x=0,1,2…) samples.
+    Used for divergence detection — absolute slope magnitude matters less
+    than the SIGN DIFFERENCE between CVD and price slopes."""
+    n = len(values)
+    if n < 2:
+        return None
+    x_mean = (n - 1) / 2.0
+    y_mean = sum(values) / n
+    num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(values))
+    den = sum((i - x_mean) ** 2 for i in range(n))
+    if den == 0:
+        return None
+    return num / den
+
+
 class SignalGenerator:
     """Generates BUY/SELL/HOLD signals based on active strategy.
 
@@ -1212,6 +1242,14 @@ class HydraEngine:
         self.mean_reversion_rsi_sell = mean_reversion_rsi_sell
         self.candles: List[Candle] = []
         self.prices: List[float] = []
+        # v2.14: per-candle signed-volume proxy for CVD divergence detection.
+        # Hydra does not subscribe to Kraken's trade-tape WebSocket, so we
+        # cannot compute true CVD (buyer-initiated minus seller-initiated
+        # volume from aggressor side). Instead we use the Chaikin Money
+        # Flow multiplier: signed_volume = volume × ((close-low) - (high-close)) / (high-low).
+        # This is the standard OHLC-based proxy — directionally correct and
+        # adequate for divergence detection, though less precise than true CVD.
+        self.signed_volumes: List[float] = []
         self.trades: List[Trade] = []
         self.equity_history: List[float] = []
         self.peak_equity = initial_balance
@@ -1239,17 +1277,70 @@ class HydraEngine:
             )
         except (TypeError, ValueError):
             return  # Malformed candle data — skip silently
+        signed = _chaikin_signed_volume(candle)
         # Deduplicate: if Kraken timestamp matches last candle, update in place (incomplete candle refresh)
         if has_timestamp and self.candles and self.candles[-1].timestamp == candle.timestamp:
             self.candles[-1] = candle
             self.prices[-1] = candle.close
+            if self.signed_volumes:
+                self.signed_volumes[-1] = signed
             return
         self.candles.append(candle)
         self.prices.append(candle.close)
+        self.signed_volumes.append(signed)
         # Keep memory bounded
         if len(self.candles) > self.MAX_CANDLES:
             self.candles = self.candles[-self.MAX_CANDLES:]
             self.prices = self.prices[-self.MAX_CANDLES:]
+            self.signed_volumes = self.signed_volumes[-self.MAX_CANDLES:]
+
+    def cvd_divergence_sigma(self) -> Optional[float]:
+        """v2.14 Quant signal: z-score of (cvd_slope − price_slope) measured
+        over the most recent 1h window (4 candles at 15-min) against its
+        standard deviation over the last 24h (96 candles). Positive means
+        CVD is outpacing price to the upside (accumulation); negative
+        means CVD is leading price to the downside (distribution).
+        Divergence > 2σ opposing the engine's signal is a material warning
+        that smart money is leaning the other way.
+
+        Returns None if there is insufficient history to compute (<~6h
+        of candles at the current candle_interval). The Quant's R10 rule
+        treats None as a staleness input, not a veto.
+        """
+        samples_1h = max(2, int(60 / max(1, self.candle_interval)))
+        if len(self.signed_volumes) < samples_1h * 8:  # ~8 windows to estimate variance
+            return None
+
+        cvd_series = [sum(self.signed_volumes[: i + 1]) for i in range(len(self.signed_volumes))]
+        window = samples_1h
+        diffs: List[float] = []
+        for end in range(window, len(cvd_series)):
+            cvd_seg = cvd_series[end - window : end]
+            px_seg = self.prices[end - window : end]
+            cvd_slope = _linear_slope(cvd_seg)
+            px_slope = _linear_slope(px_seg)
+            if cvd_slope is None or px_slope is None:
+                continue
+            # Normalize each slope by its series mean magnitude so unit
+            # difference between CVD (signed volume) and price is removed.
+            cvd_norm = abs(sum(cvd_seg) / len(cvd_seg)) or 1.0
+            px_norm = abs(sum(px_seg) / len(px_seg)) or 1.0
+            diffs.append((cvd_slope / cvd_norm) - (px_slope / px_norm))
+
+        if len(diffs) < 4:
+            return None
+
+        import statistics
+        recent = diffs[-1]
+        history = diffs[:-1]
+        try:
+            mu = statistics.mean(history)
+            sd = statistics.pstdev(history)
+        except statistics.StatisticsError:
+            return None
+        if sd <= 0:
+            return 0.0
+        return round((recent - mu) / sd, 3)
 
     def tick(self, generate_only: bool = False) -> Dict[str, Any]:
         """Run one decision cycle. Returns full state as dict.
@@ -1815,6 +1906,7 @@ class HydraEngine:
                 continue  # silently drop malformed rows; don't crash tick loop
         self.candles = []
         self.prices = []
+        self.signed_volumes = []
         for raw in snapshot.get("candles", []):
             if not isinstance(raw, dict):
                 continue
@@ -1833,6 +1925,10 @@ class HydraEngine:
                 )
                 self.candles.append(c)
                 self.prices.append(c.close)
+                # v2.14: rebuild signed-volume series on restore so CVD
+                # divergence is available immediately after --resume,
+                # not after another candle_interval × 8 of warmup.
+                self.signed_volumes.append(_chaikin_signed_volume(c))
             except (TypeError, ValueError, KeyError):
                 continue  # silently drop malformed candle rows
 
