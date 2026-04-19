@@ -196,6 +196,9 @@ every call (tokens rotate).
 5. `hydra_agent.py` — `_export_competition_results()` → `"version"` field
 6. `hydra_backtest.py` — `HYDRA_VERSION = "X.Y.Z"` (stamps every `BacktestResult`)
 7. Git tag — `git tag -s vX.Y.Z -m "vX.Y.Z"` after merge; verify `git tag -v vX.Y.Z` (Rule 3)
+8. GitHub Release — `gh release create vX.Y.Z --verify-tag --notes-from-tag`; a pushed tag alone does NOT publish a Release and leaves GitHub's "Latest" badge stale
+
+**Alignment gate:** `python scripts/check_release_alignment.py --check-tag --check-gh-release` must exit 0 at the end of every release cycle — it enumerates all 7 code sites + tag + published GH Release.
 
 **Policy:** MINOR only for material upgrades; bug fixes / doc tweaks = PATCH.
 
