@@ -111,6 +111,15 @@ jobs:
       - name: Run brain tool-use tests
         run: python -m pytest tests/test_brain_tool_use.py -v
 
+      - name: Run derivatives stream tests (v2.14)
+        run: python -m pytest tests/test_derivatives_stream.py -v
+
+      - name: Run engine CVD divergence tests (v2.14)
+        run: python -m pytest tests/test_engine_cvd.py -v
+
+      - name: Run quant rules R1-R10 tests (v2.14)
+        run: python -m pytest tests/test_quant_rules.py -v
+
       - name: Run experiment store tests
         run: python -m pytest tests/test_experiments.py -v
 
@@ -180,6 +189,8 @@ jobs:
           python -c "import hydra_brain; print('hydra_brain OK')"
           python -c "import hydra_thesis; print('hydra_thesis OK')"
           python -c "import hydra_thesis_processor; print('hydra_thesis_processor OK')"
+          python -c "import hydra_derivatives_stream; print('hydra_derivatives_stream OK')"
+          python -c "import hydra_quant_rules; print('hydra_quant_rules OK')"
           python -c "import hydra_agent; print('hydra_agent OK')"
 
   dashboard-build:

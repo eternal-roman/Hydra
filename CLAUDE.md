@@ -42,7 +42,7 @@ regression bug, not a style issue.
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
 - **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.13.7
+- **Version pin:** v2.14.0
 
 ## Defaults (inherited)
 
@@ -80,7 +80,9 @@ shutdown) → `cbp --label hydra.engine_invariants` + `hydra.trading_invariants`
 |---|---|---|
 | engine | `hydra_engine.py` | indicators, regime detection, signals, position sizing |
 | agent | `hydra_agent.py` | live agent: Kraken CLI via WSL, WS broadcast, execution, reconciler, snapshot + `--resume` |
-| brain | `hydra_brain.py` | 3-agent AI: Claude Analyst + Risk Manager + Grok Strategist |
+| brain | `hydra_brain.py` | 3-agent AI: Claude Market Quant + Risk Manager + Grok Strategist |
+| derivatives_stream | `hydra_derivatives_stream.py` | Kraken Futures public data via kraken CLI (funding, OI, basis) — read-only, SIGNAL INPUT ONLY |
+| quant_rules | `hydra_quant_rules.py` | R1-R10 deterministic guardrails (funding extreme, OI regime, basis euphoric, CVD divergence, contrarian edge, staleness) |
 | tuner | `hydra_tuner.py` | self-tuning params; `apply_external_param_update` + `rollback_to_previous` (depth=1 deque) |
 | companions | `hydra_companions/` | chat/proposals/nudges/ladder/live executor/CBP client/souls |
 | backtest | `hydra_backtest.py` | replay engine; reuses HydraEngine verbatim; `HYDRA_VERSION` lives here |
@@ -116,7 +118,7 @@ here. Session-start header surfaces top weighted nodes.
 ```
 cbp --label hydra.engine_invariants     # indicators + regime + adaptive volatility
 cbp --label hydra.trading_invariants    # sizing, minimums, precision, exec, resume, forex
-cbp --label hydra.ai_brain              # Analyst/RM/Strategist + tool-use loop
+cbp --label hydra.ai_brain              # Quant/RM/Strategist + tool-use loop (v2.14+)
 cbp --label hydra.streams               # BaseStream + 5 instances
 cbp --label hydra.thesis_layer          # posture/ladder/intent/doc-processor
 cbp --label hydra.backtest_platform     # I1–I12, rigor gates, reviewer, dashboard
