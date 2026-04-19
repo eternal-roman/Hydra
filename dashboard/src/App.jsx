@@ -4360,100 +4360,263 @@ export default function App() {
                       </span>
                     )}
 
-                    {/* AI Reasoning */}
-                    {ps.ai_decision && !ps.ai_decision.fallback && (
-                      <div style={{ marginTop: 8, padding: "8px 10px", background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}25`, borderRadius: 6 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                          <span style={{ fontSize: 9, fontWeight: 700, fontFamily: mono, textTransform: "uppercase", letterSpacing: "0.08em", padding: "2px 6px", borderRadius: 3,
-                            background: ps.ai_decision.action === "CONFIRM" ? `${COLORS.buy}20` : ps.ai_decision.action === "ADJUST" ? `${COLORS.warn}20` : `${COLORS.sell}20`,
-                            color: ps.ai_decision.action === "CONFIRM" ? COLORS.buy : ps.ai_decision.action === "ADJUST" ? COLORS.warn : COLORS.sell,
-                          }}>AI {ps.ai_decision.action}</span>
-                          {ps.ai_decision.portfolio_health && ps.ai_decision.portfolio_health !== "HEALTHY" && (
-                            <span style={{ fontSize: 8, fontFamily: mono, color: ps.ai_decision.portfolio_health === "DANGER" ? COLORS.sell : COLORS.warn }}>
-                              {ps.ai_decision.portfolio_health}
-                            </span>
+                    {/* AI Reasoning — v2.14.2 7-band redesign. Each band
+                        surfaces one layer of the brain's structured output
+                        (header → QUANT text+chips → quant indicators grid →
+                        RISK → GROK → SIZE/rules → thesis alignment). The
+                        raw payload is produced by hydra_agent.py:3245
+                        (ai_decision dict) and hydra_brain.py:662
+                        (BrainDecision dataclass); if a field is null/empty
+                        the band self-hides. */}
+                    {ps.ai_decision && !ps.ai_decision.fallback && (() => {
+                      const ai = ps.ai_decision;
+                      const actionColor = ai.action === "CONFIRM" ? COLORS.buy : ai.action === "ADJUST" ? COLORS.warn : COLORS.sell;
+                      const bias = (ai.positioning_bias || "").toLowerCase();
+                      const biasMeta = bias === "crowded_long" ? { label: "CROWDED LONG", color: COLORS.sell }
+                        : bias === "crowded_short" ? { label: "CROWDED SHORT", color: COLORS.buy }
+                        : bias === "balanced" ? { label: "BALANCED", color: COLORS.textDim }
+                        : null;
+                      const qi = ai.quant_indicators || null;
+                      const tickDelta = ai.cached && typeof ai.generated_at_tick === "number" && typeof state?.tick === "number"
+                        ? Math.max(0, state.tick - ai.generated_at_tick) : null;
+                      const cachedColor = tickDelta == null ? COLORS.textMuted
+                        : tickDelta > 30 ? COLORS.sell
+                        : tickDelta > 10 ? COLORS.warn
+                        : COLORS.textMuted;
+                      const ta = ai.thesis_alignment || null;
+                      const showThesisStrip = ta && (ta.in_thesis === false || (typeof ta.posterior_shift_request === "number" && Math.abs(ta.posterior_shift_request) > 0.001));
+                      const pill = (txt, color, bg = null, extra = {}) => (
+                        <span style={{
+                          fontSize: 8, fontFamily: mono, fontWeight: 700, letterSpacing: "0.06em",
+                          textTransform: "uppercase", padding: "2px 6px", borderRadius: 3,
+                          background: bg ?? `${color}18`, color, ...extra,
+                        }}>{txt}</span>
+                      );
+                      const label = (txt, color) => (
+                        <span style={{
+                          fontSize: 8, fontWeight: 700, fontFamily: mono, color,
+                          textTransform: "uppercase", letterSpacing: "0.08em",
+                        }}>{txt}</span>
+                      );
+                      return (
+                        <div style={{ marginTop: 8, padding: "10px 12px", background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}25`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 8 }}>
+                          {/* Band 1 — Header row */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            {pill(`AI ${ai.action}`, actionColor, `${actionColor}20`)}
+                            {ai.final_signal && pill(ai.final_signal, signalColor(ai.final_signal))}
+                            {ai.portfolio_health && ai.portfolio_health !== "HEALTHY" && pill(
+                              ai.portfolio_health,
+                              ai.portfolio_health === "DANGER" ? COLORS.sell : COLORS.warn
+                            )}
+                            {biasMeta && pill(biasMeta.label, biasMeta.color)}
+                            {typeof ai.signal_agreement === "boolean" && (
+                              <span
+                                title={ai.signal_agreement ? "Quant agrees with engine signal" : "Quant disagrees with engine signal"}
+                                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 8, fontFamily: mono, color: ai.signal_agreement ? COLORS.buy : COLORS.warn }}
+                              >
+                                <span style={{ width: 6, height: 6, borderRadius: "50%", background: ai.signal_agreement ? COLORS.buy : COLORS.warn, display: "inline-block" }} />
+                                {ai.signal_agreement ? "AGREE" : "DISAGREE"}
+                              </span>
+                            )}
+                            {typeof ai.confidence_adj === "number" && (
+                              <span style={{ fontSize: 8, fontFamily: mono, color: COLORS.textDim }}>
+                                conv {(ai.confidence_adj * 100).toFixed(0)}%
+                              </span>
+                            )}
+                            {ai.latency_ms > 0 && (
+                              <span style={{ fontSize: 8, fontFamily: mono, color: COLORS.textMuted, marginLeft: "auto" }}>{ai.latency_ms}ms</span>
+                            )}
+                          </div>
+
+                          {/* Band 2 — QUANT reasoning + key factors + concern */}
+                          {(ai.analyst_reasoning || (ai.key_factors && ai.key_factors.length) || ai.concern) && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                                {label("QUANT", COLORS.blue)}
+                                {ai.analyst_reasoning && (
+                                  <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.text, lineHeight: 1.5, flex: 1 }}>
+                                    {ai.analyst_reasoning}
+                                  </span>
+                                )}
+                              </div>
+                              {ai.key_factors && ai.key_factors.length > 0 && (
+                                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 50 }}>
+                                  {ai.key_factors.map((f, fi) => (
+                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 6px", borderRadius: 3, background: `${COLORS.blue}15`, color: COLORS.blue, letterSpacing: "0.03em" }}>
+                                      {f}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {ai.concern && (
+                                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, paddingLeft: 0 }}>
+                                  {pill("CONCERN", COLORS.warn)}
+                                  <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.warn, lineHeight: 1.4, flex: 1 }}>
+                                    {ai.concern}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           )}
-                          {ps.ai_decision.latency_ms > 0 && (
-                            <span style={{ fontSize: 8, fontFamily: mono, color: COLORS.textMuted, marginLeft: "auto" }}>{ps.ai_decision.latency_ms}ms</span>
-                          )}
-                        </div>
-                        <div style={{ marginTop: 2 }}>
-                          <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.blue, textTransform: "uppercase", marginRight: 6 }}>QUANT</span>
-                          <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.text, lineHeight: 1.4 }}>{ps.ai_decision.analyst_reasoning}</span>
-                        </div>
-                        {ps.ai_decision.risk_reasoning && (
-                          <div style={{ marginTop: 3 }}>
-                            <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.textMuted, textTransform: "uppercase", marginRight: 6 }}>RISK</span>
-                            <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, lineHeight: 1.3 }}>{ps.ai_decision.risk_reasoning}</span>
-                          </div>
-                        )}
-                        {ps.ai_decision.escalated && ps.ai_decision.strategist_reasoning && (
-                          <div style={{ marginTop: 4, padding: "4px 6px", background: `${COLORS.warn}10`, borderRadius: 3 }}>
-                            <span style={{ fontSize: 8, fontWeight: 700, fontFamily: mono, color: COLORS.warn, textTransform: "uppercase", marginRight: 6 }}>GROK STRATEGIST</span>
-                            <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.text, lineHeight: 1.3 }}>{ps.ai_decision.strategist_reasoning}</span>
-                          </div>
-                        )}
-                        {ps.ai_decision.risk_flags && ps.ai_decision.risk_flags.length > 0 && (
-                          <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
-                            {ps.ai_decision.risk_flags.map((flag, fi) => (
-                              <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 5px", borderRadius: 3, background: `${COLORS.warn}15`, color: COLORS.warn }}>{flag}</span>
-                            ))}
-                          </div>
-                        )}
-                        {/* v2.14.1: Size-multiplier breakdown. Shows how the
-                            final size was assembled: brain (quant × rm) × rules,
-                            with clamp indicator and triggered-rule list. */}
-                        {(typeof ps.ai_decision.size_multiplier === "number" ||
-                          (ps.ai_decision.rules_triggered && ps.ai_decision.rules_triggered.length > 0) ||
-                          ps.ai_decision.rules_force_hold) && (
-                          <div style={{ marginTop: 6, padding: "4px 6px", background: `${COLORS.panelBorder}15`, borderRadius: 3, fontFamily: mono, fontSize: 9 }}>
-                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 8, fontWeight: 700, color: COLORS.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>SIZE</span>
-                              <span style={{ color: COLORS.text }}>
-                                brain ×{(ps.ai_decision.size_multiplier_brain ?? 1).toFixed(2)}
-                              </span>
-                              <span style={{ color: COLORS.textDim }}>·</span>
-                              <span style={{ color: COLORS.text }}>
-                                rules ×{(ps.ai_decision.size_multiplier_rules ?? 1).toFixed(2)}
-                              </span>
-                              <span style={{ color: COLORS.textDim }}>=</span>
-                              <span style={{ color: COLORS.accent, fontWeight: 700 }}>
-                                ×{(ps.ai_decision.size_multiplier ?? 1).toFixed(2)}
-                              </span>
-                              {ps.ai_decision.size_multiplier_clamped && (
-                                <span style={{ fontSize: 8, color: COLORS.warn, fontWeight: 700 }}>
-                                  CLAMPED (raw ×{(ps.ai_decision.size_multiplier_unclamped ?? 0).toFixed(2)})
+
+                          {/* Band 3 — Quant indicators grid (derivatives signal block) */}
+                          {qi && Object.values(qi).some(v => v !== null && v !== undefined) && (
+                            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: "6px 8px", background: `${COLORS.blue}08`, borderRadius: 4, alignItems: "baseline" }}>
+                              {qi.funding_bps_8h != null && (
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
+                                  {label("FUNDING 8H", COLORS.textMuted)}
+                                  <span style={{ fontSize: 10, fontFamily: mono, color: Math.abs(qi.funding_bps_8h) > 80 ? COLORS.warn : COLORS.text }}>
+                                    {qi.funding_bps_8h > 0 ? "+" : ""}{qi.funding_bps_8h.toFixed(1)} bps
+                                  </span>
                                 </span>
                               )}
-                              {ps.ai_decision.rules_force_hold && (
-                                <span style={{ fontSize: 8, color: COLORS.sell, fontWeight: 700, padding: "1px 4px", borderRadius: 2, background: `${COLORS.sell}20` }}>
-                                  RULES FORCE-HOLD
+                              {qi.oi_delta_1h_pct != null && (
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
+                                  {label("OI Δ 1H", COLORS.textMuted)}
+                                  <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.text }}>
+                                    {qi.oi_delta_1h_pct > 0 ? "+" : ""}{qi.oi_delta_1h_pct.toFixed(2)}%
+                                  </span>
                                 </span>
                               )}
-                              {ps.ai_decision.cached && (
-                                <span style={{ fontSize: 8, color: COLORS.textMuted, fontStyle: "italic", marginLeft: "auto" }}>
-                                  cached @ tick {ps.ai_decision.generated_at_tick}
+                              {qi.oi_price_regime && qi.oi_price_regime !== "unknown" && (() => {
+                                const r = qi.oi_price_regime;
+                                const c = r === "trend_confirm_long" ? COLORS.buy
+                                  : r === "trend_confirm_short" ? COLORS.sell
+                                  : r === "short_squeeze" || r === "liquidation_cascade" ? COLORS.warn
+                                  : COLORS.textDim;
+                                return (
+                                  <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
+                                    {label("OI REGIME", COLORS.textMuted)}
+                                    {pill(r.replace(/_/g, " "), c)}
+                                  </span>
+                                );
+                              })()}
+                              {qi.basis_apr_pct != null && (
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
+                                  {label("BASIS", COLORS.textMuted)}
+                                  <span style={{ fontSize: 10, fontFamily: mono, color: qi.basis_apr_pct > 40 ? COLORS.warn : qi.basis_apr_pct < 0 ? COLORS.sell : COLORS.text }}>
+                                    {qi.basis_apr_pct > 0 ? "+" : ""}{qi.basis_apr_pct.toFixed(1)}% APR
+                                  </span>
+                                </span>
+                              )}
+                              {qi.cvd_divergence_sigma != null && (
+                                <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline" }}>
+                                  {label("CVD DIV", COLORS.textMuted)}
+                                  <span style={{ fontSize: 10, fontFamily: mono, color: Math.abs(qi.cvd_divergence_sigma) > 2 ? COLORS.warn : COLORS.text }}>
+                                    {qi.cvd_divergence_sigma > 0 ? "+" : ""}{qi.cvd_divergence_sigma.toFixed(2)}σ
+                                  </span>
                                 </span>
                               )}
                             </div>
-                            {ps.ai_decision.rules_triggered && ps.ai_decision.rules_triggered.length > 0 && (
-                              <div style={{ display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap" }}>
-                                {ps.ai_decision.rules_triggered.map((r, ri) => (
-                                  <span key={ri} title={r.reason || ""} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: r.effect === "force_hold" ? `${COLORS.sell}20` : r.effect === "boost" ? `${COLORS.buy}20` : `${COLORS.warn}20`, color: r.effect === "force_hold" ? COLORS.sell : r.effect === "boost" ? COLORS.buy : COLORS.warn }}>
-                                    {r.rule_id}
+                          )}
+
+                          {/* Band 4 — RISK reasoning + flags */}
+                          {(ai.risk_reasoning || (ai.risk_flags && ai.risk_flags.length > 0)) && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              {ai.risk_reasoning && (
+                                <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                                  {label("RISK", COLORS.textDim)}
+                                  <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, lineHeight: 1.4, flex: 1 }}>
+                                    {ai.risk_reasoning}
                                   </span>
-                                ))}
+                                </div>
+                              )}
+                              {ai.risk_flags && ai.risk_flags.length > 0 && (
+                                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 40 }}>
+                                  {ai.risk_flags.map((flag, fi) => (
+                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 5px", borderRadius: 3, background: `${COLORS.warn}15`, color: COLORS.warn }}>
+                                      {flag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Band 5 — GROK STRATEGIST (only when escalated) */}
+                          {ai.escalated && ai.strategist_reasoning && (
+                            <div style={{ padding: "6px 8px", background: `${COLORS.warn}10`, borderRadius: 4, display: "flex", alignItems: "flex-start", gap: 8 }}>
+                              {pill("GROK STRATEGIST", COLORS.warn)}
+                              <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.text, lineHeight: 1.4, flex: 1 }}>
+                                {ai.strategist_reasoning}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Band 6 — SIZE breakdown + rules + cached badge */}
+                          {(typeof ai.size_multiplier === "number" ||
+                            (ai.rules_triggered && ai.rules_triggered.length > 0) ||
+                            ai.rules_force_hold) && (
+                            <div style={{ padding: "6px 8px", background: `${COLORS.panelBorder}25`, borderRadius: 4, fontFamily: mono, display: "flex", flexDirection: "column", gap: 4 }}>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", fontSize: 10 }}>
+                                {label("SIZE", COLORS.textMuted)}
+                                <span style={{ color: COLORS.text }}>brain ×{(ai.size_multiplier_brain ?? 1).toFixed(2)}</span>
+                                <span style={{ color: COLORS.textMuted }}>·</span>
+                                <span style={{ color: COLORS.text }}>rules ×{(ai.size_multiplier_rules ?? 1).toFixed(2)}</span>
+                                <span style={{ color: COLORS.textMuted }}>=</span>
+                                <span style={{ color: COLORS.accent, fontWeight: 700 }}>×{(ai.size_multiplier ?? 1).toFixed(2)}</span>
+                                {ai.size_multiplier_clamped && pill(
+                                  `CLAMPED (raw ×${(ai.size_multiplier_unclamped ?? 0).toFixed(2)})`,
+                                  COLORS.warn
+                                )}
+                                {ai.rules_force_hold && pill("RULES FORCE-HOLD", COLORS.sell, `${COLORS.sell}25`)}
+                                {ai.cached && (
+                                  <span
+                                    title={tickDelta != null && tickDelta > 30 ? `Stale — brain has not re-deliberated in ${tickDelta} ticks` : undefined}
+                                    style={{ fontSize: 8, color: cachedColor, fontStyle: "italic", marginLeft: "auto" }}
+                                  >
+                                    cached{tickDelta != null ? ` Δ${tickDelta} tick${tickDelta === 1 ? "" : "s"}` : ""}
+                                  </span>
+                                )}
                               </div>
-                            )}
-                            {ps.ai_decision.rules_force_hold && ps.ai_decision.rules_force_hold_reason && (
-                              <div style={{ marginTop: 3, fontSize: 8, color: COLORS.sell, lineHeight: 1.3 }}>
-                                {ps.ai_decision.rules_force_hold_reason}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                              {ai.rules_triggered && ai.rules_triggered.length > 0 && (
+                                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                  {ai.rules_triggered.map((r, ri) => {
+                                    const effectColor = r.effect === "force_hold" ? COLORS.sell
+                                      : r.effect === "boost" ? COLORS.buy
+                                      : COLORS.warn;
+                                    return (
+                                      <span key={ri} title={r.reason || ""} style={{
+                                        fontSize: 8, fontFamily: mono, fontWeight: 700,
+                                        padding: "1px 6px", borderRadius: 2,
+                                        background: `${COLORS.panelBorder}50`, color: COLORS.text,
+                                        borderLeft: `2px solid ${effectColor}`,
+                                        letterSpacing: "0.04em",
+                                      }}>
+                                        {r.rule_id}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {ai.rules_force_hold && ai.rules_force_hold_reason && (
+                                <div style={{ fontSize: 9, color: COLORS.sell, lineHeight: 1.4 }}>
+                                  {ai.rules_force_hold_reason}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Band 7 — Thesis alignment strip (only when non-trivial) */}
+                          {showThesisStrip && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${COLORS.purple}15`, borderRadius: 3, flexWrap: "wrap" }}>
+                              {pill("THESIS", COLORS.purple)}
+                              {ta.in_thesis === false && pill("OUT OF THESIS", COLORS.warn)}
+                              {typeof ta.posterior_shift_request === "number" && Math.abs(ta.posterior_shift_request) > 0.001 && (
+                                <span style={{ fontSize: 9, fontFamily: mono, color: ta.posterior_shift_request > 0 ? COLORS.buy : COLORS.sell, fontWeight: 700 }}>
+                                  Δp {ta.posterior_shift_request > 0 ? "+" : ""}{ta.posterior_shift_request.toFixed(2)}
+                                </span>
+                              )}
+                              {ta.evidence_delta && (
+                                <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textDim, lineHeight: 1.4, flex: 1 }}>
+                                  {ta.evidence_delta}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -4719,7 +4882,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.14.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.14.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.

@@ -6,6 +6,7 @@ journal -> return response. Non-streaming in Phase 1.
 """
 from __future__ import annotations
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -20,6 +21,107 @@ from hydra_companions.config import TRANSCRIPTS_DIR, ROUTING_LOG, COSTS_LOG
 
 
 TRANSCRIPT_TAIL_TURNS = 20
+
+
+# v2.14.2: voice-mode labels are INTERNAL infrastructure. The model's
+# system prompt names the mode IDs (mentor, desk_clipped, reflective,
+# etc.) so the model can choose cadence, but no user should ever see them
+# — self-labeling reads as manipulative. Defense in depth:
+#   Layer 1 — compiler.py injects an explicit "do not name" rule into
+#             the system prompt.
+#   Layer 2 — `_scrub_mode_labels` (below) removes any label that slips
+#             through, from both the TurnResult sent to the user AND the
+#             transcript entry written to disk (so past leakage cannot
+#             prime future turns via the transcript tail).
+# The scrubber is built per-companion from `soul.voice_modes`, so a new
+# soul with new mode IDs is covered automatically — no hardcoded list.
+def _build_mode_scrub_patterns(mode_ids: tuple[str, ...]) -> list[re.Pattern]:
+    """Compile the regex patterns that strip mode-label leakage.
+
+    Handles four shapes the model tends to produce when it leaks:
+      1. Bracketed / parenthesized tag anywhere: `[mentor]`, `(mentor)`,
+         `[mode: mentor]`, `(voice: mentor mode)`.
+      2. Line-leading label: `^mentor:`, `^Mentor Mode —`, `^[mentor]\\s`.
+      3. Inline meta phrase: `in mentor mode`, `using reflective register`,
+         `switching to desk_clipped mode`, `my desk_clipped voice`.
+      4. Trailing parenthetical: `... that's the call. (mentor mode)`.
+
+    Only patterns where the mode ID co-occurs with a mode/voice/register
+    marker — or brackets — are stripped, so natural uses of common
+    English words like "mentor" (Apex talks about Denny, his mentor)
+    survive untouched.
+    """
+    if not mode_ids:
+        return []
+    # Normalize each mode_id to match both snake_case and space/hyphen
+    # variants the model might emit (`desk_clipped`, `desk-clipped`,
+    # `desk clipped`). Also match capitalized / Title / UPPER forms.
+    id_alternatives = []
+    for mid in mode_ids:
+        if not mid:
+            continue
+        escaped = re.escape(mid)
+        # Let snake_case underscores also match hyphen or single whitespace
+        # (re.escape does not escape `_`, so we replace the bare character).
+        flexible = escaped.replace("_", r"[_\-\s]")
+        id_alternatives.append(flexible)
+    if not id_alternatives:
+        return []
+    ids_group = "(?:" + "|".join(id_alternatives) + ")"
+    patterns: list[re.Pattern] = []
+    # 1. Bracketed / parenthesized tag with optional mode: / voice: prefix.
+    patterns.append(re.compile(
+        rf"\s*[\[\(]\s*(?:mode\s*[:=]\s*|voice\s*[:=]\s*|register\s*[:=]\s*)?"
+        rf"{ids_group}(?:\s*(?:mode|register|voice))?\s*[\]\)]",
+        re.IGNORECASE,
+    ))
+    # 2. Line-leading label — `mentor:`, `Mentor Mode —`, etc.
+    patterns.append(re.compile(
+        rf"(?m)^\s*{ids_group}(?:\s+(?:mode|register|voice))?\s*[:\u2014\u2013\-]\s+",
+        re.IGNORECASE,
+    ))
+    # 3. Inline meta phrase with explicit marker — `in <mode> mode`,
+    #    `using <mode> register`, `my <mode> voice`. The trailing marker
+    #    word anchors this against false positives on natural English.
+    patterns.append(re.compile(
+        rf"\b(?:in|using|my|your|in\s+my)\s+"
+        rf"{ids_group}\s+(?:mode|register|voice|cadence)\b",
+        re.IGNORECASE,
+    ))
+    # 4. Action-verb + mode_id — `switching to mentor`, `entering
+    #    reflective`, `going into serious_mode`. Strong action verbs are
+    #    themselves the meta-signal; the trailing marker is optional so
+    #    this catches mode IDs that already contain "mode" (Broski's
+    #    serious_mode), plus it also optionally eats the trailing
+    #    marker if the model emits one.
+    patterns.append(re.compile(
+        rf"\b(?:switching\s+(?:to|into)|switch\s+to|going\s+into|going\s+to|"
+        rf"entering|leaving|exiting|now\s+in)\s+"
+        rf"{ids_group}(?:\s+(?:mode|register|voice|cadence))?\b",
+        re.IGNORECASE,
+    ))
+    # 5. Bare "<mode> mode" / "<mode> register" anywhere — catches "I'll
+    #    use mentor mode now." The mode marker word is required so
+    #    `Denny was my mentor` survives.
+    patterns.append(re.compile(
+        rf"\b{ids_group}\s+(?:mode|register)\b",
+        re.IGNORECASE,
+    ))
+    return patterns
+
+
+def _scrub_mode_labels(text: str, patterns: list[re.Pattern]) -> str:
+    """Apply compiled mode-label scrub patterns to a response string."""
+    if not text or not patterns:
+        return text
+    out = text
+    for p in patterns:
+        out = p.sub("", out)
+    # Collapse the whitespace residue left by stripped tags — common shape
+    # is `[mentor] Ranging regime...` → ` Ranging regime...` → trim.
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 @dataclass
@@ -60,6 +162,13 @@ class Companion:
         self._load_transcript_tail()
         # Phase 5: distilled memory (topic-bucketed facts)
         self.memory = DistilledMemory(user_id=user_id, companion_id=soul.id)
+        # v2.14.2: compile the mode-label scrub regex from the soul's own
+        # voice_modes tuple. Done once at init; a new soul gets coverage
+        # automatically as long as the voice.modes.modes_available block
+        # is populated.
+        self._mode_scrub_patterns = _build_mode_scrub_patterns(
+            tuple(soul.voice_modes) if soul.voice_modes else ()
+        )
 
     # ----- lifecycle -----
 
@@ -223,12 +332,19 @@ class Companion:
                 tokens_in=0, tokens_out=0, cost_usd=0.0, error=err_text,
             )
 
+        # v2.14.2: scrub any internal voice-mode labels the model may
+        # have leaked (`[mentor]`, `in mentor mode`, etc.) before the
+        # text reaches the user OR the transcript. Applying to BOTH the
+        # TurnResult and the journal ensures past leakage cannot prime a
+        # future turn via the transcript tail we feed back as context.
+        clean_text = _scrub_mode_labels(resp.text, self._mode_scrub_patterns)
+
         # Journal the successful exchange (user message first, then assistant).
         self._journal("user", user_text)
-        self._journal("assistant", resp.text)
+        self._journal("assistant", clean_text)
 
         return TurnResult(
-            message=resp.text,
+            message=clean_text,
             intent=intent_result.intent,
             model_used=f"{decision.provider}:{decision.model_id}",
             tokens_in=resp.tokens_in,

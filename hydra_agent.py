@@ -3260,6 +3260,13 @@ class HydraAgent:
                 "analyst_reasoning": decision.analyst_reasoning,
                 "risk_reasoning": decision.risk_reasoning,
                 "strategist_reasoning": decision.strategist_reasoning,
+                # v2.14.2: structured rationale — rendered as pills/chips
+                # on the dashboard so the decision reads as an audit trail
+                # rather than one mono-text blob.
+                "positioning_bias": decision.positioning_bias,
+                "key_factors": decision.key_factors,
+                "concern": decision.concern,
+                "signal_agreement": decision.signal_agreement,
                 "escalated": decision.escalated,
                 "summary": decision.combined_summary,
                 "risk_flags": decision.risk_flags,
@@ -4895,7 +4902,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.14.1",
+            "version": "2.14.2",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

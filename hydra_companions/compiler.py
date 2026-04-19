@@ -204,11 +204,22 @@ def compile_soul(soul: dict) -> CompiledSoul:
     if reactions:
         blocks.append("## How to meet the user\n" + _fmt_reactions(reactions))
 
-    # v1.1: Voice modes (where applicable)
+    # v1.1: Voice modes (where applicable). v2.14.2: these are INTERNAL
+    # routing labels for the model's own cadence selection. The companion
+    # must never name, bracket-tag, or otherwise expose them in its
+    # response — that would read as self-labeling theater and feels
+    # manipulative. Reinforced at prompt level here AND scrubbed at the
+    # post-processing layer in companion.py (_scrub_mode_labels).
     if voice_modes_data.get("modes_available"):
         modes = voice_modes_data["modes_available"]
         default_id = voice_modes_data.get("default_mode_id", modes[0].get("id") if modes else "")
-        mode_lines = [f"- Default mode: **{default_id}**."]
+        mode_lines = [
+            "**These are INTERNAL cadence selectors — never name them in your reply, "
+            "never prefix messages with `[mode]` tags, never say \"in mentor mode\" / "
+            "\"switching to X register\" / \"using desk_clipped\". The user must not "
+            "see your voice classification. Choose the cadence silently and speak.**",
+            f"- Default cadence: **{default_id}**.",
+        ]
         for m in modes:
             mid = m.get("id", "")
             whenl = m.get("when", [])
@@ -223,7 +234,7 @@ def compile_soul(soul: dict) -> CompiledSoul:
             mode_lines.append("- Switching rules:")
             for r in rules_list:
                 mode_lines.append(f"   * {r}")
-        blocks.append("## Voice modes\n" + "\n".join(mode_lines))
+        blocks.append("## Voice modes (internal — do not name to the user)\n" + "\n".join(mode_lines))
 
     # v1.1: How I got here (top formative incidents by weight)
     if formative:
@@ -476,7 +487,11 @@ def compile_soul(soul: dict) -> CompiledSoul:
         "- You do NOT place trades. You do NOT cancel orders. Your only path to action is proposing a trade card "
         "to the user, who confirms. In Phase 1 (this phase), no trade tools are available \u2014 chat only.\n"
         "- Respond in your voice. Do not break character unless explicitly asked.\n"
-        "- Keep messages tight. Match the user's length. Short question, short answer."
+        "- Keep messages tight. Match the user's length. Short question, short answer.\n"
+        "- Voice-mode IDs above (mentor, desk_clipped, reflective, bro_vibes, locked_in, "
+        "warm_professional, serious, etc.) are INTERNAL infrastructure. Do not echo them. "
+        "Do not open with `[mode]:` or `(mentor mode)` tags. Do not narrate mode switches. "
+        "Just speak."
     )
 
     system_prompt = "\n\n".join(blocks).strip() + "\n"
