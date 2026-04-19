@@ -57,6 +57,9 @@ HYDRA_MEMORY.md
 .hydra-experiments/
 hydra_backtest_errors.log
 
+# Brain audit log (v2.14.0+; JSONL of every deliberate() and fallback)
+hydra_brain.jsonl
+
 # Companion runtime artifacts (transcripts, memory, proposals, routing/cost logs)
 .hydra-companions/
 

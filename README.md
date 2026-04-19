@@ -102,33 +102,99 @@ This means lower fees (maker rate) and no slippage from market orders.
 | **Validation** | Every order is validated via `--validate` before real execution |
 | **Graceful Shutdown** | Ctrl+C triggers SIGINT handler → final performance report → trade log export |
 
-## AI Brain — 3-Agent Reasoning Pipeline
+## AI Brain — 4-Layer Quant Pipeline (v2.14)
 
-Every BUY/SELL signal passes through a multi-agent AI pipeline before execution:
+Every BUY/SELL signal passes through a multi-layer AI + deterministic
+pipeline before execution. v2.14 replaced the prose-thesis "Analyst"
+with a real quantitative desk — the **Market Quant** — and added a
+Python rule engine that enforces guardrails the LLMs cannot talk
+around.
 
 ```
 Engine signal (BUY/SELL)
-  → Agent 1: Market Analyst (Claude Sonnet) — thesis, conviction, agreement
-  → Agent 2: Risk Manager (Claude Sonnet) — CONFIRM / ADJUST / OVERRIDE
-  → Agent 3: Strategic Advisor (Grok 4 Reasoning) — only on contested decisions
-  → Execute or skip
+  → QUANT INDICATORS (Kraken Futures funding/OI/basis + engine CVD divergence)
+  → Agent 1: Market Quant (Claude Sonnet) — scenario probabilities,
+             positioning bias, size_multiplier, force_hold
+  → Agent 2: Risk Manager (Claude Sonnet) — institutional risk metrics
+             (exposure %, stress loss, liquidity score, correlation cluster),
+             CONFIRM / ADJUST / OVERRIDE, size_multiplier (stacked on Quant)
+  → Agent 3: Strategic Advisor (Grok 4 Reasoning) — contested decisions
+             (RM OVERRIDE or ADJUST, or Quant disagrees at conviction < 0.50)
+  → hydra_quant_rules.apply_rules() — deterministic R1-R10 guardrails
+  → Execute or skip (final size = quant × rm × rules, clamped [0, 1.5])
 ```
 
-| Agent | Model | When | Cost |
-|-------|-------|------|------|
-| Market Analyst | Claude Sonnet | Every BUY/SELL signal | ~$0.004 |
-| Risk Manager | Claude Sonnet | Every BUY/SELL signal | ~$0.004 |
-| Strategic Advisor | Grok 4 Reasoning | Only when ADJUST/OVERRIDE or conviction < 65% | ~$0.003 |
+### Quant Indicators (signal input only — SPOT-ONLY execution)
 
-**Grok escalation:** When the Analyst and Risk Manager disagree, or the Analyst's conviction is low, Grok 4 is called as the final decision-maker with full context from both prior agents. Clear CONFIRM signals skip Grok entirely.
+Hydra reads derivatives data from Kraken Futures via the `kraken`
+CLI — **it never places futures or options orders**. Same applies to
+CVD, which is an engine-local OHLC proxy (Chaikin signed-volume
+multiplier). The Market Quant consumes:
 
-**Fallback:** If AI is unavailable (API failure, budget exceeded, no key), the system falls back to engine-only mode. Trading continues without interruption.
+| Indicator | Source | What it tells the Quant |
+|---|---|---|
+| `funding_bps_8h` | Kraken Futures `tickers` | 8h funding rate; > +80 bps = crowded long (buying the top risk); < -80 = crowded short (capitulation risk) |
+| `oi_delta_1h_pct` / `oi_delta_24h_pct` | Kraken Futures `tickers` | Open-interest momentum — new money in or squeeze happening |
+| `oi_price_regime` | Computed in stream | `trend_confirm_long` / `trend_confirm_short` / `short_squeeze` / `liquidation_cascade` / `balanced` |
+| `basis_apr_pct` | Kraken Futures quarterly | Annualized futures-vs-perp premium. > 40 = euphoric contango; negative = stress |
+| `cvd_divergence_sigma` | Engine (Chaikin proxy) | z-score of (cvd_slope − price_slope) over 1h vs 24h. \|σ\| > 2 opposing direction = smart money disagrees |
+
+### Deterministic guardrails (hydra_quant_rules.py)
+
+| Rule | Fires on | Effect |
+|---|---|---|
+| R1 | funding > +80 bps AND BUY | **force_hold** |
+| R2 | funding < -80 bps AND SELL | **force_hold** |
+| R3 | oi_regime = short_squeeze AND BUY | size × 0.5 |
+| R4 | oi_regime = liquidation_cascade AND SELL | size × 0.5 |
+| R5 | basis_apr_pct > 40 AND BUY | size × 0.7 |
+| R7 | \|cvd_divergence_sigma\| > 2 opposing engine | size × 0.5 |
+| R8 | engine fades crowded positioning | size × 1.15 (contrarian edge) |
+| R10 | staleness > 300s on 2+ indicators | **force_hold** (no trade without data) |
+
+Rules stack multiplicatively. Any force_hold pulls the final action
+to HOLD regardless of LLM verdict. Final size clamped to [0.0, 1.5].
+Options-based R6 (25Δ skew) + R9 (IV/RV) deferred — Deribit has no
+kraken CLI path and v2.14 policy is zero REST for market data.
+
+### Costs + safety
+
+| Layer | Model | When | Cost est |
+|---|---|---|---|
+| Market Quant | Claude Sonnet 4.6 | Every BUY/SELL signal | ~$0.002 |
+| Risk Manager | Claude Sonnet 4.6 | Every BUY/SELL signal | ~$0.002 |
+| Strategic Advisor | Grok 4 Reasoning | OVERRIDE or ADJUST, or low-conviction disagreement | ~$0.001 |
+| Quant Rules | Python | Every tick (after LLMs) | $0 |
+
+`max_daily_cost` default **$3.00** (was $10 pre-v2.14). `COST_ALERT_USD`
+same — a one-shot WS broadcast fires when brain + strategist spend
+crosses the threshold. Sonnet 4.6 pricing locked to $3/$15 per MTok
+(verified Apr 2026).
+
+**API-down safety (v2.14):** after 3+ consecutive LLM failures the
+brain enters a 60-tick backoff. During backoff, new BUY entries are
+**blocked** (force HOLD) but SELL exits pass through — an unvetted
+entry during an Anthropic outage is real downside; an unvetted exit
+only reduces risk.
+
+**Instrumentation:** every `deliberate()` and every `fallback` writes
+a structured line to `hydra_brain.jsonl` (gitignored) with pair,
+tick, engine action, Quant conviction, RM decision + size, Grok
+fired y/n, final action/size, latency, tokens, cost-to-date. Enables
+post-hoc A/B analysis (brain-enabled vs engine-only).
 
 Enable by setting API keys in `.env`:
 ```
 ANTHROPIC_API_KEY=sk-ant-api03-...
 OPENAI_API_KEY=sk-...
 XAI_API_KEY=xai-...
+```
+
+Kill switches:
+```
+HYDRA_QUANT_INDICATORS_DISABLED=1  # skip DerivativesStream + rules; Quant sees no block
+HYDRA_COMPANION_DISABLED=1         # no orb / proposals
+HYDRA_BACKTEST_DISABLED=1          # v2.9.x behavior
 ```
 
 ## Live Dashboard
@@ -259,11 +325,16 @@ hydra/
 ├── AUDIT.md                # Technical audit and test results
 ├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
-├── hydra_engine.py         # Core: indicators, regime detection, signals, position sizing
-├── hydra_brain.py          # AI reasoning: Claude Analyst + Risk Manager + Grok Strategist
+├── hydra_engine.py         # Core: indicators, regime detection, signals, sizing, CVD (Chaikin proxy)
+├── hydra_brain.py          # 3-agent AI: Claude Market Quant + Risk Manager + Grok Strategist
+├── hydra_derivatives_stream.py  # Kraken Futures public data via kraken CLI (funding, OI, basis) — read-only
+├── hydra_quant_rules.py    # Deterministic R1-R10 guardrails (Python, LLM-independent)
+├── hydra_thesis.py         # Persistent thesis layer (posture, ladder, intents, evidence)
+├── hydra_thesis_processor.py # Daemon: research docs → ProposedThesisUpdate (Grok 4)
 ├── hydra_agent.py          # Kraken CLI integration, agent loop, trade execution, WebSocket, execution stream, WS market data streams, --resume
 ├── hydra_journal_migrator.py # Legacy trade log → order journal migration
 ├── hydra_tuner.py          # Self-tuning parameters via Bayesian updating
+├── hydra_companions/       # Orb / chat / proposals / nudges / ladder / CBP client / souls
 ├── start_all.bat           # Launch agent + dashboard
 ├── start_hydra.bat         # Agent with auto-restart
 ├── start_dashboard.bat     # Dashboard with auto-restart
@@ -330,6 +401,12 @@ HYDRA tracks and reports per pair:
 6. **One engine per pair** — Each pair runs its own independent regime detector, signal generator, and position tracker. No cross-contamination.
 
 7. **Dead man's switch** — If the agent crashes, all open orders cancel within 60 seconds. Refreshed every tick.
+
+8. **SPOT-ONLY execution (v2.14)** — Hydra places orders ONLY on Kraken spot (SOL/USDC, SOL/BTC, BTC/USDC). Derivatives data (Kraken Futures funding/OI/basis) is read-only signal input — the Market Quant reasons about positioning with it, the engine still trades spot limits. `hydra_derivatives_stream.py` and `hydra_quant_rules.py` both include meta-tests that grep for any authenticated order-placement patterns and fail at lint time.
+
+9. **No REST for market data (v2.14)** — all Kraken market data flows through WebSocket streams or the `kraken` CLI (WSL Ubuntu). Only the CBP sidecar (localhost IPC) uses REST. Keeps the integration surface narrow and consistent.
+
+10. **LLM teeth (v2.14)** — Quant and Risk Manager each output a `size_multiplier` that stacks multiplicatively with the engine's Kelly sizing, then passes through a Python rule layer (R1-R10) before the order is placed. Low-conviction Quant sizes down even when RM confirms; a hard rule (funding > 80 bps + BUY) can force HOLD no matter what either LLM says.
 
 ## Testing
 

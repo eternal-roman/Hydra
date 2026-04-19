@@ -428,7 +428,7 @@ class TestAnalystRiskBranching(unittest.TestCase):
             "position": {"size": 0, "avg_entry": 0, "unrealized_pnl": 0},
             "portfolio_overview": {},
         }
-        parsed, _tin, _tout = brain._run_analyst(state)
+        parsed, _tin, _tout = brain._run_quant(state)
         self.assertIsNotNone(parsed)
         self.assertIn("thesis", parsed)
 
@@ -456,7 +456,7 @@ class TestAnalystRiskBranching(unittest.TestCase):
             "position": {"size": 0, "avg_entry": 0, "unrealized_pnl": 0},
             "portfolio_overview": {},
         }
-        parsed, _tin, _tout = brain._run_analyst(state)
+        parsed, _tin, _tout = brain._run_quant(state)
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed["thesis"], "legacy")
         # Legacy path: the request has NO `tools` kwarg

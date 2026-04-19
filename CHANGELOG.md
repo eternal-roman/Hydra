@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.14.0] — Unreleased (feat/brain-quant-v2.14)
+
+**Quant overhaul — the AI brain grows real teeth and real data.** The v2.13 Analyst was a prose narrator with zero wire to trade sizing; v2.14 replaces it with a Market Quant consuming derivatives positioning + CVD divergence, layers an institutional-rigor Risk Manager on top, then enforces non-negotiable guardrails in Python after the LLMs are done. Final trade size = engine Kelly × Quant multiplier × Risk Manager multiplier × deterministic-rules multiplier, clamped [0.0, 1.5]. Any of Quant, Risk, or rules can set force_hold.
+
+### Added
+
+- **Market Quant (rename from Analyst)** with new QUANT_PROMPT. Outputs a probability-weighted scenario (p_up / p_flat / p_down / expected_move_bps), positioning_bias, size_multiplier, force_hold + reason, conviction, and indicator echoes. Internal: `_run_analyst` → `_run_quant`, `ANALYST_PROMPT` → `QUANT_PROMPT`. Journal/dashboard state field `analyst_reasoning` kept for back-compat; dashboard renders it under a new "QUANT" label.
+- **hydra_derivatives_stream.py** — Kraken Futures public data via kraken CLI (no REST, no auth). Polls funding rate, open interest, mark price, quarterly basis on a daemon thread every 30s. SPOT-ONLY invariant baked into module header; meta-test greps for any authenticated order-placement patterns and fails at lint time. Pair mapping: BTC/USDC → PF_XBTUSD, SOL/USDC → PF_SOLUSD, SOL/BTC → synthetic from SOL/USD + BTC/USD perps.
+- **CVD divergence** in HydraEngine via Chaikin Money Flow multiplier proxy (`signed_volume = volume × ((close−low) − (high−close)) / (high−low)`). New `cvd_divergence_sigma()` method returns z-score of (cvd_slope − price_slope) over 1h window against 24h variance. Rebuilt on `--resume` so no warmup needed. Pure stdlib.
+- **hydra_quant_rules.py** — 8 deterministic guardrails fired on indicator values (R1-R10 spec; R6/R9 options rules deferred). Rules stack multiplicatively; any force_hold wins; final size clamped. LLMs cannot talk around these.
+- **Risk Manager rewrite** — Jane Street / Deribit institutional rigor. Hard mandates: can't unblock Quant force_hold, drawdown > 10% forbids new BUYs, single-asset exposure > 30% NAV must ADJUST, correlation cluster > 50% NAV tightens, stress_loss_10pct_pct > 15% forces HOLD, liquidity_score = "BROKEN" (spread > 50 bps) forces HOLD. Structured risk_metrics output. RM size_multiplier **stacks** on Quant's rather than replacing it.
+- **Brain instrumentation (W4)** — every deliberate() and every fallback writes a structured JSON line to `hydra_brain.jsonl` (gitignored). Dashboard counters: daily_confirms/adjusts/fallbacks + confirm_pct/adjust_pct/override_pct/escalation_pct/fallback_pct. Unblocks A/B analysis (brain vs engine-only P&L).
+- **API-down safety (W3)** — after 3+ consecutive LLM failures (brain `api_available` flips False for 60 ticks), new BUY entries are force-held but SELL exits pass through. Budget-exceeded fallbacks are untouched (deliberate, not an outage). Structured `api_down_block` events logged.
+
+### Changed
+
+- **Grok escalation** widened from OVERRIDE-only to OVERRIDE OR ADJUST — the soft-contest class where Grok's reasoning can change P&L was previously silenced. Cooldown stays 9 ticks (= one 15-min candle window per-pair).
+- **Daily cost cap tightened** `max_daily_cost` 10.0 → 3.0 and `COST_ALERT_USD` 10.0 → 3.0. Sonnet 4.6 pricing verified ($3 in / $15 out per MTok).
+- **BrainDecision.size_multiplier** is now Quant × Risk Manager (was RM-only). Quant force_hold forces final_action=HOLD, decision=OVERRIDE, size=0.0 regardless of Strategist.
+- **Thread safety** — `HydraBrain._lock` is `threading.RLock()` (was `Lock`). Fixed a latent deadlock: `_fallback()` increments a counter under the lock, but the lock is already held by the caller in the API-down and budget-exceeded paths.
+- **Kraken Futures data path** is the only new external data source and it uses the existing `kraken` CLI (WSL Ubuntu) — zero new REST calls for market data.
+
+### Fixed
+
+- **Dashboard offline regression** — `ThesisContext` dataclass leaked into the WS broadcast payload, crashing `json.dumps` every tick. Agent now calls `dataclasses.asdict` before stamping `state["thesis_context"]`.
+
+### Deprecated / Removed
+
+- **No DeribitStream** — 25Δ skew + IV/RV signals (rules R6, R9) deferred. Deribit has no kraken-CLI path and v2.14 policy is zero REST for market data. Revisit if evidence warrants.
+
+### Invariants (CLAUDE.md additions)
+
+- **SPOT-ONLY execution** — Hydra places orders only on Kraken spot pairs (SOL/USDC, SOL/BTC, BTC/USDC). Derivatives data is signal input only. No futures/options orders ever.
+- **No REST for market data** — all Kraken market data flows via WebSocket or kraken CLI. CBP sidecar (localhost IPC) is the only exception.
+
+### Tests
+
+- 1126/1126 full suite green. New suites: `test_derivatives_stream.py` (24), `test_engine_cvd.py` (15), `test_quant_rules.py` (29). Both new stream + rules modules include spot-only meta-tests that grep for forbidden order-placement patterns and fail at lint time.
+
+### Env flags (new / changed)
+
+| flag | effect |
+|---|---|
+| `HYDRA_QUANT_INDICATORS_DISABLED=1` | **NEW** skip DerivativesStream + rules; Quant sees no quant_indicators block |
+| `HYDRA_BRAIN_JSONL` | **NEW** override path for the brain audit log (default: `hydra_brain.jsonl`) |
+| `max_daily_cost` default | 10.0 → 3.0 |
+| `COST_ALERT_USD` | 10.0 → 3.0 |
+
+---
+
 ## [2.13.7] — 2026-04-18
 
 **Souls depth pass — Apex becomes a partner, Athena becomes 32, Broski gets a 2024 chapter, all three gain genuine interiority.**

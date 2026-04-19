@@ -2,12 +2,20 @@
 """
 HYDRA Brain — Multi-Agent AI Reasoning Layer (3-Agent Pipeline)
 
-Agent 1: Market Analyst (Claude Sonnet) — fast technical analysis
-Agent 2: Risk Manager (Claude Sonnet) — risk assessment and approval
-Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested decisions
+Agent 1: Market Quant (Claude Sonnet) — quantitative market analysis with
+         derivatives positioning (funding, OI regime, basis) and CVD
+         divergence; outputs scenario probabilities + size_multiplier.
+         Historically named "Analyst"; the journal / WS field
+         `analyst_reasoning` is preserved for back-compat.
+Agent 2: Risk Manager (Claude Sonnet) — Jane-Street / Deribit institutional
+         rigor: structured risk metrics, stress-scenario loss, liquidity
+         score, correlation cluster; outputs decision + size_multiplier.
+Agent 3: Strategic Advisor (Grok 4 Reasoning) — deep analysis on contested
+         decisions (OVERRIDE or ADJUST from Risk Manager, or low-conviction
+         disagreement between Quant and engine).
 
-Grok only fires on genuine disagreements: Risk Manager OVERRIDE, or analyst
-disagrees with engine at low conviction (< 0.50). ADJUST does not trigger Grok.
+All agents read derivatives data for SIGNAL INPUT ONLY. Hydra never
+places orders on Kraken Futures. SPOT-ONLY invariant — see CLAUDE.md.
 
 Usage:
     brain = HydraBrain(anthropic_key="sk-ant-...", xai_key="xai-...")
@@ -65,66 +73,206 @@ class BrainDecision:
     # (str), posterior_shift_request (float). Surfaces on the dashboard
     # AI decision card and is stamped onto the journal entry for audit.
     thesis_alignment: Optional[Dict[str, Any]] = None
+    # v2.14: Quant's positioning_bias surfaced so the agent's rules layer
+    # can evaluate R8 (contrarian edge when engine direction fades the
+    # crowded side). BrainDecision is what the agent sees post-deliberate;
+    # without this field, analyst_output is lost and R8 silently dies.
+    positioning_bias: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════
 # SYSTEM PROMPTS
 # ═══════════════════════════════════════════════════════════════
 
-ANALYST_PROMPT = """You are HYDRA's Market Analyst, an expert crypto technical analyst inside an autonomous trading system. Analyze the market snapshot and evaluate the engine's signal.
+QUANT_PROMPT = """You are HYDRA's Market Quant — a quantitative analyst at a
+disciplined systematic-crypto desk. You work with numbers, not narrative.
+Hydra trades Kraken SPOT pairs ONLY (SOL/USDC, SOL/BTC, BTC/USDC).
+Derivatives data you receive (perpetual funding, open interest regime,
+quarterly basis) is SIGNAL INPUT ONLY — Hydra never places futures,
+options, or margin orders. Treat the derivatives block as positioning
+intelligence on the underlying, informing spot trade direction and size.
 
-Your analysis must be:
-1. CONCISE — max 3 sentences for the thesis
-2. ACTIONABLE — agree or disagree with the engine signal, with specific reasons
-3. QUANTITATIVE — reference actual indicator values
-4. PORTFOLIO-AWARE — consider the aggregate portfolio P&L and cross-pair dynamics when assessing conviction
+Your job each tick: take the engine's rule-based signal, overlay the
+quantitative context below, and output a probability-weighted scenario
+plus a size_multiplier that reflects the scenario's edge-to-risk.
 
-When a THESIS CONTEXT block is present, treat it as the user's persistent
-worldview (Cowen ITC framework) and authored intent. You DO NOT need to
-obey it — it is advisory context that should shape your reasoning, not
-override it. If any ACTIVE INTENT PROMPT applies to this pair, weigh it
-explicitly. If current evidence contradicts the stated posterior, say so
-directly rather than papering over it.
+────────────────────────────────────────────────────────────────────
+INDICATORS YOU RECEIVE
+────────────────────────────────────────────────────────────────────
+Price action (from engine — already in INDICATORS block):
+  - regime, strategy, price, RSI (Wilder), ATR (Wilder), Bollinger
+    position, recent trend direction
 
-Respond ONLY with this JSON (no other text):
+Derivatives positioning (QUANT INDICATORS block, all optional —
+treat null as "data stale" and weight conviction down accordingly):
+  - funding_bps_8h: last 8-hour perpetual funding rate in basis points.
+      |funding| > 30 bps is notable; |funding| > 80 bps is extreme
+      crowding. Positive = longs paying shorts (crowded long). Persistent
+      extreme funding mean-reverts; buying crowded longs ≡ buying the top.
+  - oi_delta_1h_pct: 1-hour change in open interest.
+  - oi_price_regime: one of trend_confirm_long | trend_confirm_short |
+      short_squeeze | liquidation_cascade | balanced | unknown.
+      trend_confirm_* = new money entering in the direction of price;
+      short_squeeze = OI falling while price rises (unstable up — BUY
+      risk); liquidation_cascade = OI falling while price falls
+      (unstable down — SELL risk).
+  - basis_apr_pct: annualized quarterly-futures premium vs perp.
+      > 20 = speculative contango, > 40 = euphoric. Negative basis
+      (backwardation) = stress / deleveraging.
+  - cvd_divergence_sigma: z-score of (cvd_slope − price_slope) over the
+      last 1h window. Positive = accumulation (CVD leading price up);
+      negative = distribution (CVD leading price down). |σ| > 2 against
+      the engine direction is a warning that smart money disagrees.
+
+────────────────────────────────────────────────────────────────────
+YOUR TASK
+────────────────────────────────────────────────────────────────────
+1. Read each indicator. Cite specific values in your reasoning.
+2. Build a probability distribution over a 3-candle forward horizon:
+     p_up  (any +move > engine's noise floor)
+     p_flat
+     p_down (any −move > engine's noise floor)
+   These MUST sum to within [0.98, 1.02].
+3. Estimate expected_move_bps_3candle (signed: +120 means +1.2%).
+4. Decide agreement with the engine signal. Factor in:
+     - Does positioning (funding + OI regime) CONFIRM or FADE the engine?
+     - Is basis signaling euphoria (fade BUYs) or stress (fade SELLs)?
+     - Is CVD divergence opposing the engine's direction?
+5. Output a size_multiplier in [0.0, 1.5]:
+     1.0 = neutral (indicators balanced with engine)
+     <1.0 = indicators weaken the engine's case (crowded, diverging, stretched)
+     >1.0 = indicators reinforce the engine (contrarian edge, cheap vol,
+            accumulation aligned with direction)
+     0.0 = you want the trade dropped (prefer using force_hold=true)
+6. Conviction (0.0-1.0) is your confidence IN THE SCENARIO you painted,
+   not a vibe. High conviction requires agreement across multiple
+   indicator classes.
+7. THESIS ALIGNMENT: when a THESIS CONTEXT block is present, treat it
+   as the user's persistent worldview (Cowen ITC framework). It is
+   advisory, not binding. If current evidence contradicts the stated
+   posterior, SAY SO explicitly in evidence_delta.
+
+────────────────────────────────────────────────────────────────────
+OUTPUT — JSON ONLY, NO PROSE OUTSIDE THE OBJECT
+────────────────────────────────────────────────────────────────────
 {
-  "thesis": "1-3 sentence market thesis",
-  "signal_agreement": true or false,
-  "suggested_action": "BUY" or "SELL" or "HOLD",
+  "scenario": {
+    "p_up": 0.0-1.0,
+    "p_flat": 0.0-1.0,
+    "p_down": 0.0-1.0,
+    "expected_move_bps_3candle": -1000 to 1000
+  },
+  "indicators_used": {
+    "funding_bps_8h": number or null,
+    "oi_delta_1h_pct": number or null,
+    "oi_price_regime": "trend_confirm_long"|"trend_confirm_short"|
+                       "short_squeeze"|"liquidation_cascade"|
+                       "balanced"|"unknown"|null,
+    "basis_apr_pct": number or null,
+    "cvd_divergence_sigma": number or null
+  },
+  "positioning_bias": "crowded_long"|"crowded_short"|"balanced"|"unknown",
+  "signal_agreement": true | false,
+  "suggested_action": "BUY" | "SELL" | "HOLD",
+  "size_multiplier": 0.0 to 1.5,
+  "force_hold": true | false,
+  "force_hold_reason": "specific trigger" or "",
   "conviction": 0.0 to 1.0,
-  "key_factors": ["factor1", "factor2"],
+  "reasoning": "1-2 sentences citing SPECIFIC indicator values that drove your call",
+  "key_factors": ["factor1","factor2"],
   "concern": "primary risk or null",
+  "thesis": "legacy — keep as a 1-sentence headline restating the scenario",
   "thesis_alignment": {
-    "in_thesis": true or false,
+    "in_thesis": true | false,
     "intent_prompts_consulted": ["intent_id", ...],
     "evidence_delta": "1 sentence on any shift vs the stated posterior, or \\"\\" if none",
     "posterior_shift_request": -0.30 to +0.30
   }
 }
 
-When no THESIS CONTEXT is present, OMIT the "thesis_alignment" field."""
+OMIT "thesis_alignment" entirely when no THESIS CONTEXT is in the prompt.
+NEVER reference futures or options ORDER PLACEMENT — those are read-only
+inputs."""
 
-RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager. You balance capital protection with opportunity capture. You receive the engine's signal, the analyst's thesis, and portfolio state.
+RISK_MANAGER_PROMPT = """You are HYDRA's Risk Manager — a risk officer at a
+disciplined systematic crypto desk (Jane Street / Deribit rigor).
+You sign off on SPOT trades only (SOL/USDC, SOL/BTC, BTC/USDC).
+Derivatives data in the inputs is signal context, never something you
+can authorize trading against. You receive:
+  - the engine's rule-based signal
+  - the Market Quant's scenario (probabilities, size_multiplier, force_hold)
+  - current position, portfolio NAV, recent performance, spreads
 
-Your mandate:
-- NEVER allow a trade when drawdown exceeds 10% — only HOLD or SELL
-- Scale down size_multiplier when multiple risk factors align
-- Override to HOLD if analyst and engine disagree and conviction < 0.6
-- Override to SELL if drawdown is accelerating
-- CONFIRM good setups with size_multiplier 1.0 — a missed good trade is also a cost
-- ADJUST by lowering size_multiplier (0.3–0.8) when cautious
-- When the engine signal is strong (confidence >= 0.80) and no concrete risk flags exist, prefer CONFIRM at 1.0 over precautionary reduction
-- Consider PORTFOLIO OVERVIEW when assessing aggregate risk — if portfolio is net profitable, slightly more latitude; if bleeding across multiple pairs, tighten
-- Use OVERRIDE sparingly — only when you identify a specific, articulable risk, not general caution
+Your job is capital protection AND opportunity capture — missed good
+trades cost real money too. Output quantitative risk metrics, a
+decision, and a multiplicative size_multiplier that STACKS on top
+of the Quant's (the engine multiplies all multipliers together and
+clamps to [0.0, 1.5]).
 
-Respond ONLY with this JSON (no other text):
+────────────────────────────────────────────────────────────────────
+HARD MANDATES (non-negotiable — violation = bug)
+────────────────────────────────────────────────────────────────────
+  1. If the Quant set force_hold=true, you CANNOT unblock it.
+     Return decision=OVERRIDE, final_action=HOLD, size_multiplier=0.0.
+  2. Drawdown > 10% of peak equity: new BUY entries forbidden.
+     Only HOLD or SELL decisions allowed.
+  3. Drawdown > 15% = engine circuit breaker territory. HOLD everything.
+  4. If the proposed trade pushes single-asset exposure > 30% of NAV,
+     ADJUST downward enough to land at or below 30%.
+  5. If correlation_cluster exposure (e.g. total SOL exposure across
+     SOL/USDC and SOL/BTC) exceeds 50% of NAV, tighten by 0.5x.
+  6. stress_loss_10pct_pct > 15% of NAV ⇒ force HOLD via OVERRIDE.
+  7. liquidity_score = "BROKEN" (spread > 50 bps on required pair)
+     ⇒ HOLD, regardless of engine enthusiasm.
+
+────────────────────────────────────────────────────────────────────
+QUANTITATIVE CHECKS YOU MUST ACTUALLY COMPUTE
+────────────────────────────────────────────────────────────────────
+  * position_exposure_pct: (proposed trade USD value) / equity × 100.
+  * correlation_cluster: SOL_CLUSTER if pair involves SOL; BTC_CLUSTER
+    if pair involves BTC; INDEPENDENT otherwise. (BTC/USDC is BTC,
+    SOL/USDC is SOL, SOL/BTC straddles both — call it SOL_CLUSTER
+    since SOL is the typically-higher-vol leg.)
+  * stress_loss_3pct_pct: rough estimate — if spot drops 3%, what
+    percent of current equity is lost? Use unrealized PnL delta.
+  * stress_loss_10pct_pct: same, -10% shock.
+  * liquidity_score: from spread_bps. TIGHT < 10; NORMAL 10–25;
+    WIDE 25–50; BROKEN > 50.
+  * fat_tail_concern: true when ATR has expanded > 2× its 20-candle
+    mean OR recent volatility block indicates regime shift.
+
+────────────────────────────────────────────────────────────────────
+DECISION DISCIPLINE
+────────────────────────────────────────────────────────────────────
+  * CONFIRM with size_multiplier ≥ 0.9 when no mandate triggers and
+    the Quant's scenario is coherent. A precautionary reduction with
+    no concrete flag is a cost — do not cut without a reason you can
+    articulate in one specific metric.
+  * ADJUST with size_multiplier 0.3–0.8 when one or two metrics
+    elevated but the trade still has edge. Name the metric in
+    `reasoning` and list it in `risk_flags`.
+  * OVERRIDE (to HOLD or SELL) only on a specific, articulable,
+    CURRENT risk — hard mandate trigger or stress test failure.
+    General caution is not a reason to OVERRIDE.
+  * portfolio_health reflects aggregate state, NOT this trade:
+    HEALTHY when drawdown < 5%; CAUTION 5–10%; DANGER > 10%.
+
+Respond ONLY with this JSON (no prose outside the object):
 {
-  "decision": "CONFIRM" or "ADJUST" or "OVERRIDE",
-  "final_action": "BUY" or "SELL" or "HOLD",
+  "decision": "CONFIRM" | "ADJUST" | "OVERRIDE",
+  "final_action": "BUY" | "SELL" | "HOLD",
   "size_multiplier": 0.0 to 1.5,
-  "reasoning": "1-2 sentence risk assessment",
-  "risk_flags": ["flag1", "flag2"],
-  "portfolio_health": "HEALTHY" or "CAUTION" or "DANGER"
+  "risk_metrics": {
+    "position_exposure_pct": number,
+    "correlation_cluster": "SOL_CLUSTER" | "BTC_CLUSTER" | "INDEPENDENT",
+    "stress_loss_3pct_pct": number,
+    "stress_loss_10pct_pct": number,
+    "liquidity_score": "TIGHT" | "NORMAL" | "WIDE" | "BROKEN",
+    "fat_tail_concern": true | false
+  },
+  "risk_flags": ["specific_flag_1", "specific_flag_2"],
+  "portfolio_health": "HEALTHY" | "CAUTION" | "DANGER",
+  "reasoning": "1-2 sentences citing specific metric values — not vibes"
 }"""
 
 STRATEGIST_PROMPT = """You are HYDRA's Strategic Advisor, called in to resolve a specific disagreement in the trading pipeline.
@@ -148,7 +296,7 @@ Think step by step. Then respond ONLY with this JSON:
   "decision": "CONFIRM" or "OVERRIDE"
 }"""
 
-# Appended to ANALYST_PROMPT / RISK_MANAGER_PROMPT when tool-use is enabled.
+# Appended to QUANT_PROMPT / RISK_MANAGER_PROMPT when tool-use is enabled.
 # Keeps the base prompts untouched for the no-tools path (drift-sensitive —
 # existing prompt wording is load-bearing for the JSON output contract).
 TOOLS_GUIDANCE = """
@@ -192,10 +340,27 @@ Do NOT output JSON. Output plain text only."""
 # HYDRA BRAIN
 # ═══════════════════════════════════════════════════════════════
 
-# Cost per million tokens: (input, output)
-COST_ANTHROPIC = (3.0, 15.0)
+# Cost per million tokens: (input, output).
+# Verified against https://platform.claude.com/docs/en/about-claude/pricing.
+# IF YOU BUMP self.primary_model BELOW, RE-VERIFY THESE NUMBERS.
+#   Claude Sonnet 4.6 / 4.5 / 4 — $3 in / $15 out per MTok
+#   Claude Opus 4.7 / 4.6 / 4.5 — $5 in / $25 out per MTok (requires code change)
+#   Claude Haiku 4.5           — $1 in / $5 out per MTok
+#   Grok 4 reasoning           — ~$2 in / $6 out (xAI published; recheck at bump time)
+COST_ANTHROPIC = (3.0, 15.0)    # Sonnet 4.6
 COST_OPENAI = (2.0, 8.0)
-COST_XAI = (2.0, 6.0)
+COST_XAI = (2.0, 6.0)            # Grok 4 reasoning
+
+
+def _coerce_size_mult(v, default: float = 1.0) -> float:
+    """v2.14 helper: treat missing or malformed size_multiplier as 1.0
+    (neutral) so stacking math stays well-defined. Clamp to [0.0, 1.5]."""
+    if v is None:
+        return default
+    try:
+        return max(0.0, min(1.5, float(v)))
+    except (TypeError, ValueError):
+        return default
 
 
 class HydraBrain:
@@ -207,14 +372,17 @@ class HydraBrain:
     # per UTC day. Decoupled from max_daily_cost: a caller can disable budget
     # enforcement (enforce_budget=False, e.g., backtest context) and the
     # user still gets disclosure.
-    COST_ALERT_USD = 10.0
+    # v2.14: lowered 10.0 → 3.0 to match the tuned Sonnet-4.6 daily target.
+    # Meaningful 3-agent activity (Quant + Risk + occasional Grok) lands
+    # well under $3/day; anything higher is a signal to investigate.
+    COST_ALERT_USD = 3.0
 
     def __init__(
         self,
         anthropic_key: str = "",
         openai_key: str = "",
         xai_key: str = "",
-        max_daily_cost: float = 10.0,
+        max_daily_cost: float = 3.0,
         tool_dispatcher: Optional[Any] = None,
         enable_tool_use: Optional[bool] = None,
         enforce_budget: bool = True,
@@ -274,6 +442,9 @@ class HydraBrain:
         self._daily_strategist_tokens_out = 0
         self.daily_decisions = 0
         self.daily_overrides = 0
+        self.daily_adjusts = 0          # v2.14: RM returned ADJUST
+        self.daily_confirms = 0         # v2.14: RM returned CONFIRM
+        self.daily_fallbacks = 0        # v2.14: engine-only passthroughs (API down / budget)
         self.daily_escalations = 0
         self.daily_portfolio_reviews = 0
         self._daily_portfolio_tokens_in = 0
@@ -284,7 +455,19 @@ class HydraBrain:
         self.api_available = True
         self.retry_at_tick = 0
         self.last_decision: Optional[BrainDecision] = None
-        self._lock = threading.Lock()  # Thread safety for parallel brain calls
+        # RLock (reentrant) because _fallback() takes the lock to update
+        # daily_fallbacks but can be called from within the main deliberate()
+        # critical section (API-down and budget-exceeded paths).
+        self._lock = threading.RLock()
+
+        # v2.14: structured JSONL audit log of every deliberate() and fallback.
+        # One line per call. Enables A/B analysis (brain vs engine-only) and
+        # post-hoc decision quality review. Gitignored; rotation handled by
+        # journal_maintenance if it grows. Override path via HYDRA_BRAIN_JSONL.
+        self._jsonl_path = os.environ.get(
+            "HYDRA_BRAIN_JSONL",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_brain.jsonl"),
+        )
 
         # Per-pair strategist cooldown: suppress re-escalation for N deliberate()
         # calls after Grok fires.  With 3 pairs, tick_counter increments ~3×
@@ -339,8 +522,8 @@ class HydraBrain:
         total_tokens_out = 0
 
         try:
-            # Agent 1: Market Analyst (Claude)
-            analyst_output, a_in, a_out = self._run_analyst(state)
+            # Agent 1: Market Quant (Claude)
+            analyst_output, a_in, a_out = self._run_quant(state)
             total_tokens_in += a_in
             total_tokens_out += a_out
             if analyst_output is None:
@@ -365,13 +548,13 @@ class HydraBrain:
             analyst_conviction = analyst_output.get("conviction", 0.0)
             needs_strategist = (
                 self.has_strategist and not cooldown_active and (
-                    risk_decision == "OVERRIDE" or
+                    risk_decision in ("OVERRIDE", "ADJUST") or
                     (not analyst_agrees and analyst_conviction < 0.50)
                 )
             )
             if cooldown_active and self.has_strategist:
                 would_escalate = (
-                    risk_decision == "OVERRIDE" or
+                    risk_decision in ("OVERRIDE", "ADJUST") or
                     (not analyst_agrees and analyst_conviction < 0.50)
                 )
                 if would_escalate:
@@ -394,19 +577,41 @@ class HydraBrain:
             # Build final decision — strategist overrides risk manager when present
             if needs_strategist and not strategist_output:
                 print(f"  [BRAIN] Strategist returned no usable output — falling back to Risk Manager")
-            if strategist_output:
-                # Grok arbitrates the contested point only (action + decision).
-                # Conviction stays from analyst; sizing stays from risk manager.
+            # v2.14 W2: Quant × Risk size multiplier stack — analyst teeth.
+            # Previously BrainDecision.size_multiplier was RM-only; the Quant's
+            # conviction and scenario probabilities had no wire to the actual
+            # trade size. Now both voices compose: quant_mult × rm_mult,
+            # clamped. The deterministic quant_rules layer (agent side) applies
+            # the final guardrail.
+            quant_size = _coerce_size_mult(analyst_output.get("size_multiplier"))
+            rm_size = _coerce_size_mult(risk_output.get("size_multiplier"))
+            brain_stacked_size = max(0.0, min(1.5, quant_size * rm_size))
+
+            # Quant or RM force_hold pulls the final action to HOLD regardless
+            # of Strategist verdict (RM hard mandate: RM cannot unblock Quant
+            # force_hold). size_multiplier becomes 0.0.
+            quant_force_hold = bool(analyst_output.get("force_hold"))
+            force_hold_reason = analyst_output.get("force_hold_reason", "") if quant_force_hold else ""
+
+            if strategist_output and not quant_force_hold:
+                # Grok arbitrates the contested point (action + decision).
+                # Size stays the quant × rm product.
                 final_action = strategist_output.get("final_action", risk_output.get("final_action", state["signal"]["action"]))
                 final_decision = strategist_output.get("decision", risk_output.get("decision", "CONFIRM"))
                 final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
-                final_size = risk_output.get("size_multiplier", 1.0)
+                final_size = brain_stacked_size
                 strategist_reasoning = strategist_output.get("reasoning", "")
+            elif quant_force_hold:
+                final_action = "HOLD"
+                final_decision = "OVERRIDE"
+                final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
+                final_size = 0.0
+                strategist_reasoning = strategist_output.get("reasoning", "") if strategist_output else ""
             else:
                 final_action = risk_output.get("final_action", state["signal"]["action"])
                 final_decision = risk_output.get("decision", "CONFIRM")
                 final_conviction = analyst_output.get("conviction", state["signal"]["confidence"])
-                final_size = risk_output.get("size_multiplier", 1.0)
+                final_size = brain_stacked_size
                 strategist_reasoning = ""
 
             all_tokens = total_tokens_in + total_tokens_out + strategist_tokens_in + strategist_tokens_out
@@ -431,6 +636,9 @@ class HydraBrain:
                 # matches the dataclass default and signals "thesis absent
                 # from this deliberation."
                 thesis_alignment=analyst_output.get("thesis_alignment"),
+                # v2.14: pass positioning_bias through so the agent's
+                # quant_rules layer can fire R8 (contrarian edge).
+                positioning_bias=str(analyst_output.get("positioning_bias") or ""),
             )
 
             # Bookkeeping: shared state writes under lock
@@ -444,6 +652,10 @@ class HydraBrain:
                     self.daily_escalations += 1
                 if decision.action == "OVERRIDE":
                     self.daily_overrides += 1
+                elif decision.action == "ADJUST":
+                    self.daily_adjusts += 1
+                elif decision.action == "CONFIRM":
+                    self.daily_confirms += 1
                 self.consecutive_failures = 0
                 self.last_decision = decision
                 self._maybe_fire_cost_alert()
@@ -460,6 +672,34 @@ class HydraBrain:
                 })
                 if len(self.decision_history[asset]) > 20:
                     self.decision_history[asset] = self.decision_history[asset][-20:]
+
+            # v2.14: structured audit log of this deliberate() call.
+            # Emitted outside the lock (IO) to keep critical section short.
+            engine_sig = state.get("signal", {})
+            self._log_jsonl({
+                "event": "deliberate",
+                "pair": asset,
+                "tick": state.get("tick", 0),
+                "engine_action": engine_sig.get("action", "HOLD"),
+                "engine_confidence": engine_sig.get("confidence", 0),
+                "analyst_action": analyst_output.get("suggested_action", ""),
+                "analyst_agrees": analyst_output.get("signal_agreement", None),
+                "analyst_conviction": analyst_output.get("conviction", 0),
+                "rm_decision": risk_output.get("decision", ""),
+                "rm_size_mult": risk_output.get("size_multiplier", 1.0),
+                "rm_portfolio_health": risk_output.get("portfolio_health", ""),
+                "grok_fired": escalated,
+                "grok_action": (strategist_output or {}).get("final_action", "") if escalated else "",
+                "final_action": decision.final_signal,
+                "final_decision": decision.action,
+                "final_size_mult": decision.size_multiplier,
+                "final_conviction": decision.confidence_adj,
+                "latency_ms": round(decision.latency_ms, 1),
+                "tokens_primary": total_tokens_in + total_tokens_out,
+                "tokens_strategist": strategist_tokens_in + strategist_tokens_out,
+                "cost_today_usd": round(self._estimated_cost(), 4),
+                "thesis_in": (decision.thesis_alignment or {}).get("in_thesis") if decision.thesis_alignment else None,
+            })
 
             return decision
 
@@ -563,7 +803,7 @@ class HydraBrain:
         Invariants:
           - Never raises. On unexpected exceptions returns ("", 0, 0, 0)
             so the caller falls back to engine-only reasoning (same
-            pattern as _call_llm's outer try in _run_analyst).
+            pattern as _call_llm's outer try in _run_quant).
           - Primary provider MUST be "anthropic" — caller is responsible
             for checking self._tool_use_enabled before calling.
           - Dispatcher errors are marshaled into tool_result content
@@ -695,21 +935,37 @@ class HydraBrain:
 
     # ─── Agent runners ───
 
-    def _run_analyst(self, state: Dict) -> tuple:
-        """Market Analyst (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
+    def _run_quant(self, state: Dict) -> tuple:
+        """Market Quant (Claude). Returns (parsed_output, in_tokens, out_tokens).
+
+        v2.14 prompt shape emits a `scenario` block, `indicators_used`,
+        `positioning_bias`, `size_multiplier`, `force_hold`. We defensively
+        clamp size_multiplier to [0.0, 1.5] and coerce force_hold to bool so
+        downstream stacking math stays sane even on a malformed response."""
         user_msg = self._build_analyst_prompt(state)
         if self._tool_use_enabled:
             from hydra_backtest_tool import BACKTEST_TOOLS
             text, tok_in, tok_out, _tool_calls = self._call_llm_with_tools(
-                ANALYST_PROMPT + TOOLS_GUIDANCE,
+                QUANT_PROMPT + TOOLS_GUIDANCE,
                 user_msg,
                 BACKTEST_TOOLS,
-                caller="brain:analyst",
-                max_tokens=500,  # headroom over plain 400 for tool_result context
+                caller="brain:quant",
+                max_tokens=700,  # v2.14 prompt larger; headroom for JSON + tool_result
             )
         else:
-            text, tok_in, tok_out = self._call_llm(ANALYST_PROMPT, user_msg, 400)
-        return self._parse_json(text), tok_in, tok_out
+            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 650)
+        parsed = self._parse_json(text)
+        if isinstance(parsed, dict):
+            if "size_multiplier" in parsed:
+                try:
+                    raw = parsed["size_multiplier"]
+                    clamped = max(0.0, min(1.5, float(raw)))
+                except (TypeError, ValueError):
+                    clamped = 1.0
+                parsed["size_multiplier"] = clamped
+            if "force_hold" in parsed:
+                parsed["force_hold"] = bool(parsed.get("force_hold"))
+        return parsed, tok_in, tok_out
 
     def _run_risk_manager(self, state: Dict, analyst: Dict) -> tuple:
         """Risk Manager (Claude). Returns (parsed_output, in_tokens, out_tokens)."""
@@ -819,6 +1075,28 @@ class HydraBrain:
         if not spread:
             return ""
         return f"\nSPREAD: bid={spread['bid']} | ask={spread['ask']} | spread={spread['spread_bps']} bps"
+
+    @staticmethod
+    def _format_quant_indicators(state: Dict) -> str:
+        """v2.14: surface derivatives + CVD signal block to the Quant.
+        Absent → empty string (Quant sees no block and handles null in
+        its own reasoning). Values are signal input only; Hydra never
+        places orders on Kraken Futures."""
+        qi = state.get("quant_indicators")
+        if not qi:
+            return ""
+        def fmt(v, sfx=""):
+            return "null" if v is None else f"{v}{sfx}"
+        return (
+            "\nQUANT INDICATORS (signal input only — SPOT-ONLY execution):"
+            f"\n  funding_bps_8h: {fmt(qi.get('funding_bps_8h'))}"
+            f"\n  oi_delta_1h_pct: {fmt(qi.get('oi_delta_1h_pct'))}"
+            f"\n  oi_price_regime: {fmt(qi.get('oi_price_regime'))}"
+            f"\n  basis_apr_pct: {fmt(qi.get('basis_apr_pct'))}"
+            f"\n  cvd_divergence_sigma: {fmt(qi.get('cvd_divergence_sigma'))}"
+            f"\n  staleness_s: {fmt(qi.get('staleness_s'))} "
+            f"(>300s on 2+ fields → Python R10 rule may force_hold)"
+        )
 
     def _format_triangle_context(self, state: Dict) -> str:
         """Format cross-pair triangle context for prompt inclusion."""
@@ -946,7 +1224,7 @@ RECENT CLOSES: {recent_closes}
 
 POSITION: {pos.get('size', 0):.6f} @ avg {pos.get('avg_entry', 0)} | Unrealized: {pos.get('unrealized_pnl', 0)}
 PORTFOLIO: Balance=${port.get('balance', 0):.2f} | Equity=${port.get('equity', 0):.2f} | P&L={port.get('pnl_pct', 0):.2f}% | Max DD={port.get('max_drawdown_pct', 0):.2f}%
-RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}{self._format_thesis_context(state)}"""
+RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._format_quant_indicators(state)}{self._format_triangle_context(state)}{self._format_portfolio_summary(state)}{self._format_portfolio_guidance(state)}{self._format_thesis_context(state)}"""
 
     def _build_risk_prompt(self, state: Dict, analyst: Dict) -> str:
         sig = state.get("signal", {})
@@ -957,12 +1235,28 @@ RECENT AI DECISIONS: {recent or 'None yet'}{self._format_spread(state)}{self._fo
         volatility = state.get("volatility", {})
         vol = state.get("volume", {})
 
+        # v2.14: surface Quant's structured output so Risk Manager can
+        # stack its multiplier and honor force_hold.
+        scenario = analyst.get("scenario") or {}
+        quant_block = (
+            f"QUANT SCENARIO: p_up={scenario.get('p_up', '?')} | "
+            f"p_flat={scenario.get('p_flat', '?')} | "
+            f"p_down={scenario.get('p_down', '?')} | "
+            f"expected_move_bps_3c={scenario.get('expected_move_bps_3candle', '?')}\n"
+            if scenario else ""
+        )
+        quant_size = analyst.get("size_multiplier", "?")
+        quant_force_hold = analyst.get("force_hold", False)
+        quant_force_reason = analyst.get("force_hold_reason", "")
         return f"""PAIR: {state.get('asset', '?')} | PRICE: {state.get('price', 0)} | REGIME: {state.get('regime', '?')} | TIMEFRAME: {state.get('candle_interval', '?')}m | CANDLE: {state.get('candle_status', 'unknown')}
 ENGINE SIGNAL: {sig.get('action', '?')} @ {sig.get('confidence', 0):.2f}
-ANALYST THESIS: {analyst.get('thesis', 'N/A')}
-ANALYST CONVICTION: {analyst.get('conviction', 0):.2f}
-ANALYST AGREES WITH ENGINE: {analyst.get('signal_agreement', '?')}
-ANALYST CONCERN: {analyst.get('concern', 'None')}
+{quant_block}QUANT THESIS: {analyst.get('thesis', 'N/A')}
+QUANT CONVICTION: {analyst.get('conviction', 0):.2f}
+QUANT AGREES WITH ENGINE: {analyst.get('signal_agreement', '?')}
+QUANT SIZE_MULTIPLIER (you stack yours on this): {quant_size}
+QUANT FORCE_HOLD: {quant_force_hold}{f' — {quant_force_reason}' if quant_force_hold and quant_force_reason else ''}
+QUANT POSITIONING_BIAS: {analyst.get('positioning_bias', 'unknown')}
+QUANT CONCERN: {analyst.get('concern', 'None')}
 
 KEY RISK INDICATORS: RSI={ind.get('rsi', '?')} | ATR={volatility.get('atr_pct', '?')}% | BB_WIDTH={ind.get('bb_width', '?')}
 VOLUME: current={vol.get('current', '?')} | avg_20={vol.get('avg_20', '?')}
@@ -1071,7 +1365,7 @@ Make the final call. Think carefully, then respond with JSON only."""
     def _fallback(self, state: Dict, reason: str = "") -> BrainDecision:
         """Return engine signal unchanged when AI is unavailable."""
         sig = state.get("signal", {})
-        return BrainDecision(
+        decision = BrainDecision(
             action="CONFIRM",
             final_signal=sig.get("action", "HOLD"),
             confidence_adj=sig.get("confidence", 0),
@@ -1081,6 +1375,30 @@ Make the final call. Think carefully, then respond with JSON only."""
             combined_summary=f"ENGINE ONLY: {sig.get('reason', '')}",
             fallback=True,
         )
+        # v2.14: count + log fallbacks so we can see if brain is silently dark
+        with self._lock:
+            self.daily_fallbacks += 1
+        self._log_jsonl({
+            "event": "fallback",
+            "pair": state.get("asset", ""),
+            "tick": state.get("tick", 0),
+            "reason": reason,
+            "engine_action": sig.get("action", "HOLD"),
+            "engine_confidence": sig.get("confidence", 0),
+            "api_available": self.api_available,
+            "retry_at_tick": self.retry_at_tick,
+        })
+        return decision
+
+    def _log_jsonl(self, event: Dict[str, Any]) -> None:
+        """Append a single JSON line to the brain audit log. Best-effort:
+        any IO error is swallowed so logging never crashes trading."""
+        try:
+            event["ts"] = datetime.now(timezone.utc).isoformat()
+            with open(self._jsonl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, default=str) + "\n")
+        except Exception:
+            pass
 
     def _estimated_cost(self) -> float:
         """Estimate daily API cost from token usage (primary + strategist)."""
@@ -1102,6 +1420,9 @@ Make the final call. Think carefully, then respond with JSON only."""
             self._daily_strategist_tokens_out = 0
             self.daily_decisions = 0
             self.daily_overrides = 0
+            self.daily_adjusts = 0
+            self.daily_confirms = 0
+            self.daily_fallbacks = 0
             self.daily_escalations = 0
             self.daily_portfolio_reviews = 0
             self._daily_portfolio_tokens_in = 0
@@ -1144,12 +1465,26 @@ Make the final call. Think carefully, then respond with JSON only."""
 
     def get_stats(self) -> Dict:
         """Return brain statistics for dashboard."""
+        # v2.14: denominator for decision-mix percentages. Live deliberations
+        # only (fallbacks are counted separately so CONFIRM% etc reflect
+        # actual reasoning activity, not engine-only passthroughs).
+        live = max(1, self.daily_decisions)
+        total_calls = self.daily_decisions + self.daily_fallbacks
+        total_calls_safe = max(1, total_calls)
         return {
             "active": self.api_available,
             "provider": self.primary_provider,
             "decisions_today": self.daily_decisions,
+            "fallbacks_today": self.daily_fallbacks,
             "overrides_today": self.daily_overrides,
+            "adjusts_today": self.daily_adjusts,
+            "confirms_today": self.daily_confirms,
             "escalations_today": self.daily_escalations,
+            "confirm_pct": round(100.0 * self.daily_confirms / live, 1),
+            "adjust_pct": round(100.0 * self.daily_adjusts / live, 1),
+            "override_pct": round(100.0 * self.daily_overrides / live, 1),
+            "escalation_pct": round(100.0 * self.daily_escalations / live, 1),
+            "fallback_pct": round(100.0 * self.daily_fallbacks / total_calls_safe, 1),
             "has_strategist": self.has_strategist,
             "cost_today": round(self._estimated_cost(), 4),
             "max_daily_cost": self.max_daily_cost,
