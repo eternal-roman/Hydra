@@ -12,6 +12,7 @@ Usage:
 """
 
 import subprocess
+import dataclasses
 import json
 import time
 import sys
@@ -3057,7 +3058,14 @@ class HydraAgent:
         thesis_attr = getattr(self, "thesis", None)
         if thesis_attr is not None and not thesis_attr.disabled:
             try:
-                state["thesis_context"] = thesis_attr.context_for(pair, state.get("signal"))
+                ctx = thesis_attr.context_for(pair, state.get("signal"))
+                # Serialize dataclass → dict so WS broadcast can json.dumps it.
+                # brain._format_thesis_context accepts either form.
+                state["thesis_context"] = (
+                    dataclasses.asdict(ctx)
+                    if ctx is not None and dataclasses.is_dataclass(ctx)
+                    else ctx
+                )
             except Exception as te:
                 print(f"  [THESIS] context_for error ({type(te).__name__}: {te})")
                 state["thesis_context"] = None
@@ -4702,7 +4710,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.13.6",
+            "version": "2.13.7",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

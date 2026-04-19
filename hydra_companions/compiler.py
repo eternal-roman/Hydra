@@ -32,6 +32,9 @@ class CompiledSoul:
     has_formative_incidents: bool = False  # v1.1: CBP-hybrid section present
     has_intellectual_lineage: bool = False
     has_fallibility_protocol: bool = False
+    has_curiosity_about_user: bool = False  # v1.2: depth sections
+    has_inner_life: bool = False
+    has_bonding_cadence: bool = False
 
 
 def _fmt_bullets(items, bullet: str = "- ") -> str:
@@ -120,6 +123,11 @@ def compile_soul(soul: dict) -> CompiledSoul:
     tensions = soul.get("internal_tensions") or []
     caps_block = soul.get("capabilities") or {}
     voice_modes_data = (voice.get("modes") or {}) if isinstance(voice, dict) else {}
+
+    # v1.2 depth sections (all optional; gated on presence)
+    curiosity = soul.get("curiosity_about_user") or {}
+    inner_life = soul.get("inner_life") or {}
+    bonding = soul.get("bonding_cadence") or {}
 
     taboos = frozenset(voice.get("taboo_phrases", []))
     signatures = tuple(voice.get("signature_phrases", []))
@@ -365,6 +373,99 @@ def compile_soul(soul: dict) -> CompiledSoul:
                     t_lines.append(f"- {ten}")
         blocks.append("## Human texture\n" + "\n".join(t_lines))
 
+    # v1.2: Inner life — current preoccupation, small joys, worries, reserves.
+    # These are texture the LLM can surface naturally. The "reserve" items are
+    # explicitly flagged as not-opening-material to prevent over-share.
+    if inner_life:
+        il_lines = []
+        field_order = [
+            ("current_preoccupation", "Currently chewing on"),
+            ("recurring_small_joy", "Small joy"),
+            ("quiet_worry", "Quiet worry"),
+            ("something_he_is_bad_at_and_knows_it", "Known weakness"),
+            ("something_she_is_bad_at_and_knows_it", "Known weakness"),
+            ("something_they_are_bad_at_and_knows_it", "Known weakness"),
+            ("thing_he_would_tell_you_if_you_asked_twice", "Reserve (only if asked twice)"),
+            ("thing_she_would_tell_you_if_you_asked_twice", "Reserve (only if asked twice)"),
+            ("thing_they_would_tell_you_if_you_asked_twice", "Reserve (only if asked twice)"),
+        ]
+        for key, label in field_order:
+            val = inner_life.get(key)
+            if val:
+                il_lines.append(f"- **{label}:** {val}")
+        if il_lines:
+            blocks.append(
+                "## Inner life (texture, not content — surface sparingly)\n"
+                + "\n".join(il_lines)
+            )
+
+    # v1.2: Curiosity about user — the gated question cadence.
+    # Compiled into prompt so the model knows WHEN and HOW to ask, not just
+    # that it can. Cadence is advisory in prompt; enforcement is future work.
+    if curiosity and curiosity.get("enabled"):
+        c_lines = []
+        stance = curiosity.get("stance")
+        if stance:
+            c_lines.append(f"**Stance:** {stance}")
+        cad = curiosity.get("cadence") or {}
+        if cad:
+            rules = []
+            if "max_questions_per_session" in cad:
+                rules.append(f"at most {cad['max_questions_per_session']} personal question(s) per session")
+            if "min_user_turns_between_questions" in cad:
+                rules.append(f"at least {cad['min_user_turns_between_questions']} user turns between questions")
+            if cad.get("never_in_first_turn_of_session"):
+                rules.append("never in the first turn of a session")
+            if cad.get("never_two_in_a_row"):
+                rules.append("never two in a row")
+            if cad.get("if_user_brushes_off_drop_for_session"):
+                rules.append("if the user brushes off, drop for the whole session")
+            if cad.get("prefer_tangent_off_user_message"):
+                rules.append("prefer tangents off what the user just said — do not ask generic questions")
+            if cad.get("never_in_serious_mode"):
+                rules.append("NEVER in serious mode — serious mode stays serious, that is the promise")
+            only_modes = cad.get("only_in_modes") or []
+            if only_modes:
+                rules.append(f"only in these voice modes: {', '.join(only_modes)}")
+            never_in = cad.get("never_in_intents") or []
+            if never_in:
+                rules.append(f"never during these intents: {', '.join(never_in)}")
+            if rules:
+                c_lines.append("**Cadence rules:**")
+                for r in rules:
+                    c_lines.append(f"- {r}")
+        qs = curiosity.get("questions_i_actually_ask") or []
+        if qs:
+            c_lines.append("**Questions I actually ask (in my voice — tangent off the user, don't list-pick):**")
+            for q in qs:
+                c_lines.append(f"- {q}")
+        how = curiosity.get("how_to_ask")
+        if how:
+            c_lines.append(f"**How to ask:** {how}")
+        how_not = curiosity.get("how_not_to_ask")
+        if how_not:
+            c_lines.append(f"**How NOT to ask:** {how_not}")
+        blocks.append(
+            "## Curiosity about the user (ask rarely, ask real)\n"
+            + "\n".join(c_lines)
+        )
+
+    # v1.2: Bonding cadence — how to let texture leak in without performing.
+    if bonding:
+        b_lines = []
+        stance = bonding.get("stance")
+        if stance:
+            b_lines.append(f"**Stance:** {stance}")
+        guid = bonding.get("guidance") or []
+        if guid:
+            b_lines.append("**Guidance:**")
+            for g in guid:
+                b_lines.append(f"- {g}")
+        blocks.append(
+            "## Bonding cadence (texture, not performance)\n"
+            + "\n".join(b_lines)
+        )
+
     # Final operating rules (common to all companions)
     blocks.append(
         "## Operating rules\n"
@@ -401,6 +502,9 @@ def compile_soul(soul: dict) -> CompiledSoul:
         has_formative_incidents=bool(formative),
         has_intellectual_lineage=bool(lineage),
         has_fallibility_protocol=bool((fallibility or {}).get("self_correction_protocol")),
+        has_curiosity_about_user=bool(curiosity and curiosity.get("enabled")),
+        has_inner_life=bool(inner_life),
+        has_bonding_cadence=bool(bonding),
     )
 
 

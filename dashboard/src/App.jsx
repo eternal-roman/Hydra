@@ -791,7 +791,10 @@ function CompanionDrawer({
                      : "yo what's up"}
           disabled={!connected}
           style={{
-            width: "100%", minHeight: 40, maxHeight: 140, resize: "none",
+            // v2.13.7: bumped minHeight 40→72 and maxHeight 140→260 so
+            // ~4 lines are visible at rest and ~14 lines fit when typing
+            // a longer message without having to scroll a 40px textarea.
+            width: "100%", minHeight: 72, maxHeight: 260, resize: "none",
             background: `${COLORS.bg}cc`, color: COLORS.text,
             border: `1px solid ${theme.primary}55`, borderRadius: 6,
             padding: "8px 10px", fontFamily: mono, fontSize: 13, lineHeight: 1.4,
@@ -4658,7 +4661,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.13.6 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.13.7 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
