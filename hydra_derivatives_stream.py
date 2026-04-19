@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""
+HYDRA Derivatives Stream — Kraken Futures read-only poller via kraken CLI.
+
+════════════════════════════════════════════════════════════════════════
+HARD INVARIANT — SPOT-ONLY EXECUTION
+════════════════════════════════════════════════════════════════════════
+Hydra trades ONLY these Kraken SPOT pairs:
+    SOL/USDC, SOL/BTC, BTC/USDC
+This module reads derivatives data (funding rates, open interest,
+mark prices, quarterly basis) via the kraken CLI's PUBLIC
+`futures tickers` subcommand. No authentication. No order placement.
+Signal input only.
+
+If you ever find yourself adding ANY of the authenticated `futures`
+subcommands (order, edit-order, cancel, positions, leverage, transfer,
+etc.) to this module, STOP. That is a bug, and it violates the
+spot-only invariant documented in CLAUDE.md.
+════════════════════════════════════════════════════════════════════════
+
+Data source (public, no auth):
+  `kraken -o json futures tickers` via WSL Ubuntu, matching the rest
+  of Hydra's Kraken CLI bridge (see KrakenCLI._run in hydra_agent.py).
+
+Fields consumed per ticker:
+  symbol, markPrice, indexPrice, fundingRate,
+  fundingRatePrediction, openInterest
+
+Signals surfaced per spot pair:
+  funding_bps_8h            : current 8h funding rate × 10000
+  funding_predicted_bps     : next 8h prediction
+  oi_delta_1h_pct           : OI change over 1h window
+  oi_delta_24h_pct          : OI change over 24h window
+  oi_price_regime           : trend_confirm_long | trend_confirm_short
+                              | short_squeeze | liquidation_cascade
+                              | balanced | unknown
+  basis_apr_pct             : quarterly futures premium annualized
+
+Spot-pair → derivatives mapping:
+  BTC/USDC → PF_XBTUSD (perp),  PI_XBTUSD_* (quarterly)
+  SOL/USDC → PF_SOLUSD (perp),  PI_SOLUSD_* (quarterly)
+  SOL/BTC  → synthetic from SOL/USD and BTC/USD perps (no direct perp)
+"""
+
+import json
+import subprocess
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, Tuple
+
+# Spot pair → derivatives metadata. Do NOT add order-placement endpoints here.
+SPOT_TO_DERIVATIVES: Dict[str, Dict[str, object]] = {
+    "BTC/USDC": {"perp": "PF_XBTUSD", "quarterly_prefix": "PI_XBTUSD"},
+    "SOL/USDC": {"perp": "PF_SOLUSD", "quarterly_prefix": "PI_SOLUSD"},
+    "SOL/BTC":  {"perp": None, "quarterly_prefix": None, "synthetic": True},
+}
+
+
+@dataclass
+class DerivativesSnapshot:
+    """Per-spot-pair derivatives signal snapshot. All fields optional —
+    None means "data not yet fetched" or "stale". Consumers must handle
+    nulls; the Quant prompt treats null as 'data_stale' which can
+    contribute to R10 force_hold if enough fields are missing."""
+    pair: str
+    perp_symbol: Optional[str] = None
+    funding_bps_8h: Optional[float] = None
+    funding_predicted_bps: Optional[float] = None
+    open_interest: Optional[float] = None
+    oi_delta_1h_pct: Optional[float] = None
+    oi_delta_24h_pct: Optional[float] = None
+    mark_price: Optional[float] = None
+    spot_price: Optional[float] = None
+    basis_apr_pct: Optional[float] = None
+    oi_price_regime: str = "unknown"
+    last_updated_ts: float = 0.0
+    staleness_s: float = 0.0
+    synthetic: bool = False
+    fetch_errors: int = 0
+
+    def freshness_s(self, now: Optional[float] = None) -> float:
+        if self.last_updated_ts == 0:
+            return float("inf")
+        return (now if now is not None else time.time()) - self.last_updated_ts
+
+
+class DerivativesStream:
+    """Polls Kraken Futures public tickers endpoint on a daemon thread.
+
+    SPOT-ONLY INVARIANT: this class has no authenticated methods, no
+    order-placement methods, and should never gain any. It reads and
+    caches public market data.
+    """
+
+    POLL_INTERVAL_S = 30
+    HISTORY_WINDOW_S = 24 * 3600
+    HTTP_TIMEOUT_S = 10
+
+    # OI/price thresholds for regime classification. Tunable but
+    # deliberately conservative — a classifier that fires "squeeze"
+    # on noise produces false signals the Quant must reason around.
+    OI_REGIME_OI_THRESHOLD_PCT = 0.5
+    OI_REGIME_PX_THRESHOLD_PCT = 0.3
+
+    def __init__(self, pairs: List[str]):
+        self.pairs: List[str] = [p for p in pairs if p in SPOT_TO_DERIVATIVES]
+        self._snapshots: Dict[str, DerivativesSnapshot] = {}
+        self._oi_history: Dict[str, Deque[Tuple[float, float]]] = {}
+        self._price_history: Dict[str, Deque[Tuple[float, float]]] = {}
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        for pair in self.pairs:
+            info = SPOT_TO_DERIVATIVES[pair]
+            self._snapshots[pair] = DerivativesSnapshot(
+                pair=pair,
+                perp_symbol=info.get("perp"),  # type: ignore[arg-type]
+                synthetic=bool(info.get("synthetic", False)),
+            )
+
+    # ─── Lifecycle ───────────────────────────────────────────────
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="DerivativesStream"
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    # ─── Public accessor ─────────────────────────────────────────
+
+    def latest(self, pair: str) -> Optional[DerivativesSnapshot]:
+        """Return a snapshot for the spot pair, or None if unknown pair.
+        Staleness is recomputed at read time so consumers always see an
+        accurate 'seconds since last successful fetch'."""
+        with self._lock:
+            snap = self._snapshots.get(pair)
+            if snap is None:
+                return None
+            now = time.time()
+            # Return a fresh copy with updated staleness
+            return DerivativesSnapshot(
+                **{**snap.__dict__, "staleness_s": snap.freshness_s(now)}
+            )
+
+    # ─── Polling thread ──────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll_once()
+            except Exception:
+                # Thread must never die — missing data is better than no data
+                pass
+            self._stop.wait(self.POLL_INTERVAL_S)
+
+    def poll_once(self) -> bool:
+        """Single poll cycle. Returns True if any pair updated."""
+        tickers = self._fetch_tickers()
+        if not tickers:
+            with self._lock:
+                for snap in self._snapshots.values():
+                    snap.fetch_errors += 1
+            return False
+
+        now = time.time()
+        by_symbol: Dict[str, Dict] = {
+            t.get("symbol", ""): t for t in tickers if t.get("symbol")
+        }
+
+        updated = False
+        with self._lock:
+            for pair in self.pairs:
+                snap = self._snapshots[pair]
+                if snap.synthetic:
+                    sol = by_symbol.get("PF_SOLUSD")
+                    btc = by_symbol.get("PF_XBTUSD")
+                    if sol and btc:
+                        self._populate_synthetic(snap, sol, btc, now)
+                        updated = True
+                    else:
+                        snap.fetch_errors += 1
+                    continue
+                tick = by_symbol.get(snap.perp_symbol or "")
+                if not tick:
+                    snap.fetch_errors += 1
+                    continue
+                self._populate_from_ticker(snap, tick, now)
+                q_prefix = SPOT_TO_DERIVATIVES[pair].get("quarterly_prefix")
+                q_symbol = self._find_quarterly(by_symbol, q_prefix)  # type: ignore[arg-type]
+                if q_symbol:
+                    self._compute_basis(snap, tick, by_symbol[q_symbol], q_symbol, now)
+                updated = True
+        return updated
+
+    # ─── CLI bridge (SPOT-ONLY: uses only public `futures tickers`) ──
+
+    def _fetch_tickers(self) -> List[Dict]:
+        """Invoke `kraken -o json futures tickers` via WSL and return
+        the tickers array. Returns [] on any error — caller treats an
+        empty list as 'no update this cycle' (fetch_errors increments,
+        staleness grows). NEVER calls any authenticated subcommand."""
+        cmd_str = "source ~/.cargo/env && kraken -o json futures tickers 2>/dev/null"
+        cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.HTTP_TIMEOUT_S
+            )
+            stdout = result.stdout.strip()
+            if not stdout:
+                return []
+            payload = json.loads(stdout)
+            if not isinstance(payload, dict):
+                return []
+            return payload.get("tickers", []) or []
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            return []
+
+    # ─── Per-pair populate ───────────────────────────────────────
+
+    def _populate_from_ticker(
+        self, snap: DerivativesSnapshot, tick: Dict, now: float
+    ) -> None:
+        mark = _maybe_float(tick.get("markPrice"))
+        idx = _maybe_float(tick.get("indexPrice"))
+        fr = _maybe_float(tick.get("fundingRate"))
+        fr_pred = _maybe_float(tick.get("fundingRatePrediction"))
+        oi = _maybe_float(tick.get("openInterest"))
+
+        if mark is not None:
+            snap.mark_price = mark
+        if idx is not None:
+            snap.spot_price = idx
+        if fr is not None:
+            snap.funding_bps_8h = round(fr * 10000, 2)
+        if fr_pred is not None:
+            snap.funding_predicted_bps = round(fr_pred * 10000, 2)
+        if oi is not None:
+            snap.open_interest = oi
+
+        sym = snap.perp_symbol
+        if not sym:
+            return
+
+        self._oi_history.setdefault(sym, deque())
+        self._price_history.setdefault(sym, deque())
+
+        if snap.open_interest is not None:
+            self._oi_history[sym].append((now, snap.open_interest))
+        if snap.mark_price is not None:
+            self._price_history[sym].append((now, snap.mark_price))
+
+        cutoff = now - self.HISTORY_WINDOW_S
+        _prune_before(self._oi_history[sym], cutoff)
+        _prune_before(self._price_history[sym], cutoff)
+
+        snap.oi_delta_1h_pct = _delta_pct(
+            self._oi_history[sym], now - 3600, snap.open_interest
+        )
+        snap.oi_delta_24h_pct = _delta_pct(
+            self._oi_history[sym], now - 24 * 3600, snap.open_interest
+        )
+        price_delta_1h_pct = _delta_pct(
+            self._price_history[sym], now - 3600, snap.mark_price
+        )
+        snap.oi_price_regime = self._classify_oi_price_regime(
+            snap.oi_delta_1h_pct, price_delta_1h_pct
+        )
+
+        snap.last_updated_ts = now
+        snap.fetch_errors = 0
+
+    def _populate_synthetic(
+        self,
+        snap: DerivativesSnapshot,
+        sol_tick: Dict,
+        btc_tick: Dict,
+        now: float,
+    ) -> None:
+        """SOL/BTC has no direct perp on Kraken Futures. We synthesize
+        a "relative positioning" signal: SOL-USD funding minus BTC-USD
+        funding as a proxy for which side of the SOL/BTC leg is
+        crowded, and the SOL/BTC mark ratio from the two USD perps."""
+        sol_fr = _maybe_float(sol_tick.get("fundingRate"))
+        btc_fr = _maybe_float(btc_tick.get("fundingRate"))
+        if sol_fr is not None and btc_fr is not None:
+            snap.funding_bps_8h = round((sol_fr - btc_fr) * 10000, 2)
+
+        sol_mark = _maybe_float(sol_tick.get("markPrice"))
+        btc_mark = _maybe_float(btc_tick.get("markPrice"))
+        if sol_mark is not None and btc_mark is not None and btc_mark > 0:
+            ratio = sol_mark / btc_mark
+            snap.mark_price = round(ratio, 8)
+            snap.spot_price = snap.mark_price
+
+        # No direct OI for synthetic; leave oi_* as None and regime unknown.
+        snap.oi_price_regime = "balanced"
+        snap.last_updated_ts = now
+        snap.fetch_errors = 0
+
+    # ─── Regime classifier ───────────────────────────────────────
+
+    def _classify_oi_price_regime(
+        self, oi_delta_pct: Optional[float], price_delta_pct: Optional[float]
+    ) -> str:
+        if oi_delta_pct is None or price_delta_pct is None:
+            return "unknown"
+        oi_dir = (
+            1 if oi_delta_pct > self.OI_REGIME_OI_THRESHOLD_PCT
+            else -1 if oi_delta_pct < -self.OI_REGIME_OI_THRESHOLD_PCT
+            else 0
+        )
+        px_dir = (
+            1 if price_delta_pct > self.OI_REGIME_PX_THRESHOLD_PCT
+            else -1 if price_delta_pct < -self.OI_REGIME_PX_THRESHOLD_PCT
+            else 0
+        )
+        if oi_dir == 0 or px_dir == 0:
+            return "balanced"
+        if oi_dir == 1 and px_dir == 1:
+            return "trend_confirm_long"
+        if oi_dir == 1 and px_dir == -1:
+            return "trend_confirm_short"
+        if oi_dir == -1 and px_dir == 1:
+            return "short_squeeze"
+        return "liquidation_cascade"  # oi_dir == -1 and px_dir == -1
+
+    # ─── Basis (quarterly) ───────────────────────────────────────
+
+    def _find_quarterly(
+        self, by_symbol: Dict[str, Dict], prefix: Optional[str]
+    ) -> Optional[str]:
+        """Return earliest-dated quarterly symbol with the given prefix,
+        or None if no quarterly listed."""
+        if not prefix:
+            return None
+        candidates = [s for s in by_symbol if s.startswith(prefix + "_")]
+        if not candidates:
+            return None
+        return sorted(candidates)[0]
+
+    def _compute_basis(
+        self,
+        snap: DerivativesSnapshot,
+        perp_tick: Dict,
+        q_tick: Dict,
+        q_symbol: str,
+        now: float,
+    ) -> None:
+        q_mark = _maybe_float(q_tick.get("markPrice"))
+        perp_mark = _maybe_float(perp_tick.get("markPrice"))
+        if q_mark is None or perp_mark is None or perp_mark == 0:
+            return
+        suffix = q_symbol.rsplit("_", 1)[-1]
+        try:
+            if len(suffix) != 6 or not suffix.isdigit():
+                return
+            yr = 2000 + int(suffix[0:2])
+            mo = int(suffix[2:4])
+            dy = int(suffix[4:6])
+            import datetime
+            expiry = datetime.datetime(
+                yr, mo, dy, tzinfo=datetime.timezone.utc
+            ).timestamp()
+            days = max(1.0, (expiry - now) / 86400)
+            premium = (q_mark - perp_mark) / perp_mark
+            snap.basis_apr_pct = round(premium * (365.0 / days) * 100.0, 2)
+        except (ValueError, IndexError):
+            pass
+
+
+# ─── Helpers (module-private) ───────────────────────────────────
+
+def _maybe_float(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prune_before(history: Deque[Tuple[float, float]], cutoff: float) -> None:
+    while history and history[0][0] < cutoff:
+        history.popleft()
+
+
+def _delta_pct(
+    history: Deque[Tuple[float, float]],
+    target_ts: float,
+    current: Optional[float],
+) -> Optional[float]:
+    """Percent change of `current` vs the sample closest to (but not
+    after) target_ts. Returns None when no suitable baseline exists."""
+    if current is None or not history:
+        return None
+    closest: Optional[Tuple[float, float]] = None
+    for ts, val in history:
+        if ts <= target_ts:
+            closest = (ts, val)
+        else:
+            break
+    if closest is None or closest[1] == 0:
+        return None
+    return round(100.0 * (current - closest[1]) / closest[1], 2)
