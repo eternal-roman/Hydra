@@ -192,10 +192,16 @@ Do NOT output JSON. Output plain text only."""
 # HYDRA BRAIN
 # ═══════════════════════════════════════════════════════════════
 
-# Cost per million tokens: (input, output)
-COST_ANTHROPIC = (3.0, 15.0)
+# Cost per million tokens: (input, output).
+# Verified against https://platform.claude.com/docs/en/about-claude/pricing.
+# IF YOU BUMP self.primary_model BELOW, RE-VERIFY THESE NUMBERS.
+#   Claude Sonnet 4.6 / 4.5 / 4 — $3 in / $15 out per MTok
+#   Claude Opus 4.7 / 4.6 / 4.5 — $5 in / $25 out per MTok (requires code change)
+#   Claude Haiku 4.5           — $1 in / $5 out per MTok
+#   Grok 4 reasoning           — ~$2 in / $6 out (xAI published; recheck at bump time)
+COST_ANTHROPIC = (3.0, 15.0)    # Sonnet 4.6
 COST_OPENAI = (2.0, 8.0)
-COST_XAI = (2.0, 6.0)
+COST_XAI = (2.0, 6.0)            # Grok 4 reasoning
 
 
 class HydraBrain:
@@ -274,6 +280,9 @@ class HydraBrain:
         self._daily_strategist_tokens_out = 0
         self.daily_decisions = 0
         self.daily_overrides = 0
+        self.daily_adjusts = 0          # v2.14: RM returned ADJUST
+        self.daily_confirms = 0         # v2.14: RM returned CONFIRM
+        self.daily_fallbacks = 0        # v2.14: engine-only passthroughs (API down / budget)
         self.daily_escalations = 0
         self.daily_portfolio_reviews = 0
         self._daily_portfolio_tokens_in = 0
@@ -285,6 +294,15 @@ class HydraBrain:
         self.retry_at_tick = 0
         self.last_decision: Optional[BrainDecision] = None
         self._lock = threading.Lock()  # Thread safety for parallel brain calls
+
+        # v2.14: structured JSONL audit log of every deliberate() and fallback.
+        # One line per call. Enables A/B analysis (brain vs engine-only) and
+        # post-hoc decision quality review. Gitignored; rotation handled by
+        # journal_maintenance if it grows. Override path via HYDRA_BRAIN_JSONL.
+        self._jsonl_path = os.environ.get(
+            "HYDRA_BRAIN_JSONL",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_brain.jsonl"),
+        )
 
         # Per-pair strategist cooldown: suppress re-escalation for N deliberate()
         # calls after Grok fires.  With 3 pairs, tick_counter increments ~3×
@@ -444,6 +462,10 @@ class HydraBrain:
                     self.daily_escalations += 1
                 if decision.action == "OVERRIDE":
                     self.daily_overrides += 1
+                elif decision.action == "ADJUST":
+                    self.daily_adjusts += 1
+                elif decision.action == "CONFIRM":
+                    self.daily_confirms += 1
                 self.consecutive_failures = 0
                 self.last_decision = decision
                 self._maybe_fire_cost_alert()
@@ -460,6 +482,34 @@ class HydraBrain:
                 })
                 if len(self.decision_history[asset]) > 20:
                     self.decision_history[asset] = self.decision_history[asset][-20:]
+
+            # v2.14: structured audit log of this deliberate() call.
+            # Emitted outside the lock (IO) to keep critical section short.
+            engine_sig = state.get("signal", {})
+            self._log_jsonl({
+                "event": "deliberate",
+                "pair": asset,
+                "tick": state.get("tick", 0),
+                "engine_action": engine_sig.get("action", "HOLD"),
+                "engine_confidence": engine_sig.get("confidence", 0),
+                "analyst_action": analyst_output.get("suggested_action", ""),
+                "analyst_agrees": analyst_output.get("signal_agreement", None),
+                "analyst_conviction": analyst_output.get("conviction", 0),
+                "rm_decision": risk_output.get("decision", ""),
+                "rm_size_mult": risk_output.get("size_multiplier", 1.0),
+                "rm_portfolio_health": risk_output.get("portfolio_health", ""),
+                "grok_fired": escalated,
+                "grok_action": (strategist_output or {}).get("final_action", "") if escalated else "",
+                "final_action": decision.final_signal,
+                "final_decision": decision.action,
+                "final_size_mult": decision.size_multiplier,
+                "final_conviction": decision.confidence_adj,
+                "latency_ms": round(decision.latency_ms, 1),
+                "tokens_primary": total_tokens_in + total_tokens_out,
+                "tokens_strategist": strategist_tokens_in + strategist_tokens_out,
+                "cost_today_usd": round(self._estimated_cost(), 4),
+                "thesis_in": (decision.thesis_alignment or {}).get("in_thesis") if decision.thesis_alignment else None,
+            })
 
             return decision
 
@@ -1071,7 +1121,7 @@ Make the final call. Think carefully, then respond with JSON only."""
     def _fallback(self, state: Dict, reason: str = "") -> BrainDecision:
         """Return engine signal unchanged when AI is unavailable."""
         sig = state.get("signal", {})
-        return BrainDecision(
+        decision = BrainDecision(
             action="CONFIRM",
             final_signal=sig.get("action", "HOLD"),
             confidence_adj=sig.get("confidence", 0),
@@ -1081,6 +1131,30 @@ Make the final call. Think carefully, then respond with JSON only."""
             combined_summary=f"ENGINE ONLY: {sig.get('reason', '')}",
             fallback=True,
         )
+        # v2.14: count + log fallbacks so we can see if brain is silently dark
+        with self._lock:
+            self.daily_fallbacks += 1
+        self._log_jsonl({
+            "event": "fallback",
+            "pair": state.get("asset", ""),
+            "tick": state.get("tick", 0),
+            "reason": reason,
+            "engine_action": sig.get("action", "HOLD"),
+            "engine_confidence": sig.get("confidence", 0),
+            "api_available": self.api_available,
+            "retry_at_tick": self.retry_at_tick,
+        })
+        return decision
+
+    def _log_jsonl(self, event: Dict[str, Any]) -> None:
+        """Append a single JSON line to the brain audit log. Best-effort:
+        any IO error is swallowed so logging never crashes trading."""
+        try:
+            event["ts"] = datetime.now(timezone.utc).isoformat()
+            with open(self._jsonl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, default=str) + "\n")
+        except Exception:
+            pass
 
     def _estimated_cost(self) -> float:
         """Estimate daily API cost from token usage (primary + strategist)."""
@@ -1102,6 +1176,9 @@ Make the final call. Think carefully, then respond with JSON only."""
             self._daily_strategist_tokens_out = 0
             self.daily_decisions = 0
             self.daily_overrides = 0
+            self.daily_adjusts = 0
+            self.daily_confirms = 0
+            self.daily_fallbacks = 0
             self.daily_escalations = 0
             self.daily_portfolio_reviews = 0
             self._daily_portfolio_tokens_in = 0
@@ -1144,12 +1221,26 @@ Make the final call. Think carefully, then respond with JSON only."""
 
     def get_stats(self) -> Dict:
         """Return brain statistics for dashboard."""
+        # v2.14: denominator for decision-mix percentages. Live deliberations
+        # only (fallbacks are counted separately so CONFIRM% etc reflect
+        # actual reasoning activity, not engine-only passthroughs).
+        live = max(1, self.daily_decisions)
+        total_calls = self.daily_decisions + self.daily_fallbacks
+        total_calls_safe = max(1, total_calls)
         return {
             "active": self.api_available,
             "provider": self.primary_provider,
             "decisions_today": self.daily_decisions,
+            "fallbacks_today": self.daily_fallbacks,
             "overrides_today": self.daily_overrides,
+            "adjusts_today": self.daily_adjusts,
+            "confirms_today": self.daily_confirms,
             "escalations_today": self.daily_escalations,
+            "confirm_pct": round(100.0 * self.daily_confirms / live, 1),
+            "adjust_pct": round(100.0 * self.daily_adjusts / live, 1),
+            "override_pct": round(100.0 * self.daily_overrides / live, 1),
+            "escalation_pct": round(100.0 * self.daily_escalations / live, 1),
+            "fallback_pct": round(100.0 * self.daily_fallbacks / total_calls_safe, 1),
             "has_strategist": self.has_strategist,
             "cost_today": round(self._estimated_cost(), 4),
             "max_daily_cost": self.max_daily_cost,
