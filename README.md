@@ -322,7 +322,7 @@ hydra/
 ├── README.md               # This file
 ├── CLAUDE.md               # Agent instructions for Claude Code
 ├── CHANGELOG.md            # Version history
-├── AUDIT.md                # Technical audit and test results
+├── AUDIT_YYYY-MM-DD.md     # Latest post-release audit report (dated)
 ├── SKILL.md                # Agent skill definition (Claude Code / MCP compatible)
 ├── .env                    # API keys: Kraken, Anthropic, xAI (not committed)
 ├── hydra_engine.py         # Core: indicators, regime detection, signals, sizing, CVD (Chaikin proxy)
@@ -447,10 +447,9 @@ python tests/live_harness/harness.py --mode live --i-understand-this-places-real
 [tests/live_harness/README.md](tests/live_harness/README.md) for the scenario
 catalog, findings tracker (HF-### IDs), and authoring guide.
 
-See **[AUDIT.md](AUDIT.md)** for the v1.0-era technical audit report
-(indicators, regime detection, signal generation, position sizing,
-order execution, dashboard components, infrastructure) and
-**[CHANGELOG.md](CHANGELOG.md)** for version-by-version history.
+Post-release audit reports are committed at root as `AUDIT_YYYY-MM-DD.md`
+(only the most recent is kept). See **[CHANGELOG.md](CHANGELOG.md)** for
+version-by-version history.
 
 ## Troubleshooting
 
