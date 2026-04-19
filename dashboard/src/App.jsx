@@ -3464,6 +3464,20 @@ export default function App() {
     if (data.order_journal) setOrderJournal(data.order_journal);
   }, []);
 
+  // Declared before `connect` so `connect`'s deps array can reference it
+  // without hitting the const TDZ (ReferenceError blanked the dashboard
+  // in v2.15.0 until this was hoisted).
+  const refreshWsToken = useCallback(async () => {
+    try {
+      const r = await fetch(WS_TOKEN_URL, { cache: "no-store" });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const j = await r.json();
+      wsTokenRef.current = j.token || "";
+    } catch (e) {
+      console.error("[HYDRA] WS token fetch failed:", e);
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
@@ -3769,23 +3783,6 @@ export default function App() {
 
   // Keep `connectRef` pointing at the freshest connect closure
   useEffect(() => { connectRef.current = connect; }, [connect]);
-
-  // Fetch the per-session WS auth token and cache in a ref. Eagerly
-  // called on mount and on every WS open so sendMessage can stay
-  // synchronous for the many callers that still check its boolean
-  // return value. If the token fetch fails, sends still go through
-  // without an auth field and the server rejects with auth_required —
-  // user-visible but non-destructive.
-  const refreshWsToken = useCallback(async () => {
-    try {
-      const r = await fetch(WS_TOKEN_URL, { cache: "no-store" });
-      if (!r.ok) throw new Error(`status ${r.status}`);
-      const j = await r.json();
-      wsTokenRef.current = j.token || "";
-    } catch (e) {
-      console.error("[HYDRA] WS token fetch failed:", e);
-    }
-  }, []);
 
   useEffect(() => { refreshWsToken(); }, [refreshWsToken]);
 
@@ -4918,7 +4915,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.15.0 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.15.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
