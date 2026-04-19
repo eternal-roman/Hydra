@@ -93,6 +93,9 @@ jobs:
       - name: Run portfolio covariance tests
         run: python tests/test_covariance.py
 
+      - name: Run companion mode-label scrub tests (prevent internal labels leaking to users)
+        run: python tests/test_companion_mode_scrub.py
+
       - name: Run backtest engine tests
         run: python -m pytest tests/test_backtest_engine.py -v
 
