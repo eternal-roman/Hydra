@@ -14,6 +14,8 @@ You are running a release. Steps:
 5. Merge PR
 6. Create signed git tag with changelog
 7. Verify tag with `git tag -v`
+8. **Publish GitHub Release** (`gh release create`) and verify it becomes Latest
+9. Run `scripts/check_release_alignment.py --check-tag --check-gh-release` — exit 0 required
 
 Ask user for version bump type (patch/minor/major) before starting.
 
@@ -38,13 +40,19 @@ run `ruff check .` as a courtesy.
 
 ```bash
 git grep -nE 'v?[0-9]+\.[0-9]+\.[0-9]+'
+python scripts/check_release_alignment.py
 ```
 
-List every match. If any path is NOT in the canonical 7-site list below,
-STOP and ask the user whether the new site should be added to
-§Version Management in CLAUDE.md as a permanent lockstep entry.
+`check_release_alignment.py` is the authoritative enumerator — it prints
+every canonical site with its current version. If it fails, fix
+alignment before proceeding. If `git grep` surfaces a semver path that
+the script does NOT cover, STOP and ask the user whether the new site
+should be added to §Version Management in CLAUDE.md as a permanent
+lockstep entry (and added to the script).
 Past failure: v2.6.0 had to ship a follow-up correction commit because
-this grep was skipped.
+this grep was skipped; v2.11.0→v2.14.2 shipped without `gh release
+create`, leaving v2.10.11 as GitHub's "Latest" — detected by
+`--check-gh-release`.
 
 Canonical sites:
 
@@ -78,6 +86,34 @@ tag message body. Push with `git push origin vX.Y.Z`.
 paste the output. It must show `Good signature`. If GPG is not configured,
 fall back to annotated tag (`git tag -a vX.Y.Z`) and document the gap.
 Do not declare the release "verified" without showing the command output.
+
+### Step 8 expansion (publish GitHub Release)
+
+A pushed signed tag alone does NOT produce a GitHub Release — the
+`/tag/vX.Y.Z` URL renders because the tag exists, but the Releases page
+still shows the last *published* release as "Latest". Publish explicitly:
+
+```bash
+gh release create vX.Y.Z --verify-tag --notes-from-tag --title "vX.Y.Z — <summary>"
+```
+
+Then verify with `gh release view vX.Y.Z` (must not error) and
+`gh release list --limit 1` (must show `vX.Y.Z` with the `Latest` badge).
+
+Past failure: v2.11.0 → v2.14.2 all shipped without this step, so
+GitHub's Latest stayed pinned at v2.10.11 for weeks.
+
+### Step 9 expansion (alignment gate)
+
+Final gate — must exit 0:
+
+```bash
+python scripts/check_release_alignment.py --check-tag --check-gh-release
+```
+
+This re-enumerates all 7 code sites + the tag at HEAD + the latest
+published GitHub Release, and fails loudly on any drift. Run it as the
+last action of the release; if it fails, fix before declaring done.
 
 ## Pre-flight ask
 
