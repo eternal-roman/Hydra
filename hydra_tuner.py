@@ -197,30 +197,76 @@ class ParameterTracker:
         return lines
 
     def _load_or_default(self) -> Dict[str, float]:
-        """Load saved params from disk, or return defaults."""
+        """Load saved params from disk, or return defaults.
+
+        v2.15.0 hardening: on any parse failure (corrupt JSON,
+        unreadable file), move the bad file aside as `<path>.rejected.<ts>`
+        so the operator can inspect it, then fall back to defaults. A
+        summary line is printed on every successful load so silent
+        drift ('why is my tuner ignoring my saved file?') is visible.
+        """
+        if not os.path.exists(self.save_path):
+            return dict(self._defaults)
         try:
-            if os.path.exists(self.save_path):
-                with open(self.save_path, "r") as f:
-                    data = json.load(f)
-                params = dict(self._defaults)
-                saved = data.get("params", {})
-                for key in DEFAULT_PARAMS:
-                    if key in saved:
-                        try:
-                            val = float(saved[key])
-                        except (TypeError, ValueError):
-                            continue
-                        # Reject non-finite values before clamping — max/min
-                        # propagate NaN silently and would poison the tuner.
-                        if not math.isfinite(val):
-                            continue
-                        lo, hi = PARAM_BOUNDS[key]
-                        params[key] = max(lo, min(hi, val))
-                self.update_count = data.get("update_count", 0)
-                return params
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            pass
-        return dict(self._defaults)
+            with open(self.save_path, "r") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            self._quarantine_bad_file(reason=f"{type(e).__name__}: {e}")
+            return dict(self._defaults)
+
+        if not isinstance(data, dict):
+            self._quarantine_bad_file(reason="top-level not an object")
+            return dict(self._defaults)
+
+        params = dict(self._defaults)
+        saved = data.get("params") or {}
+        if not isinstance(saved, dict):
+            self._quarantine_bad_file(reason="params field not an object")
+            return dict(self._defaults)
+
+        clamped = 0
+        loaded = 0
+        for key in DEFAULT_PARAMS:
+            if key not in saved:
+                continue
+            try:
+                val = float(saved[key])
+            except (TypeError, ValueError):
+                clamped += 1
+                continue
+            if not math.isfinite(val):
+                clamped += 1
+                continue
+            lo, hi = PARAM_BOUNDS[key]
+            bounded = max(lo, min(hi, val))
+            if bounded != val:
+                clamped += 1
+            params[key] = bounded
+            loaded += 1
+        try:
+            self.update_count = int(data.get("update_count", 0) or 0)
+        except (TypeError, ValueError):
+            self.update_count = 0
+        print(
+            f"  [TUNER] {self.pair}: loaded {loaded}/{len(DEFAULT_PARAMS)} "
+            f"params ({clamped} clamped/rejected) from {self.save_path}"
+        )
+        return params
+
+    def _quarantine_bad_file(self, reason: str) -> None:
+        ts = int(time.time())
+        bad = f"{self.save_path}.rejected.{ts}"
+        try:
+            os.replace(self.save_path, bad)
+            print(
+                f"  [TUNER] {self.pair}: rejected params file "
+                f"({reason}); quarantined to {bad}; using defaults"
+            )
+        except OSError as e:
+            print(
+                f"  [TUNER] {self.pair}: rejected params file ({reason}); "
+                f"quarantine failed ({type(e).__name__}: {e}); using defaults"
+            )
 
     def _save(self):
         """Persist current params to disk."""

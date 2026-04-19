@@ -430,7 +430,10 @@ class TestBroadcasterRefactor(unittest.TestCase):
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(self.bc._dispatch_inbound(
-                json.dumps({"type": "ping", "payload": "hello"}), ws,
+                json.dumps({
+                    "type": "ping", "payload": "hello",
+                    "auth": self.bc.auth_token,
+                }), ws,
             ))
         finally:
             loop.close()
@@ -482,13 +485,56 @@ class TestBroadcasterRefactor(unittest.TestCase):
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(self.bc._dispatch_inbound(
-                json.dumps({"type": "do"}), ws,
+                json.dumps({"type": "do", "auth": self.bc.auth_token}), ws,
             ))
         finally:
             loop.close()
         reply = json.loads(ws.sent[0])
         self.assertFalse(reply["success"])
         self.assertIn("RuntimeError", reply["error"])
+
+    def test_missing_auth_rejected(self):
+        self.bc.register_handler("ping", lambda _p: {"pong": True})
+        class _FakeWS:
+            def __init__(self): self.sent = []
+            async def send(self, msg): self.sent.append(msg)
+        import asyncio
+        ws = _FakeWS()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self.bc._dispatch_inbound(
+                json.dumps({"type": "ping"}), ws,  # no auth
+            ))
+        finally:
+            loop.close()
+        self.assertEqual(len(ws.sent), 1)
+        reply = json.loads(ws.sent[0])
+        self.assertFalse(reply["success"])
+        self.assertEqual(reply["error"], "auth_required")
+
+    def test_wrong_auth_rejected(self):
+        self.bc.register_handler("ping", lambda _p: {"pong": True})
+        class _FakeWS:
+            def __init__(self): self.sent = []
+            async def send(self, msg): self.sent.append(msg)
+        import asyncio
+        ws = _FakeWS()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self.bc._dispatch_inbound(
+                json.dumps({"type": "ping", "auth": "wrong"}), ws,
+            ))
+        finally:
+            loop.close()
+        reply = json.loads(ws.sent[0])
+        self.assertEqual(reply["error"], "auth_required")
+
+    def test_origin_check(self):
+        self.assertTrue(self.bc._origin_allowed(""))
+        self.assertTrue(self.bc._origin_allowed("http://localhost:5173"))
+        self.assertTrue(self.bc._origin_allowed("http://127.0.0.1:5173"))
+        self.assertFalse(self.bc._origin_allowed("http://evil.com"))
+        self.assertFalse(self.bc._origin_allowed("https://example.com"))
 
     def test_broadcast_message_is_noop_without_loop(self):
         # No asyncio loop started → broadcast_message silently skips

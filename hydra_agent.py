@@ -19,10 +19,13 @@ import sys
 import os
 import argparse
 import queue
+import secrets
+import shlex
 import signal as sig
 import asyncio
 import threading
 import traceback
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
@@ -137,8 +140,16 @@ class KrakenCLI:
 
     @staticmethod
     def _run(args: list, timeout: int = 20) -> dict:
-        """Execute a kraken CLI command via WSL and return parsed JSON."""
-        cmd_str = f"source ~/.cargo/env && kraken {' '.join(args)} -o json 2>/dev/null"
+        """Execute a kraken CLI command via WSL and return parsed JSON.
+
+        Every arg is passed through `shlex.quote` before being joined
+        into the bash -c string — internal callers use typed numerics
+        and known-good pair names today, but the companion/dashboard
+        surface is growing and a single unescaped caller would grant
+        RCE in the WSL environment. v2.15.0 hardens the boundary.
+        """
+        quoted = " ".join(shlex.quote(str(a)) for a in args)
+        cmd_str = f"source ~/.cargo/env && kraken {quoted} -o json 2>/dev/null"
         cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
         try:
             result = subprocess.run(
@@ -462,13 +473,13 @@ class KrakenCLI:
     # ─── Paper Trading ───
 
     @staticmethod
-    def paper_buy(pair: str, volume: float, order_type: str = "market") -> dict:
+    def paper_buy(pair: str, volume: float, order_type: str = "limit") -> dict:
         """Paper trade buy — no API keys needed."""
         p = KrakenCLI._resolve_pair(pair)
         return KrakenCLI._run(["paper", "buy", p, "--type", order_type, "--volume", f"{volume:.8f}"])
 
     @staticmethod
-    def paper_sell(pair: str, volume: float, order_type: str = "market") -> dict:
+    def paper_sell(pair: str, volume: float, order_type: str = "limit") -> dict:
         """Paper trade sell — no API keys needed."""
         p = KrakenCLI._resolve_pair(pair)
         return KrakenCLI._run(["paper", "sell", p, "--type", order_type, "--volume", f"{volume:.8f}"])
@@ -513,6 +524,21 @@ class DashboardBroadcaster:
     BacktestWorkerPool).
     """
 
+    # Origins allowed to initiate browser-side WS connections. Non-browser
+    # clients (tests, CLI tools) send no Origin header and are permitted.
+    ALLOWED_ORIGIN_PREFIXES = (
+        "http://localhost:", "http://127.0.0.1:",
+        "https://localhost:", "https://127.0.0.1:",
+    )
+
+    # Token file paths — written at startup so the dashboard (served by
+    # Vite at dashboard/public/*) can fetch it via HTTP, and tests/CLI
+    # tools can read it directly from the Hydra root.
+    TOKEN_FILES = (
+        Path("hydra_ws_token.json"),
+        Path("dashboard/public/hydra_ws_token.json"),
+    )
+
     def __init__(self, host: str = "127.0.0.1", port: int = 8765,
                  compat_mode: bool = True):
         self.host = host
@@ -523,6 +549,26 @@ class DashboardBroadcaster:
         self._thread = None
         self._handlers: Dict[str, Any] = {}
         self.compat_mode = compat_mode
+        # Freshly generated per-process token. Inbound command messages
+        # must include this exact value in their `auth` field — defends
+        # the dispatch channel against dashboard-XSS-chain attacks even
+        # though the socket is bound to 127.0.0.1.
+        self.auth_token = secrets.token_hex(32)
+        self._write_token_files()
+
+    def _write_token_files(self) -> None:
+        payload = json.dumps({"token": self.auth_token})
+        for path in self.TOKEN_FILES:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload, encoding="utf-8")
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    # Windows semantics differ; best-effort only.
+                    pass
+            except OSError as e:
+                print(f"  [WS] Failed to write token file {path}: {e}")
 
     def start(self):
         """Start WebSocket server in a background thread."""
@@ -544,7 +590,34 @@ class DashboardBroadcaster:
             print("  [WS] websockets package not installed — dashboard feed disabled")
             print("  [WS] Install with: pip install websockets")
 
+    def _origin_allowed(self, origin: str) -> bool:
+        if not origin:
+            return True  # non-browser client (tests, CLI)
+        return any(origin.startswith(p) for p in self.ALLOWED_ORIGIN_PREFIXES)
+
+    def _request_origin(self, websocket) -> str:
+        # Version-compat shim: `websockets` 10.x exposes `request_headers`,
+        # 11.x+ exposes `request.headers`. Non-Mapping types also exist.
+        headers = getattr(websocket, "request_headers", None)
+        if headers is None:
+            req = getattr(websocket, "request", None)
+            headers = getattr(req, "headers", None) if req else None
+        if headers is None:
+            return ""
+        try:
+            return headers.get("Origin", "") or headers.get("origin", "")
+        except Exception:
+            return ""
+
     async def _handler(self, websocket):
+        origin = self._request_origin(websocket)
+        if not self._origin_allowed(origin):
+            print(f"  [WS] Rejected connection from origin: {origin!r}")
+            try:
+                await websocket.close(code=1008, reason="origin not allowed")
+            except Exception:
+                pass
+            return
         self.clients.add(websocket)
         print(f"  [WS] Dashboard client connected ({len(self.clients)} total)")
         try:
@@ -579,7 +652,24 @@ class DashboardBroadcaster:
         handler = self._handlers.get(msg_type) if msg_type else None
         if handler is None:
             return
-        payload = {k: v for k, v in msg.items() if k != "type"}
+        # Constant-time comparison against the per-process token. Reject
+        # any inbound dispatch without it — includes the `auth` field for
+        # both read and mutating handlers so dashboard XSS can't silently
+        # probe handler names either.
+        provided = msg.get("auth", "")
+        if not isinstance(provided, str) or not secrets.compare_digest(
+            provided, self.auth_token,
+        ):
+            try:
+                await websocket.send(json.dumps({
+                    "type": f"{msg_type}_ack",
+                    "success": False,
+                    "error": "auth_required",
+                }))
+            except Exception:
+                pass
+            return
+        payload = {k: v for k, v in msg.items() if k not in ("type", "auth")}
         try:
             reply = handler(payload)
         except Exception as e:
@@ -3553,8 +3643,10 @@ class HydraAgent:
             "intent": {
                 "amount": trade["amount"],
                 "limit_price": trade.get("price"),
-                "post_only": not self.paper,
-                "order_type": "market" if self.paper else "limit",
+                # v2.15.0: paper mode now also records limit+post-only so
+                # harness drift tests can enforce post-only across modes.
+                "post_only": True,
+                "order_type": "limit",
                 "paper": self.paper,
             },
             "decision": {
@@ -3776,11 +3868,11 @@ class HydraAgent:
         entry = self._build_journal_entry(pair, trade, state)
 
         time.sleep(2)
-        print(f"  [PAPER] Placing {action_upper} {amount:.8f} {pair} (paper market)...")
+        print(f"  [PAPER] Placing {action_upper} {amount:.8f} {pair} (paper limit)...")
         if action == "buy":
-            result = KrakenCLI.paper_buy(pair, amount)
+            result = KrakenCLI.paper_buy(pair, amount, order_type="limit")
         else:
-            result = KrakenCLI.paper_sell(pair, amount)
+            result = KrakenCLI.paper_sell(pair, amount, order_type="limit")
         if "error" in result:
             print(f"  [PAPER] FAILED: {result['error']}")
             self._finalize_failed_entry(
@@ -4902,7 +4994,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.14.2",
+            "version": "2.15.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
