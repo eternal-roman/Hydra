@@ -49,20 +49,20 @@
   },
 
   "intents": {
-    "greeting": { "depth": "shallow", "tools": false, "default_max_tokens": 150 },
-    "small_talk": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
-    "ack_confirmation": { "depth": "shallow", "tools": false, "default_max_tokens": 80 },
+    "greeting": { "depth": "shallow", "tools": false, "default_max_tokens": 250, "note": "v1.2: bumped 150→250 to accommodate mentor-default Apex + depth sections (a greeting may include a small aside)" },
+    "small_talk": { "depth": "shallow", "tools": false, "default_max_tokens": 400, "note": "v1.2: bumped 200→400 so bonding/curiosity can breathe without mid-sentence cutoffs" },
+    "ack_confirmation": { "depth": "shallow", "tools": false, "default_max_tokens": 180, "note": "v1.2: bumped 80→180. 80 truncated any Apex ack that wasn't pure desk_clipped" },
     "market_state_query": { "depth": "medium", "tools": true, "default_max_tokens": 400 },
     "teaching_explanation": { "depth": "deep", "tools": true, "default_max_tokens": 800 },
     "trade_proposal": { "depth": "deep", "tools": true, "default_max_tokens": 700 },
     "ladder_proposal": { "depth": "deep", "tools": true, "default_max_tokens": 900 },
-    "post_trade_reaction": { "depth": "shallow", "tools": false, "default_max_tokens": 150 },
-    "banter_humor": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
-    "adherence_nudge": { "depth": "shallow", "tools": false, "default_max_tokens": 200 },
+    "post_trade_reaction": { "depth": "shallow", "tools": false, "default_max_tokens": 300, "note": "v1.2: bumped 150→300 so mentor-mode post-trade debriefs finish a thought" },
+    "banter_humor": { "depth": "shallow", "tools": false, "default_max_tokens": 350, "note": "v1.2: bumped 200→350 so Broski can land a joke and a question in one turn without cutoff" },
+    "adherence_nudge": { "depth": "shallow", "tools": false, "default_max_tokens": 350, "note": "v1.2: bumped 200→350 for Athena/Apex mentor-mode nudges with reasoning" },
     "idle_proactive_nudge": { "depth": "shallow", "tools": true, "default_max_tokens": 250 },
     "chart_analysis": { "depth": "medium", "tools": true, "default_max_tokens": 500, "note": "v1.1 — summary-only chart reads; tools get_chart_snapshot + get_chart_summary (no raw OHLCV)" },
     "council_multi_agent": { "depth": "deep", "tools": true, "default_max_tokens": 1200 },
-    "unknown": { "depth": "medium", "tools": false, "default_max_tokens": 300, "note": "fallback when classifier returns low confidence" }
+    "unknown": { "depth": "medium", "tools": false, "default_max_tokens": 500, "note": "v1.2: bumped 300→500 — classifier-fallback intent must not be the thing cutting off long replies" }
   },
 
   "routing": {

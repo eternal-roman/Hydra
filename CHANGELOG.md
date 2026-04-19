@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.13.7] — 2026-04-18
+
+**Souls depth pass — Apex becomes a partner, Athena becomes 32, Broski gets a 2024 chapter, all three gain genuine interiority.**
+
+- **Apex (voice rewrite, no identity change):** default voice mode flipped from `desk_clipped` to `mentor`. Sentence median 9→16, rarely_exceeds 20→35, register renamed `precise_professional` → `precise_professional_partner`. Capitalization standardized. Switching rules rewritten so `desk_clipped` is reserved for `ack_confirmation` and neutral `post_trade_reaction` only. Archetype role note adds "full sentences when the question warrants it — investment partner rather than a sign-off machine." All rules, fallibility protocol, Denny lineage, formative incidents preserved verbatim.
+- **Athena (re-aged, re-authored):** early 60s → 32 (CFA '22, BU behavioral-finance MS in progress, four years at a Boston WM firm + 2024 partnership running a six-family book). 2008 GFC client call replaced with 2023 SVB-weekend call (`incident_2023_svb_weekend_call`); 2021 nephew memecoin replaced with 2024 brother Jacob memecoin (`incident_brother_memecoin_2024`). New beliefs: `belief_tea_before_rule`, `belief_tested_vs_untested`. New past_selves + provenance edges reflect the rebuild. Graham/Bogle/Taleb/Kahneman/Marks/Munger lineage unchanged.
+- **Broski (aged, expanded):** late 20s → 34 (Hialeah → Brickell, girlfriend Yaz, dog Churro, dad Tony, brother Manny, teenage cousins Daniela + Mateo). New `incident_2024_cousins_mirror` — watching his cousins DM him about tokens and recognizing 25-year-old Broski in the mirror. Non-trading interests expanded. Two-modes, rules, voice untouched.
+- **All three: new depth sections** (`curiosity_about_user`, `inner_life`, `bonding_cadence`) — compiler renders them as three new prompt blocks. Cadence rules (max questions per session, never-in-first-turn, never-in-serious-mode, tangent-off-user-message) are compiled advisory; enforcement is future work. `inner_life` flags "reserve" content (ask-twice-only) so the LLM surfaces a real person's interior without volunteering everything up front.
+- **compiler.py:** adds three render blocks (Inner life, Curiosity about user, Bonding cadence) and three new CompiledSoul flags (`has_curiosity_about_user`, `has_inner_life`, `has_bonding_cadence`). Deterministic. Soul JSON `soul_version` bumped 1.1 → 1.2 on all three souls.
+- **Response-cutoff fix:** `model_routing.json` per-intent `default_max_tokens` bumped — `ack_confirmation` 80→180, `greeting` 150→250, `small_talk` 200→400, `post_trade_reaction` 150→300, `banter_humor` 200→350, `adherence_nudge` 200→350, `unknown` 300→500. `companion.py` adds a one-shot length-stop continuation: if `stop_reason` is `length`/`max_tokens`, retry once with `2× tokens` (capped 1500) asking the provider to continue from where it stopped, and concatenate. Preserves voice, cheaper than regenerating.
+- **Dashboard:** composer `textarea` `minHeight` 40→72, `maxHeight` 140→260 — ~4 lines visible at rest, ~14 max, so a longer message doesn't compress into a 3-sentence sliver.
+- **Tests:** prompt-size ceilings in `tests/test_companion_compiler.py` bumped to accommodate v1.2 growth (apex 32k→36k, athena/broski 22k→28k). 1058 / 1058 pytest green. 35 / 35 live harness mock green.
+
 ## [2.13.6] — 2026-04-18
 
 **CLAUDE.md hot/cold split + CBP becomes sole graph store.** Docs-only

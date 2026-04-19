@@ -42,7 +42,7 @@ regression bug, not a style issue.
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
 - **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.13.6
+- **Version pin:** v2.13.7
 
 ## Defaults (inherited)
 

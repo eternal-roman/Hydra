@@ -186,6 +186,31 @@ class Companion:
                     break
                 current = fb
 
+        # v1.2: length-stop continuation. If the provider cut off mid-response
+        # because max_tokens was hit, retry once with 2× the budget (capped
+        # at 1500). Asks the provider to continue from where it stopped
+        # rather than regenerating — cheaper and preserves voice.
+        if (not resp.error) and resp.text and self._is_length_stop(resp):
+            bumped = min(1500, max(decision.max_tokens * 2, decision.max_tokens + 400))
+            continuation_messages = list(messages) + [
+                {"role": "assistant", "content": resp.text},
+                {"role": "user", "content": "continue from where you stopped — same voice, same mode, no recap"},
+            ]
+            resp_cont = self.provider.call(
+                provider=decision.provider, model_id=decision.model_id,
+                system=system, messages=continuation_messages,
+                max_tokens=bumped, temperature=decision.temperature,
+            )
+            if (not resp_cont.error) and resp_cont.text:
+                resp = ProviderResponse(
+                    text=resp.text + resp_cont.text,
+                    tokens_in=resp.tokens_in + resp_cont.tokens_in,
+                    tokens_out=resp.tokens_out + resp_cont.tokens_out,
+                    cost_usd=resp.cost_usd + resp_cont.cost_usd,
+                    model_id=resp.model_id, provider=resp.provider,
+                    stop_reason=resp_cont.stop_reason or resp.stop_reason,
+                )
+
         self._log_routing(intent_result, decision, resp)
         self._log_cost(resp)
 
@@ -210,6 +235,17 @@ class Companion:
             tokens_out=resp.tokens_out,
             cost_usd=resp.cost_usd,
         )
+
+    @staticmethod
+    def _is_length_stop(resp: ProviderResponse) -> bool:
+        """True when the provider cut off due to the max_tokens cap.
+
+        Anthropic: stop_reason == 'max_tokens'. xAI (OpenAI-compatible):
+        finish_reason == 'length'. Accept both so callers can treat a
+        hard-cut response as a signal to request a continuation.
+        """
+        sr = (resp.stop_reason or "").lower()
+        return sr in ("length", "max_tokens")
 
     # ----- logging -----
 

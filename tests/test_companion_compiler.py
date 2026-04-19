@@ -16,12 +16,13 @@ def test_all_three_souls_compile():
 
 def test_compiled_prompt_non_empty_and_bounded():
     souls = load_all_souls()
-    # v1.1: Apex gained deep content (formative incidents, intellectual
-    # lineage, fallibility protocol, voice modes, human texture) and grew
-    # substantially. Athena + Broski also gained the hybrid sections but
-    # with re-shaped existing content. Per-soul ceilings reflect intended
-    # depth; the hard ceiling prevents runaway growth without review.
-    ceilings = {"apex": 32_000, "athena": 22_000, "broski": 22_000}
+    # v1.2: depth sections (curiosity_about_user, inner_life, bonding_cadence)
+    # + Athena's re-authored backstory and Broski's added 2024 chapter push
+    # prompt sizes up. Apex is the largest because mentor-default expanded
+    # the voice-modes block and his inner_life is the longest. All three
+    # remain cacheable and well under any provider context ceiling.
+    # v1.1 ceilings: apex 32_000, athena 22_000, broski 22_000
+    ceilings = {"apex": 36_000, "athena": 28_000, "broski": 28_000}
     for cid, compiled in souls.items():
         assert compiled.system_prompt.strip(), f"{cid}: empty system prompt"
         ceiling = ceilings.get(cid, 22_000)
