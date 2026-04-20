@@ -808,7 +808,10 @@ class HydraBrain:
             # Detect truncated responses — if the model hit max_tokens or was
             # cut off, the JSON will be incomplete and unparseable.
             if response.stop_reason == "max_tokens":
-                print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}) — increasing tolerance")
+                # Honest message: nothing in this function "increases" anything;
+                # the truncated text returns to _parse_json which will fail and
+                # the caller will fall back to defaults. Past message lied.
+                print(f"  [BRAIN] Response truncated (max_tokens={max_tokens}) — JSON parse will fail, fallback decision incoming")
             return text, response.usage.input_tokens, response.usage.output_tokens
 
     # ─── Tool-use loop (Phase 5) ───
@@ -1010,7 +1013,10 @@ class HydraBrain:
                 max_tokens=700,  # v2.14 prompt larger; headroom for JSON + tool_result
             )
         else:
-            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 650)
+            # v2.15.2: bumped 650→1000 to match tool-use ceiling; recurring
+            # truncation was forcing fallback decisions and starving RM of
+            # specific input. Anthropic bills per token used, not allocated.
+            text, tok_in, tok_out = self._call_llm(QUANT_PROMPT, user_msg, 1000)
         parsed = self._parse_json(text)
         if isinstance(parsed, dict):
             if "size_multiplier" in parsed:
@@ -1037,7 +1043,10 @@ class HydraBrain:
                 max_tokens=450,
             )
         else:
-            text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 350)
+            # v2.15.2: bumped 350→600 to match tool-use ceiling; same reason
+            # as Quant above. Failure risk (truncated RM JSON → fallback)
+            # outweighs token cost.
+            text, tok_in, tok_out = self._call_llm(RISK_MANAGER_PROMPT, user_msg, 600)
         parsed = self._parse_json(text)
         # Defensive clamp: the RISK_MANAGER_PROMPT documents size_multiplier in
         # [0.0, 1.5] but a model hallucination can return out-of-range or
