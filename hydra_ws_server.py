@@ -204,10 +204,30 @@ class DashboardBroadcaster:
             import websockets
             async with websockets.serve(self._handler, self.host, self.port):
                 print(f"  [WS] Dashboard server running on ws://{self.host}:{self.port}")
-                await asyncio.Future()  # run forever
+                self._serve_future = asyncio.Future()
+                await self._serve_future  # run until stop() is called
         except ImportError:
             print("  [WS] websockets package not installed — dashboard feed disabled")
             print("  [WS] Install with: pip install websockets")
+
+    def stop(self):
+        """Stop the server and gracefully terminate all managed agent processes."""
+        print("\n[WS] Terminating all active agent sub-processes...")
+        for username, info in list(self.active_agents.items()):
+            try:
+                proc = info["process"]
+                print(f"  [WS] Terminating agent for user: {username} (PID: {proc.pid})")
+                proc.terminate()
+            except Exception as e:
+                print(f"  [WS] Error terminating agent for {username}: {e}")
+        
+        self.active_agents.clear()
+        
+        if hasattr(self, '_loop') and self._loop and hasattr(self, '_serve_future'):
+            try:
+                self._loop.call_soon_threadsafe(self._serve_future.set_result, None)
+            except Exception:
+                pass
 
     def _origin_allowed(self, origin: str) -> bool:
         if not origin:
