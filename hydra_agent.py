@@ -3224,6 +3224,7 @@ class HydraAgent:
                         "oi_price_regime": snap.oi_price_regime,
                         "basis_apr_pct": snap.basis_apr_pct,
                         "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
+                        "synthetic_pair": snap.synthetic,
                     }
             except Exception:
                 pass

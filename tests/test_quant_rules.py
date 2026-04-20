@@ -216,6 +216,54 @@ def test_r10_does_not_fire_on_single_null():
     assert "R10" not in [f.rule_id for f in r.triggered]
 
 
+def test_r10_skips_oi_fields_for_synthetic_pairs():
+    """Synthetic SOL/BTC has no direct perp on Kraken Futures, so
+    oi_delta_1h_pct and basis_apr_pct are None by design — not stale.
+    R10 should not count them when the indicator block is flagged
+    synthetic_pair=True. Funding+CVD presence alone keeps RM informed."""
+    qi = {
+        "funding_bps_8h": -10.0,
+        "cvd_divergence_sigma": 0.3,
+        "oi_price_regime": "balanced",
+        "oi_delta_1h_pct": None,
+        "basis_apr_pct": None,
+        "synthetic_pair": True,
+    }
+    result = apply_rules(engine_action="BUY", quant_indicators=qi)
+    assert not result.force_hold, (
+        f"R10 should skip OI/basis nulls on synthetic pairs, "
+        f"got force_hold={result.force_hold} reason={result.force_hold_reason}"
+    )
+
+
+def test_r10_still_fires_for_real_perps_with_stale_oi():
+    """Regression guard: real perp with 2+ null fields still trips R10."""
+    qi = {
+        "funding_bps_8h": -10.0,
+        "cvd_divergence_sigma": 0.3,
+        "oi_price_regime": None,
+        "oi_delta_1h_pct": None,
+        "basis_apr_pct": None,
+        "synthetic_pair": False,
+    }
+    result = apply_rules(engine_action="BUY", quant_indicators=qi)
+    assert result.force_hold, "real perp with 3 null fields must still trip R10"
+
+
+def test_r10_synthetic_with_stale_funding_and_cvd_still_trips():
+    """Synthetic still has its own staleness check — funding+cvd both null
+    is real data starvation even on a synthetic pair (only regime present
+    is one field, threshold is 2 nulls of the 3 tracked synthetic fields)."""
+    qi = {
+        "funding_bps_8h": None,
+        "cvd_divergence_sigma": None,
+        "oi_price_regime": "balanced",
+        "synthetic_pair": True,
+    }
+    result = apply_rules(engine_action="BUY", quant_indicators=qi)
+    assert result.force_hold, "synthetic with both funding+cvd null must still trip R10"
+
+
 # ─── Stacking + clamping ────────────────────────────────────
 
 
