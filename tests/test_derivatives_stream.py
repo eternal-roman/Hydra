@@ -14,6 +14,7 @@ from hydra_derivatives_stream import (
     DerivativesSnapshot,
     DerivativesStream,
     SPOT_TO_DERIVATIVES,
+    _absolute_to_relative_bps,
     _delta_pct,
     _maybe_float,
     _prune_before,
@@ -29,6 +30,26 @@ def test_maybe_float_handles_none_and_strings():
     assert _maybe_float(2) == 2.0
     assert _maybe_float("not-a-number") is None
     assert _maybe_float([1, 2]) is None
+
+
+def test_absolute_to_relative_bps_normal():
+    # 2.5 / 50000 * 10000 = 0.5 bps
+    assert _absolute_to_relative_bps(2.5, 50000.0, "BTC/USDC", "test") == 0.5
+
+
+def test_absolute_to_relative_bps_returns_none_when_either_input_none():
+    assert _absolute_to_relative_bps(None, 50000.0, "BTC/USDC", "test") is None
+    assert _absolute_to_relative_bps(2.5, None, "BTC/USDC", "test") is None
+
+
+def test_absolute_to_relative_bps_returns_none_when_markprice_zero():
+    assert _absolute_to_relative_bps(2.5, 0.0, "BTC/USDC", "test") is None
+
+
+def test_absolute_to_relative_bps_returns_none_when_clamp_exceeded(capsys):
+    # 0.06 / 1.0 * 10000 = 600 > 500
+    assert _absolute_to_relative_bps(0.06, 1.0, "BTC/USDC", "test") is None
+    assert "exceeds sanity bound" in capsys.readouterr().err
 
 
 def test_delta_pct_returns_none_when_empty_history():

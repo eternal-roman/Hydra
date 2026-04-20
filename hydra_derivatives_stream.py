@@ -27,8 +27,8 @@ Fields consumed per ticker:
   fundingRatePrediction, openInterest
 
 Signals surfaced per spot pair:
-  funding_bps_8h            : current 8h funding rate × 10000
-  funding_predicted_bps     : next 8h prediction
+  funding_bps_8h            : current 8h funding rate as bps (markPrice-relative)
+  funding_predicted_bps     : next 8h prediction as bps (markPrice-relative)
   oi_delta_1h_pct           : OI change over 1h window
   oi_delta_24h_pct          : OI change over 24h window
   oi_price_regime           : trend_confirm_long | trend_confirm_short
@@ -313,6 +313,10 @@ class DerivativesStream:
         # Use the freshly extracted `mark` (not snap.mark_price which could be
         # stale from a prior tick where this tick lacks markPrice). If mark is
         # missing this round, both funding fields go None — we cannot guess.
+        # Unlike the guarded fields above, funding writes are unconditional
+        # (helper may return None). Reason: a stale funding bps anchored to a
+        # markPrice that didn't refresh this tick would silently mislead R1/R2.
+        # Nulling forces R10 to flag staleness via its missing-field count.
         snap.funding_bps_8h = _absolute_to_relative_bps(
             fr, mark, snap.pair, "fundingRate"
         )
@@ -383,6 +387,9 @@ class DerivativesStream:
         )
         if sol_rel is not None and btc_rel is not None:
             diff = round(sol_rel - btc_rel, 2)
+            # Re-clamp the diff: per-leg clamp bounds each input to ±500, so the
+            # subtraction can still reach ±1000. A diff exceeding ±500 means the
+            # two legs disagree at unrealistic magnitudes — null the synthetic too.
             if abs(diff) > FUNDING_BPS_SANITY_MAX:
                 print(
                     f"  [DerivativesStream] {snap.pair} synthetic funding "
@@ -393,6 +400,7 @@ class DerivativesStream:
             else:
                 snap.funding_bps_8h = diff
         else:
+            # Same null-on-stale rationale as _populate_from_ticker — see comment there.
             snap.funding_bps_8h = None
 
         if sol_mark is not None and btc_mark is not None and btc_mark > 0:
