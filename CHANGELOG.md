@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.15.2] — 2026-04-19
+
+### Fixed
+
+- **derivatives stream — funding correctly markPrice-relative**: Kraken Futures `PF_*` returns `fundingRate` as absolute USD/contract/period, not as a decimal rate. Pre-fix the parser multiplied by 10000 unconditionally, producing values wrong by markPrice (~70000x for BTC, ~80x for SOL). BTC's garbage triggered R1/R2 force-holds systemically; SOL's wrong-by-80x readings looked plausible (within ±100 bps) but misled the Quant. Now computes `(fundingRate / markPrice) * 10000` with ±500 bps sanity clamp as defense-in-depth. Synthetic SOL/BTC normalizes each leg by its own markPrice before subtraction. Live verified: PF_XBTUSD now -0.17 bps (was -12513 bps); PF_SOLUSD -0.40 bps (was -33.64 bps).
+- **quant rules R10 honors `synthetic_pair`**: SOL/BTC has no direct Kraken Futures perp; OI/basis fields are `None` by construction. R10 was structurally tripping every synthetic-pair tick. Now tracks only funding/cvd/regime when synthetic, preserves full 5-field check for real perps.
+- **derivatives stream fetch error logging**: timeouts, OSErrors, and JSON decode errors each emit a labelled stderr warning so stuck WSL bridges are operator-visible.
+
+### Maintenance
+
+- Deleted 19 `PLACEMENT_FAILED` entries from the order journal (12 `insufficient_USDC_balance` + 7 `placement_error:api`) accumulated during the funding-bug period. Backup retained at `hydra_order_journal.backup.2026-04-19.json` for one release cycle.
+
+---
+
 ## [2.15.1] — 2026-04-19 (hotfix)
 
 **Dashboard blank-screen hotfix.** v2.15.0 introduced a `const` temporal-dead-zone bug in `dashboard/src/App.jsx`: the `connect` `useCallback` listed `refreshWsToken` in its deps array before `refreshWsToken` was declared later in the component body. At render time, React evaluates the deps array and hits TDZ → `ReferenceError: Cannot access 'refreshWsToken' before initialization` → blank page at `http://localhost:3000`. Fixed by hoisting the `refreshWsToken` declaration above `connect` and removing the duplicate. No behavior change beyond restoring render.
