@@ -409,15 +409,15 @@ class ResultReviewer:
         # 5. Persist.
         try:
             self.store.log_review(experiment.id, decision.to_dict())
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
         # 6. PR draft for CODE_REVIEW verdicts (I8-compliant advisory file).
         if decision.verdict == "CODE_REVIEW":
             try:
                 write_pr_draft(decision, experiment, self.store.root)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         return decision
 
@@ -501,8 +501,8 @@ class ResultReviewer:
                     # Later entries for the same experiment win (same review
                     # might be revalidated after a tweak).
                     outcomes_by_exp[eid] = status
-            except OSError:
-                pass
+            except OSError as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         # Compute accuracy.
         approved = 0
@@ -568,8 +568,8 @@ class ResultReviewer:
                             if "/" in p:
                                 evaluated = int(p.split("/")[1])
                                 break
-                    except (ValueError, IndexError):
-                        pass
+                    except (ValueError, IndexError) as e:
+                        import logging; logging.warning(f"Ignored exception: {e}")
             self._accuracy_cache = (now, acc, evaluated)
             return acc, evaluated
         except Exception:
@@ -658,8 +658,8 @@ class ResultReviewer:
                     ev.mc_p_value = 1.0
                 else:
                     ev.mc_p_value = 0.5
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         if mc is not None:
             ev.mc_iterations = mc.n_iter
@@ -986,8 +986,8 @@ class ResultReviewer:
                f"${self.COST_ALERT_USD:.2f}/day disclosure threshold (day={day_key})")
         try:
             print(msg, flush=True)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_message"):
             try:
                 self.broadcaster.broadcast_message("cost_alert", {
@@ -997,8 +997,8 @@ class ResultReviewer:
                     "day_key": day_key,
                     "enforce_budget": self.enforce_budget,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
     def _build_user_message(
         self,
@@ -1247,8 +1247,8 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
         cleaned = fence.group(1).strip()
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
+    except Exception as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
     # Best-effort: last {...} blob
     match = _re.search(r"\{.*\}", cleaned, _re.DOTALL)
     if match:

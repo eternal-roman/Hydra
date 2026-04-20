@@ -267,8 +267,8 @@ def main():
                 if resp != "y":
                     print("Aborted.")
                     return
-        except Exception:
-            pass  # Best-effort check; proceed if detection fails
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")  # Best-effort check; proceed if detection fails
 
     {"status": cmd_status, "purge-failed": cmd_purge_failed, "purge": cmd_purge}[args.command](args)
 

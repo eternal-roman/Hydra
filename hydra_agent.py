@@ -38,8 +38,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError):
-        pass
+    except (AttributeError, OSError) as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
 
 # Load .env file if present (no dependency needed)
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -365,10 +365,10 @@ class HydraAgent:
                 try:
                     os.remove(stale)
                     print(f"  [STARTUP] removed stale tmp: {os.path.basename(stale)}")
-                except OSError:
-                    pass
-        except Exception:
-            pass
+                except OSError as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
         # Run the one-shot legacy trade_log -> order_journal migration
         # before touching any on-disk state. Idempotent; no-op after the
@@ -478,8 +478,8 @@ class HydraAgent:
                      "close": float(getattr(c, "close"))}
                     for c in raw
                 ]
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
         # Fall back to the real engine attribute
         try:
             raw = getattr(engine, "candles", []) or []
@@ -513,15 +513,15 @@ class HydraAgent:
                         "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
                         "synthetic_pair": snap.synthetic,
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         engine = self.engines.get(pair)
         if engine is not None:
             try:
                 quant_indicators["cvd_divergence_sigma"] = engine.cvd_divergence_sigma()
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         # v2.16.0: RM engine-internal features. Kill switch read live.
         if os.environ.get("HYDRA_RM_FEATURES_DISABLED") != "1":
@@ -903,8 +903,8 @@ class HydraAgent:
             self.broadcaster.broadcast_message(
                 "thesis_proposals_list", {"data": proposals},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _handle_thesis_approve_proposal(self, payload: Dict[str, Any]) -> None:
         if not self.thesis:
@@ -1050,8 +1050,8 @@ class HydraAgent:
             try:
                 os.remove(backfill_file)
                 print(f"  [JOURNAL] Consumed and removed backfill file")
-            except OSError:
-                pass
+            except OSError as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         if merged_count or overwritten_count:
             parts = []
@@ -1392,8 +1392,8 @@ class HydraAgent:
                     equity = self._current_portfolio_summary.get("total_equity_usd")
                     if equity is not None:
                         self._record_balance_sample(time.time(), equity)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
 
                 # Phase 1.95: Periodic portfolio strategist review (Grok)
                 # Track candle epoch — advances when ALL pairs have new timestamps
@@ -1538,8 +1538,8 @@ class HydraAgent:
                                             "thesis_posture_restriction",
                                             {"pair": pair, **restriction},
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        import logging; logging.warning(f"Ignored exception: {e}")
                                     continue
                             except Exception as te:
                                 print(f"  [THESIS] restriction check error ({type(te).__name__}: {te})")
@@ -1725,8 +1725,8 @@ class HydraAgent:
                     with open(err_file, "a", encoding="utf-8") as f:
                         f.write(f"\n=== Tick {tick} @ {datetime.now(timezone.utc).isoformat()} ===\n")
                         f.write(traceback.format_exc())
-                except Exception:
-                    pass  # if error log write fails, at least we printed to stdout
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")  # if error log write fails, at least we printed to stdout
 
             # HF-004 fix: snapshot immediately if the journal grew this tick,
             # so a subsequent crash does not lose the newly-appended entries.
@@ -1869,8 +1869,8 @@ class HydraAgent:
                 mid = (bid + ask) / 2
                 spread_bps = round((ask - bid) / mid * 10000, 1) if mid > 0 else 0
                 state["spread"] = {"bid": bid, "ask": ask, "spread_bps": spread_bps}
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
         # v2.14: inject QUANT INDICATORS block — DerivativesStream values
         # plus engine's CVD divergence. Absent stream / stale data surface
@@ -1911,8 +1911,8 @@ class HydraAgent:
                         "consecutive_failures": self.brain.consecutive_failures,
                         "retry_at_tick": self.brain.retry_at_tick,
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
 
             # v2.14 W1f: deterministic rule stack. Apply R1-R10 on the
             # SAME engine signal + quant context the LLMs saw, producing a
@@ -3192,8 +3192,8 @@ class HydraAgent:
             v = vol_response.get("volume")
             if v is not None:
                 result["volume_30d_usd"] = float(v)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         fees_taker = vol_response.get("fees") or {}
         fees_maker = vol_response.get("fees_maker") or {}
         if not isinstance(fees_taker, dict):

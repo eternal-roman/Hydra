@@ -781,8 +781,8 @@ class BacktestRunner:
             if on_tick is not None:
                 try:
                     on_tick(self._build_progress_state(tick, engine_states, result))
-                except Exception:
-                    pass  # observer errors must not kill the replay
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")  # observer errors must not kill the replay
 
             # 8) Pace if requested (observer-mode; normally 0 for max-speed).
             if pair_sleep_seconds > 0:

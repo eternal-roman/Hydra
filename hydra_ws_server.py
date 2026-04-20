@@ -10,6 +10,7 @@ import secrets
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
+import hydra_auth
 
 # ═══════════════════════════════════════════════════════════════
 # WEBSOCKET BROADCAST SERVER (for React Dashboard)
@@ -69,12 +70,28 @@ class DashboardBroadcaster:
         self._thread = None
         self._handlers: Dict[str, Any] = {}
         self.compat_mode = compat_mode
+        self.production_mode = os.environ.get("HYDRA_PRODUCTION", "0") == "1"
         # Freshly generated per-process token. Inbound command messages
         # must include this exact value in their `auth` field — defends
         # the dispatch channel against dashboard-XSS-chain attacks even
         # though the socket is bound to 127.0.0.1.
         self.auth_token = secrets.token_hex(32)
         self._write_token_files()
+        
+        # Register core auth handlers
+        self.register_handler("login", self._handle_login)
+
+    def _handle_login(self, payload: dict) -> dict:
+        username = payload.get("username")
+        password = payload.get("password")
+        if not username or not password:
+            return {"success": False, "error": "Missing credentials"}
+            
+        user = hydra_auth.authenticate_user(username, password)
+        if user:
+            token = hydra_auth.create_access_token({"sub": username, "role": user["role"]})
+            return {"success": True, "token": token, "user": user}
+        return {"success": False, "error": "Invalid credentials"}
 
     def _write_token_files(self) -> None:
         payload = json.dumps({"token": self.auth_token})
@@ -135,8 +152,8 @@ class DashboardBroadcaster:
             print(f"  [WS] Rejected connection from origin: {origin!r}")
             try:
                 await websocket.close(code=1008, reason="origin not allowed")
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             return
         self.clients.add(websocket)
         print(f"  [WS] Dashboard client connected ({len(self.clients)} total)")
@@ -172,22 +189,31 @@ class DashboardBroadcaster:
         handler = self._handlers.get(msg_type) if msg_type else None
         if handler is None:
             return
-        # Constant-time comparison against the per-process token. Reject
-        # any inbound dispatch without it — includes the `auth` field for
-        # both read and mutating handlers so dashboard XSS can't silently
-        # probe handler names either.
-        provided = msg.get("auth", "")
-        if not isinstance(provided, str) or not secrets.compare_digest(
-            provided, self.auth_token,
-        ):
+        # Authentication logic
+        is_authenticated = False
+        
+        if msg_type == "login":
+            is_authenticated = True # Login endpoint is public
+        elif self.production_mode:
+            jwt_token = msg.get("jwt")
+            if jwt_token:
+                payload_data = hydra_auth.verify_token(jwt_token)
+                if payload_data:
+                    is_authenticated = True
+        else:
+            provided = msg.get("auth", "")
+            if isinstance(provided, str) and secrets.compare_digest(provided, self.auth_token):
+                is_authenticated = True
+
+        if not is_authenticated:
             try:
                 await websocket.send(json.dumps({
                     "type": f"{msg_type}_ack",
                     "success": False,
                     "error": "auth_required",
                 }))
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             return
         payload = {k: v for k, v in msg.items() if k not in ("type", "auth")}
         try:

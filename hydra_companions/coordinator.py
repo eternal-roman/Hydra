@@ -460,8 +460,8 @@ class CompanionCoordinator:
                     "companion_id": cid, "user_id": uid, "state": "idle",
                     "message_id": msg_id,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             self._broadcast("companion.message.complete", {
                 "message_id": msg_id,
                 "companion_id": cid,
@@ -484,8 +484,8 @@ class CompanionCoordinator:
                     "companion_id": cid, "user_id": uid, "state": "idle",
                     "message_id": msg_id,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             self._broadcast("companion.message.complete", {
                 "message_id": msg_id, "companion_id": cid, "user_id": uid,
                 "text": f"(internal error: {type(e).__name__}: {e})",
@@ -497,8 +497,8 @@ class CompanionCoordinator:
     def _broadcast(self, msg_type: str, payload: dict) -> None:
         try:
             self.agent.broadcaster.broadcast_message(msg_type, payload)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     # ----- budget tracking -----
 

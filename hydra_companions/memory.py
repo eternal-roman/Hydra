@@ -66,8 +66,8 @@ class DistilledMemory:
                     ))
                 except (json.JSONDecodeError, ValueError):
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _persist(self) -> None:
         try:
@@ -75,8 +75,8 @@ class DistilledMemory:
             with self._path.open("w", encoding="utf-8") as f:
                 for e in self._entries:
                     f.write(json.dumps({"ts": e.ts, "topic": e.topic, "fact": e.fact}) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     # ----- public API -----
 

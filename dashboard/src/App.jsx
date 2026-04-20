@@ -3340,7 +3340,7 @@ function ConnectionStatus({ connected, tick }) {
 
 // ─── Main App ───
 
-export default function App() {
+export function HydraDashboard({ jwtToken, onLogout }) {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
@@ -4938,6 +4938,11 @@ export default function App() {
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          {jwtToken && (
+            <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
+              [Logout]
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
@@ -4945,4 +4950,143 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// Auth Surface
+// ═══════════════════════════════════════════════════════════════
+
+function AuthSurface({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    try {
+      const ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: "login", username, password }));
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "login_ack") {
+          if (msg.success) {
+            onLogin(msg.token);
+          } else {
+            setError(msg.error || "Login failed");
+          }
+          ws.close();
+        }
+      };
+      ws.onerror = () => {
+        setError("WebSocket connection failed. Ensure backend is running.");
+      };
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: "100vh", background: COLORS.bg, fontFamily: mono, color: COLORS.text,
+      background: `radial-gradient(circle at 50% 50%, ${COLORS.panel}, ${COLORS.bg})`
+    }}>
+      <div style={{
+        padding: "40px 32px",
+        background: `${COLORS.panel}dd`,
+        backdropFilter: "blur(12px)",
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 12,
+        width: 380,
+        boxShadow: `0 8px 32px rgba(0,0,0,0.5), inset 0 0 20px ${COLORS.accent}11`,
+        textAlign: "center"
+      }}>
+        <div style={{ marginBottom: 32 }}>
+          <div style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 56, height: 56, borderRadius: "50%",
+            background: `radial-gradient(circle at 35% 30%, ${COLORS.accent}, ${COLORS.accent}88)`,
+            boxShadow: `0 0 16px ${COLORS.accent}66`,
+            marginBottom: 16
+          }}>
+            <span style={{ fontSize: 28 }}>⚲</span>
+          </div>
+          <h1 style={{ margin: 0, fontSize: 24, fontFamily: heading, letterSpacing: "-0.02em", color: COLORS.text }}>HYDRA</h1>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 4 }}>
+            Multi-Tenant Protocol
+          </div>
+        </div>
+
+        <form onSubmit={handleLogin} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <input
+            type="text"
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`,
+              background: `${COLORS.bg}88`, color: COLORS.text, fontFamily: mono, fontSize: 14,
+              outline: "none", transition: "border-color 0.2s"
+            }}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`,
+              background: `${COLORS.bg}88`, color: COLORS.text, fontFamily: mono, fontSize: 14,
+              outline: "none", transition: "border-color 0.2s"
+            }}
+          />
+          {error && <div style={{ color: COLORS.danger, fontSize: 12, marginTop: -4 }}>{error}</div>}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: "none",
+              background: COLORS.accent, color: COLORS.bg,
+              fontFamily: mono, fontSize: 14, fontWeight: 700,
+              cursor: loading ? "not-allowed" : "pointer",
+              opacity: loading ? 0.7 : 1, transition: "opacity 0.2s",
+              boxShadow: `0 0 16px ${COLORS.accent}44`,
+              marginTop: 8
+            }}
+          >
+            {loading ? "Authenticating..." : "Initialize Session"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [jwtToken, setJwtToken] = useState(() => localStorage.getItem("hydra_jwt") || "");
+
+  const handleLogin = (token) => {
+    setJwtToken(token);
+    localStorage.setItem("hydra_jwt", token);
+  };
+
+  const handleLogout = () => {
+    setJwtToken("");
+    localStorage.removeItem("hydra_jwt");
+  };
+
+  if (!jwtToken) {
+    return <AuthSurface onLogin={handleLogin} />;
+  }
+
+  return <HydraDashboard jwtToken={jwtToken} onLogout={handleLogout} />;
 }

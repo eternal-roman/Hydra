@@ -490,12 +490,12 @@ class ShadowValidator:
             if tracker is not None:
                 try:
                     engine.apply_tuned_params(tracker.get_tunable_params())
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
             try:
                 engine.apply_tuned_params(cand.proposed_overrides)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             self._shadow_engines[p] = engine
 
     def _refresh_shadow_pnl(self, cand: ShadowCandidate) -> None:
@@ -608,8 +608,8 @@ class ShadowValidator:
             except Exception:
                 try:
                     os.unlink(tmp)
-                except OSError:
-                    pass
+                except OSError as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
         except Exception:
             # Persistence must never crash the validator; we'll rebuild
             # from scratch on next run if this fails.
@@ -665,16 +665,16 @@ class ShadowValidator:
         if self.on_state_change:
             try:
                 self.on_state_change(event, cand)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
         if self.broadcaster and hasattr(self.broadcaster, "broadcast_message"):
             try:
                 self.broadcaster.broadcast_message("shadow_state", {
                     "event": event,
                     "candidate": cand.to_dict(),
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════

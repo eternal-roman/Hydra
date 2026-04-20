@@ -59,8 +59,8 @@ class IntentClassifier:
                 elif isinstance(m, str) and m.startswith("length_le:"):
                     try:
                         length_le = int(m.split(":", 1)[1])
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        import logging; logging.warning(f"Ignored exception: {e}")
             if intent and (patterns or length_le is not None):
                 compiled.append({"intent": intent, "patterns": patterns, "length_le": length_le})
         return compiled

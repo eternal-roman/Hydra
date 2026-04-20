@@ -1,0 +1,16 @@
+{
+  "name": "Hydra Multi-Tenant Terminal",
+  "short_name": "Hydra",
+  "description": "Production grade surface space for Hydra Agent",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#00ff88",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

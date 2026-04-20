@@ -109,18 +109,18 @@ class BaseStream:
             except subprocess.TimeoutExpired:
                 try:
                     self._proc.kill()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             self._proc = None
         for attr in ("_reader_thread", "_stderr_thread"):
             t = getattr(self, attr, None)
             if t is not None:
                 try:
                     t.join(timeout=self.READER_JOIN_TIMEOUT_S)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
                 setattr(self, attr, None)
 
     @property

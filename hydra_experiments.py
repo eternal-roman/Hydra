@@ -1003,8 +1003,8 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     except Exception:
         try:
             os.unlink(tmp)
-        except OSError:
-            pass
+        except OSError as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         raise
 
 

@@ -39,8 +39,8 @@ def _load_env_once():
             k = k.strip()
             if k and k not in os.environ:
                 os.environ[k] = v.strip().strip('"').strip("'")
-    except Exception:
-        pass
+    except Exception as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
 
 
 _load_env_once()
