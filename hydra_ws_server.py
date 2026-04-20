@@ -1,0 +1,250 @@
+"""Hydra WebSocket Server."""
+import subprocess
+import json
+import time
+import os
+import shlex
+import asyncio
+import threading
+import secrets
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timezone
+
+# ═══════════════════════════════════════════════════════════════
+# WEBSOCKET BROADCAST SERVER (for React Dashboard)
+# ═══════════════════════════════════════════════════════════════
+
+class DashboardBroadcaster:
+    """Async WebSocket server that broadcasts agent state to dashboard clients.
+
+    Phase 6 refactor (v2.10.0): adds message-type discrimination for the
+    backtest observer, experiment library, and review stream.
+
+    Outbound:
+      - `broadcast(state)` — live per-tick state. With `compat_mode=True`
+        (default), sends BOTH the legacy raw state dict and the new
+        wrapped `{"type": "state", "data": state}` form. Existing
+        dashboards keep reading raw; the Phase 8 dashboard reads wrapped.
+      - `broadcast_message(type, payload)` — new type-discriminated
+        message (e.g., backtest_progress). Always wrapped; legacy
+        dashboards ignore unknown shapes.
+
+    Inbound (Phase 6 additive):
+      - `register_handler(type, fn)` — route JSON messages matching
+        `{"type": type, ...}` to `fn(payload) -> Optional[dict]`. The
+        return dict is sent back as `{"type": f"{type}_ack", ...reply}`.
+      - Unknown message types are silently ignored (we don't want the
+        dashboard DoS'ing the agent via malformed messages).
+
+    Threading: the asyncio loop runs in a daemon thread. `broadcast_*`
+    is thread-safe (uses run_coroutine_threadsafe). Handlers execute
+    on the asyncio loop thread, so long work should be handed off
+    (handlers in this codebase return quickly — they queue into
+    BacktestWorkerPool).
+    """
+
+    # Origins allowed to initiate browser-side WS connections. Non-browser
+    # clients (tests, CLI tools) send no Origin header and are permitted.
+    ALLOWED_ORIGIN_PREFIXES = (
+        "http://localhost:", "http://127.0.0.1:",
+        "https://localhost:", "https://127.0.0.1:",
+    )
+
+    # Token file paths — written at startup so the dashboard (served by
+    # Vite at dashboard/public/*) can fetch it via HTTP, and tests/CLI
+    # tools can read it directly from the Hydra root.
+    TOKEN_FILES = (
+        Path("hydra_ws_token.json"),
+        Path("dashboard/public/hydra_ws_token.json"),
+    )
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765,
+                 compat_mode: bool = True):
+        self.host = host
+        self.port = port
+        self.clients = set()
+        self.latest_state = {}
+        self._loop = None
+        self._thread = None
+        self._handlers: Dict[str, Any] = {}
+        self.compat_mode = compat_mode
+        # Freshly generated per-process token. Inbound command messages
+        # must include this exact value in their `auth` field — defends
+        # the dispatch channel against dashboard-XSS-chain attacks even
+        # though the socket is bound to 127.0.0.1.
+        self.auth_token = secrets.token_hex(32)
+        self._write_token_files()
+
+    def _write_token_files(self) -> None:
+        payload = json.dumps({"token": self.auth_token})
+        for path in self.TOKEN_FILES:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload, encoding="utf-8")
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    # Windows semantics differ; best-effort only.
+                    pass
+            except OSError as e:
+                print(f"  [WS] Failed to write token file {path}: {e}")
+
+    def start(self):
+        """Start WebSocket server in a background thread."""
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._serve())
+
+    async def _serve(self):
+        try:
+            import websockets
+            async with websockets.serve(self._handler, self.host, self.port):
+                print(f"  [WS] Dashboard server running on ws://{self.host}:{self.port}")
+                await asyncio.Future()  # run forever
+        except ImportError:
+            print("  [WS] websockets package not installed — dashboard feed disabled")
+            print("  [WS] Install with: pip install websockets")
+
+    def _origin_allowed(self, origin: str) -> bool:
+        if not origin:
+            return True  # non-browser client (tests, CLI)
+        return any(origin.startswith(p) for p in self.ALLOWED_ORIGIN_PREFIXES)
+
+    def _request_origin(self, websocket) -> str:
+        # Version-compat shim: `websockets` 10.x exposes `request_headers`,
+        # 11.x+ exposes `request.headers`. Non-Mapping types also exist.
+        headers = getattr(websocket, "request_headers", None)
+        if headers is None:
+            req = getattr(websocket, "request", None)
+            headers = getattr(req, "headers", None) if req else None
+        if headers is None:
+            return ""
+        try:
+            return headers.get("Origin", "") or headers.get("origin", "")
+        except Exception:
+            return ""
+
+    async def _handler(self, websocket):
+        origin = self._request_origin(websocket)
+        if not self._origin_allowed(origin):
+            print(f"  [WS] Rejected connection from origin: {origin!r}")
+            try:
+                await websocket.close(code=1008, reason="origin not allowed")
+            except Exception:
+                pass
+            return
+        self.clients.add(websocket)
+        print(f"  [WS] Dashboard client connected ({len(self.clients)} total)")
+        try:
+            # Send latest state immediately on connect (both formats if compat)
+            if self.latest_state:
+                if self.compat_mode:
+                    await websocket.send(json.dumps(self.latest_state))
+                await websocket.send(json.dumps({
+                    "type": "state", "data": self.latest_state,
+                }))
+            async for raw in websocket:
+                try:
+                    await self._dispatch_inbound(raw, websocket)
+                except Exception as e:
+                    # Never let a malformed message break the connection.
+                    print(f"  [WS] inbound dispatch error: {type(e).__name__}: {e}")
+        except Exception as e:
+            if not isinstance(e, (ConnectionError, OSError)):
+                print(f"  [WS] Client handler error: {type(e).__name__}: {e}")
+        finally:
+            self.clients.discard(websocket)
+            print(f"  [WS] Dashboard client disconnected ({len(self.clients)} total)")
+
+    async def _dispatch_inbound(self, raw, websocket):
+        try:
+            msg = json.loads(raw)
+        except (TypeError, ValueError):
+            return  # silently ignore non-JSON
+        if not isinstance(msg, dict):
+            return
+        msg_type = msg.get("type")
+        handler = self._handlers.get(msg_type) if msg_type else None
+        if handler is None:
+            return
+        # Constant-time comparison against the per-process token. Reject
+        # any inbound dispatch without it — includes the `auth` field for
+        # both read and mutating handlers so dashboard XSS can't silently
+        # probe handler names either.
+        provided = msg.get("auth", "")
+        if not isinstance(provided, str) or not secrets.compare_digest(
+            provided, self.auth_token,
+        ):
+            try:
+                await websocket.send(json.dumps({
+                    "type": f"{msg_type}_ack",
+                    "success": False,
+                    "error": "auth_required",
+                }))
+            except Exception:
+                pass
+            return
+        payload = {k: v for k, v in msg.items() if k not in ("type", "auth")}
+        try:
+            reply = handler(payload)
+        except Exception as e:
+            reply = {"success": False, "error": f"{type(e).__name__}: {e}"}
+        if reply is None:
+            return
+        try:
+            ack_type = f"{msg_type}_ack"
+            await websocket.send(json.dumps({"type": ack_type, **reply}))
+        except Exception:
+            # Client likely dropped mid-send — next broadcast will reap it
+            pass
+
+    def register_handler(self, msg_type: str, fn) -> None:
+        """Route inbound messages with matching `type` to `fn(payload)`."""
+        self._handlers[msg_type] = fn
+
+    def broadcast(self, state: dict):
+        """Broadcast live tick state to all connected dashboard clients.
+
+        `compat_mode=True` emits BOTH the legacy raw state (what v2.9.x
+        dashboards read) and the new wrapped `{type: "state", data}` form
+        (what Phase 8 dashboards read). Set `compat_mode=False` after the
+        dashboard refactor lands to halve per-tick WS bandwidth.
+        """
+        self.latest_state = state
+        if not (self._loop and self.clients):
+            return
+        wrapped = json.dumps({"type": "state", "data": state})
+        raw = json.dumps(state) if self.compat_mode else None
+        for client in list(self.clients):
+            if raw is not None:
+                asyncio.run_coroutine_threadsafe(
+                    self._safe_send(client, raw), self._loop
+                )
+            asyncio.run_coroutine_threadsafe(
+                self._safe_send(client, wrapped), self._loop
+            )
+
+    def broadcast_message(self, msg_type: str, payload: dict):
+        """Emit a typed message (never wrapped as `state`). Always uses
+        the `{type, ...payload}` format.  Safe to call from any thread.
+        """
+        if not (self._loop and self.clients):
+            return
+        msg = json.dumps({"type": msg_type, **payload})
+        for client in list(self.clients):
+            asyncio.run_coroutine_threadsafe(
+                self._safe_send(client, msg), self._loop
+            )
+
+    async def _safe_send(self, client, msg):
+        try:
+            await client.send(msg)
+        except Exception:
+            self.clients.discard(client)
+
+

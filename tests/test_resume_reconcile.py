@@ -9,7 +9,9 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import KrakenCLI, HydraAgent, ExecutionStream, FakeExecutionStream
+from hydra_agent import HydraAgent
+from hydra_kraken_cli import KrakenCLI
+from hydra_streams import ExecutionStream, FakeExecutionStream
 from hydra_engine import HydraEngine
 
 

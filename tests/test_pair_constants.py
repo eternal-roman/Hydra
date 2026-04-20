@@ -10,7 +10,7 @@ import os
 import copy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import KrakenCLI
+from hydra_kraken_cli import KrakenCLI
 from hydra_engine import PositionSizer
 
 

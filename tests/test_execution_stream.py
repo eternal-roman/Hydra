@@ -16,7 +16,8 @@ import time
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import ExecutionStream, FakeExecutionStream  # noqa: E402
+from hydra_streams import FakeExecutionStream  # noqa: E402
+from hydra_streams import ExecutionStream
 
 
 # ═══════════════════════════════════════════════════════════════
