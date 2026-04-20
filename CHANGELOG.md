@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.16.2] — 2026-04-20
+
+### Fixed
+
+- **Balance chart silently dropped earn-flex USDC** — `KrakenCLI.STAKED_SUFFIXES` only tracked `.B / .S / .M`, so Kraken's `.F` (earn-flex, instant-redeem yield product — e.g. `USDC.F`) fell through `_normalize_asset`, missed the `USDC → 1.0` price-table entry in `_compute_balance_usd`, and priced at $0 in `balance_usd.total_usd`. The dashboard's Balance History chart and Total Balance stat therefore under-reported the portfolio every tick the account held any earn-flex balance. `.F` is now a recognized staked suffix: the normalizer strips it, the USD lookup succeeds, and the amount is counted in `total_usd` while flagged `staked=True` (correct — flex is yield-bearing, not placeable for limit-post-only). Regression test added in `tests/test_balance.py::TestComputeBalanceUsd::test_usdc_flex_earn_counted_in_total`.
+- **"Max Drawdown" widget stuck for weeks** — the dashboard's Max DD stat took the `max()` of per-pair `engine.max_drawdown_pct` values, which is a pinned running max over tiny dips on individual pair equity and never reflects coordinated exchange-wide drawdowns. The agent now tracks a true portfolio-level `portfolio_drawdown` on `balance_usd.total_usd` (peak, current %, max %), persists it in `hydra_session_snapshot.json` so it survives `--resume`, and broadcasts it on every tick. The dashboard prefers this authoritative value when present and renders both the all-time max and the current drawdown so the widget visibly moves.
+- **Companion orb disappeared after v2.15.0 WS auth hardening** — `ws.onopen` set `connected=true` and fire-and-forgot `refreshWsToken()` in parallel. A `useEffect` on `connected` then sent `companion.connect` with a still-empty `auth` field, the backend responded `auth_required`, and the dashboard set `companionVisible=false` — permanently, since the orb was only re-shown on a successful ack. The token fetch now awaits before the `connected` flip so every handshake that races off `connected=true` sees a fresh token; additionally, a `connect_ack` with `error:"auth_required"` now refreshes the token and keeps the orb visible instead of latching it off.
+- **Companion "(no response in 30s)" timeouts** — both Anthropic and xAI SDK client calls previously ran with the SDK default 10-minute socket timeout, so a hung TLS handshake or silent 504 from the provider easily outlived the dashboard's 30s client-side timeout and surfaced as a generic "check the agent console" note. Each request is now capped at 25s via `client.with_options(timeout=25.0)` on both providers, so network hangs fail loudly with a concrete error under the dashboard ceiling.
+
+### Added
+
+- `state.portfolio_drawdown = {peak_usd, current_pct, max_pct}` field on every LIVE tick broadcast (authoritative replacement for per-pair max aggregation).
+
+---
+
 ## [2.16.1] — 2026-04-19
 
 ### Fixed

@@ -102,7 +102,11 @@ class ProviderClient:
     def _call_anthropic(self, model_id: str, system: str, messages: list,
                         max_tokens: int, temperature: float) -> ProviderResponse:
         client = self._anthropic_client()
-        resp = client.messages.create(
+        # v2.16.2: per-request timeout under the 30 s dashboard ceiling so a
+        # hung Anthropic socket (TLS handshake stall, silent 504, etc.) fails
+        # loudly as an error — previously users only saw "(no response in
+        # 30 s)" because the SDK default timeout is 10 minutes.
+        resp = client.with_options(timeout=25.0).messages.create(
             model=model_id,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -132,7 +136,9 @@ class ProviderClient:
         client = self._xai_client()
         chat_messages = [{"role": "system", "content": system}]
         chat_messages.extend(messages)
-        resp = client.chat.completions.create(
+        # Same 25 s cap as the Anthropic path so the dashboard 30 s timeout
+        # always wins and the user gets a concrete error instead of silence.
+        resp = client.with_options(timeout=25.0).chat.completions.create(
             model=model_id,
             max_tokens=max_tokens,
             temperature=temperature,
