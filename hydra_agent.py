@@ -3473,7 +3473,7 @@ class HydraAgent:
                 rule_result = _apply_quant_rules(
                     engine_action=engine_action_for_rules,
                     quant_output=quant_out_for_rules,
-                    quant_indicators=quant_indicators or None,
+                    quant_indicators=state.get("quant_indicators") or None,
                 )
                 rules_triggered = [
                     {"rule_id": f.rule_id, "name": f.name, "effect": f.effect,
@@ -3542,7 +3542,7 @@ class HydraAgent:
                 # v2.13.1: thesis alignment (None when thesis absent).
                 "thesis_alignment": decision.thesis_alignment,
                 # v2.14: surface the indicator block that drove this decision
-                "quant_indicators": quant_indicators or None,
+                "quant_indicators": state.get("quant_indicators") or None,
                 # v2.14.1: tick counter this decision was generated at.
                 # When the dashboard replays a cached decision on a pair
                 # that didn't re-deliberate, current_tick > this value.
@@ -5166,7 +5166,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.16.0",
+            "version": "2.16.1",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
