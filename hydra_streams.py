@@ -71,9 +71,14 @@ class BaseStream:
         self._reader_exit_reason = None
         self._on_start_reset()
         label = self._stream_label()
+        cmd_str = f"source ~/.cargo/env && {self._build_cmd()}"
+        api_key = os.environ.get("KRAKEN_API_KEY")
+        api_secret = os.environ.get("KRAKEN_API_SECRET")
+        if api_key and api_secret:
+            cmd_str = f"export KRAKEN_API_KEY={shlex.quote(api_key)} && export KRAKEN_API_SECRET={shlex.quote(api_secret)} && {cmd_str}"
+
         cmd = [
-            "wsl", "-d", "Ubuntu", "--", "bash", "-c",
-            f"source ~/.cargo/env && {self._build_cmd()}",
+            "wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str
         ]
         try:
             self._proc = subprocess.Popen(
@@ -193,6 +198,10 @@ class BaseStream:
                 except json.JSONDecodeError:
                     print(f"  [{label}] non-JSON line: {line[:120]}")
                     continue
+                if "error" in msg:
+                    print(f"  [{label}] FATAL: WS error from kraken: {msg}")
+                elif "errorMessage" in msg:
+                    print(f"  [{label}] FATAL: WS error from kraken: {msg}")
                 self._on_message(msg)
         except Exception as e:
             exit_reason = f"crashed: {type(e).__name__}: {e}"

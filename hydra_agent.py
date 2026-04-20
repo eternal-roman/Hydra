@@ -1180,6 +1180,8 @@ class HydraAgent:
                 print("  [WARN] CandleStream failed to start — falling back to REST ohlc")
             if not self.ticker_stream.start():
                 print("  [WARN] TickerStream failed to start — falling back to REST ticker")
+            
+            time.sleep(1.5)  # Rate limit: allow execution_stream token request to settle
             if not self.balance_stream.start():
                 print("  [WARN] BalanceStream failed to start — falling back to REST balance")
             if not self.book_stream.start():
