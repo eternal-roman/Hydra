@@ -3696,14 +3696,6 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
   useEffect(() => { refreshWsToken(); }, [refreshWsToken]);
 
-  // Fallback to reconnect if WS_URL changes
-  useEffect(() => {
-    if (wsRef.current && wsRef.current.url !== wsUrl) {
-      wsRef.current.close();
-      connect();
-    }
-  }, [wsUrl, connect]);
-
   // Phase 8: send a typed WS message (used by BacktestControlPanel).
   // v2.15.0: every send carries the per-session auth token.
   const sendMessage = useCallback((msg) => {
