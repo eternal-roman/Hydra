@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.16.1] — 2026-04-19
+
+### Fixed
+
+- **`[QUANT RULES] apply_rules error (NameError: name 'quant_indicators' is not defined)`** — regression introduced by the v2.16.0 extraction of `_build_quant_indicators()` into a helper method that mutates `state["quant_indicators"]` but returns `None`. Two call sites in `HydraAgent._apply_brain` still referenced a bare local `quant_indicators` that no longer exists: (1) the R1–R10 rule dispatch at `hydra_agent.py:3476`, which silently fell through to the except branch every tick, and (2) the dashboard-state `"quant_indicators"` field at `hydra_agent.py:3545`, which was never populated. Both sites now read from `state.get("quant_indicators")`. Net effect on v2.16.0: R1–R10 deterministic guardrails were inert on every tick (brain quant × rm still applied, but the rule stack's size multiplier / force-hold was not), and the dashboard was missing the derivatives indicator block entirely. No state-file or on-disk artifact was corrupted — this was an in-memory path that crashed before writing.
+
+---
+
 ## [2.16.0] — 2026-04-19
 
 ### Added
