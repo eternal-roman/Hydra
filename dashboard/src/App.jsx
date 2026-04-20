@@ -22,6 +22,7 @@ const COLORS = {
   warn: "#ffaa00",
   blue: "#3388ff",
   purple: "#8855ff",
+  risk: "#a78bfa",  // softer lavender — RM dialogue (distinct from #8855ff volatile)
   text: "#e8e8f0",
   textDim: "#888899",
   textMuted: "#555566",
@@ -4463,9 +4464,9 @@ export default function App() {
 
                           {/* Band 2 — QUANT reasoning + key factors + concern */}
                           {(ai.analyst_reasoning || (ai.key_factors && ai.key_factors.length) || ai.concern) && (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <div style={{ padding: "6px 8px", background: `${COLORS.blue}10`, borderRadius: 4, display: "flex", flexDirection: "column", gap: 6 }}>
                               <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                                {label("QUANT", COLORS.blue)}
+                                {pill("QUANT", COLORS.blue)}
                                 {ai.analyst_reasoning && (
                                   <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.text, lineHeight: 1.5, flex: 1 }}>
                                     {ai.analyst_reasoning}
@@ -4475,14 +4476,14 @@ export default function App() {
                               {ai.key_factors && ai.key_factors.length > 0 && (
                                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 50 }}>
                                   {ai.key_factors.map((f, fi) => (
-                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 6px", borderRadius: 3, background: `${COLORS.blue}15`, color: COLORS.blue, letterSpacing: "0.03em" }}>
+                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 6px", borderRadius: 3, background: `${COLORS.blue}25`, color: COLORS.blue, letterSpacing: "0.03em" }}>
                                       {f}
                                     </span>
                                   ))}
                                 </div>
                               )}
                               {ai.concern && (
-                                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, paddingLeft: 0 }}>
+                                <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                                   {pill("CONCERN", COLORS.warn)}
                                   <span style={{ fontSize: 10, fontFamily: mono, color: COLORS.warn, lineHeight: 1.4, flex: 1 }}>
                                     {ai.concern}
@@ -4545,19 +4546,19 @@ export default function App() {
 
                           {/* Band 4 — RISK reasoning + flags */}
                           {(ai.risk_reasoning || (ai.risk_flags && ai.risk_flags.length > 0)) && (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <div style={{ padding: "6px 8px", background: `${COLORS.risk}10`, borderRadius: 4, display: "flex", flexDirection: "column", gap: 6 }}>
                               {ai.risk_reasoning && (
                                 <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                                  {label("RISK", COLORS.textDim)}
-                                  <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.textDim, lineHeight: 1.4, flex: 1 }}>
+                                  {pill("RISK", COLORS.risk)}
+                                  <span style={{ fontSize: 11, fontFamily: mono, color: COLORS.text, lineHeight: 1.4, flex: 1 }}>
                                     {ai.risk_reasoning}
                                   </span>
                                 </div>
                               )}
                               {ai.risk_flags && ai.risk_flags.length > 0 && (
-                                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 40 }}>
+                                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 50 }}>
                                   {ai.risk_flags.map((flag, fi) => (
-                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 5px", borderRadius: 3, background: `${COLORS.warn}15`, color: COLORS.warn }}>
+                                    <span key={fi} style={{ fontSize: 8, fontFamily: mono, padding: "1px 6px", borderRadius: 3, background: `${COLORS.risk}25`, color: COLORS.risk, letterSpacing: "0.03em" }}>
                                       {flag}
                                     </span>
                                   ))}
@@ -4671,7 +4672,7 @@ export default function App() {
                   {orderJournal.length === 0 && (
                     <div style={{ color: COLORS.textMuted, fontSize: 10, padding: 12, fontFamily: mono }}>Awaiting first order...</div>
                   )}
-                  {orderJournal.slice().reverse().map((entry, i) => {
+                  {orderJournal.filter(e => e?.lifecycle?.state !== "PLACEMENT_FAILED").slice().reverse().map((entry, i) => {
                     const lifecycle = entry.lifecycle || {};
                     const intent = entry.intent || {};
                     const decision = entry.decision || {};
