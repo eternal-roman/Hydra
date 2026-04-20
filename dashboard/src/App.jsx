@@ -1036,21 +1036,24 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, alignItems: "stretch",
-                   height: "calc(100vh - 140px)", minHeight: 520 }}>
-      {/* LEFT: control form */}
-      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                    borderRadius: 8, padding: 20, alignSelf: "stretch",
-                    overflowY: "auto", minHeight: 0 }}>
-        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                      marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                  borderRadius: 8, padding: 20, alignSelf: "stretch",
+                  overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                    marginBottom: 18, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <div>
-            <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
-            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
+        <div style={{ display: "flex", flexDirection: "column", gap: 20, flex: 1 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
+              <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
+            </div>
+            <div>
+              <FieldLabel labelSize={11} hintSize={12}>Pairs</FieldLabel>
+              <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC" fontSize={14} padding="8px 10px" />
+            </div>
           </div>
 
           <div>
@@ -1067,11 +1070,6 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
                 {8 - hypothesis.trim().length} more character(s) required
               </div>
             )}
-          </div>
-
-          <div>
-            <FieldLabel labelSize={11} hintSize={12}>Pairs (comma-separated)</FieldLabel>
-            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" fontSize={14} padding="8px 12px" />
           </div>
 
           {/* Candles + Seed: label row, input row, hint row — each grid row aligned
@@ -1116,12 +1114,15 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             />
           </div>
 
+        </div>
+        
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${COLORS.panelBorder}` }}>
           <button
             onClick={submit}
             disabled={!canSubmit}
             style={{
-              marginTop: 6,
-              padding: "12px 18px",
+              width: "100%",
+              padding: "14px 18px",
               fontSize: 14,
               fontWeight: 700,
               fontFamily: mono,
@@ -1141,293 +1142,154 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           </button>
 
           {!connected && (
-            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono }}>
+            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 12, textAlign: "center" }}>
               Disconnected — start hydra_agent.py to enable.
             </div>
           )}
-
         </div>
-      </div>
+    </div>
+  );
+}
 
-      {/* RIGHT: tri-panel (Last Result + Status + Rigor Gates) above the observer chart */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch",
-                    minHeight: 0 }}>
-        {/* Tri-panel: three equal panels sharing the same width as the observer
-            chart beneath them. */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12,
-                      flex: "0 0 auto" }}>
-          {/* Last Result */}
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16 }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
-              Last Result
+function BacktestResults({ 
+  ackMsg, observerProgress, observerResult, observerReview, 
+  observerEquity, observerTotalTicks, completedCount, reviewedCount, 
+  onObserverClose, onApplyOptimizations, onCompareThisRun 
+}) {
+  const stage = observerProgress?.stage;
+  const runState =
+    ackMsg && ackMsg.success === false ? "rejected" :
+    observerResult ? "complete" :
+    (observerProgress && (stage === "running" || stage === "started")) ? "running" :
+    ackMsg?.success ? "queued" :
+    "idle";
+
+  const paletteByState = {
+    idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
+    queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
+    running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
+    complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
+    rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
+  };
+  const p = paletteByState[runState];
+
+  const bodyByState = {
+    idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
+    queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
+    running: observerProgress
+      ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
+      : "Executing. Live data streams into the Observer chart below.",
+    complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
+    rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
+  };
+
+  const expId = observerResult?.experiment_id
+             || observerProgress?.experiment_id
+             || ackMsg?.experiment_id;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch", minHeight: 0, height: "100%" }}>
+      {/* Horizontal Tri-panel */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, flex: "0 0 auto" }}>
+        
+        {/* Last Result */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 12 }}>Last Result</div>
+          {observerResult?.metrics ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
+              <span style={{ color: COLORS.textDim }}>Trades</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{observerResult.metrics.total_trades}</span>
+              <span style={{ color: COLORS.textDim }}>Return</span>
+              <span style={{ textAlign: "right", color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
+                {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
+                {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
+              </span>
+              <span style={{ color: COLORS.textDim }}>Sharpe</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(observerResult.metrics.sharpe)}</span>
+              <span style={{ color: COLORS.textDim }}>Max DD</span>
+              <span style={{ color: COLORS.warn, textAlign: "right" }}>{(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%</span>
             </div>
-            {observerResult?.metrics ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto",
-                            rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
-                <span style={{ color: COLORS.textDim }}>Trades</span>
-                <span style={{ color: COLORS.text, textAlign: "right" }}>
-                  {observerResult.metrics.total_trades}
-                </span>
-                <span style={{ color: COLORS.textDim }}>Return</span>
-                <span style={{ textAlign: "right",
-                               color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
-                  {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
-                  {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
-                </span>
-                <span style={{ color: COLORS.textDim }}>Sharpe</span>
-                <span style={{ color: COLORS.text, textAlign: "right" }}>
-                  {fmtInd(observerResult.metrics.sharpe)}
-                </span>
-                <span style={{ color: COLORS.textDim }}>Max DD</span>
-                <span style={{ color: COLORS.warn, textAlign: "right" }}>
-                  {(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%
-                </span>
-                {observerResult.metrics.profit_factor != null && (
-                  <>
-                    <span style={{ color: COLORS.textDim }}>Profit Factor</span>
-                    <span style={{ color: COLORS.text, textAlign: "right" }}>
-                      {observerResult.metrics.profit_factor.toFixed(2)}
-                    </span>
-                  </>
-                )}
-                {observerResult.metrics.win_rate_pct != null && (
-                  <>
-                    <span style={{ color: COLORS.textDim }}>Win Rate</span>
-                    <span style={{ color: COLORS.text, textAlign: "right" }}>
-                      {observerResult.metrics.win_rate_pct.toFixed(0)}%
-                    </span>
-                  </>
-                )}
-              </div>
-            ) : (
-              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
-                No completed backtest yet this session.
-              </div>
-            )}
+          ) : (
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>No completed backtest yet this session.</div>
+          )}
+          {observerResult?.experiment_id && completedCount >= 2 && onCompareThisRun && (
+            <div style={{ marginTop: 12 }}>
+              <button onClick={() => onCompareThisRun(observerResult.experiment_id)}
+                      style={{ padding: "4px 8px", fontSize: 10, fontFamily: mono, background: "transparent", color: COLORS.blue, border: `1px solid ${COLORS.blue}40`, borderRadius: 4, cursor: "pointer", textTransform: "uppercase" }}>
+                Compare in Library
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Run Status */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 4 }}>Run Status</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", background: p.dot, boxShadow: runState === "running" ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}` : `0 0 4px ${p.dot}80`, animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
+            <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: p.fg, letterSpacing: "0.04em" }}>{p.label}</span>
           </div>
+          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, lineHeight: 1.5, marginBottom: expId ? 10 : 0 }}>{bodyByState[runState]}</div>
+        </div>
 
-          {/* Run Status — lifecycle of the most recent submission. Derives a
-              single state from (ackMsg × observerProgress × observerResult). */}
+        {/* Rigor Gates */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 10 }}>Rigor Gates</div>
           {(() => {
-            // State machine:
-            //   idle       — never submitted
-            //   rejected   — server refused (validation, quota, etc.)
-            //   queued     — accepted, not started yet
-            //   running    — tick stream active
-            //   complete   — terminal result received
-            const stage = observerProgress?.stage;
-            const runState =
-              ackMsg && ackMsg.success === false ? "rejected" :
-              observerResult ? "complete" :
-              (observerProgress && (stage === "running" || stage === "started")) ? "running" :
-              ackMsg?.success ? "queued" :
-              "idle";
-
-            const paletteByState = {
-              idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
-              queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
-              running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
-              complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
-              rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
-            };
-            const p = paletteByState[runState];
-
-            const bodyByState = {
-              idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
-              queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
-              running: observerProgress
-                ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
-                : "Executing. Live data streams into the Observer chart below.",
-              complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
-              rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
-            };
-
-            const expId = observerResult?.experiment_id
-                       || observerProgress?.experiment_id
-                       || ackMsg?.experiment_id;
-
+            const gp = observerReview?.gates_passed;
+            const hasReview = gp && typeof gp === "object";
+            const summary = hasReview
+              ? (() => {
+                  const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
+                  const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
+                  return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
+                })()
+              : "No review yet — hover a pill for what it checks.";
             return (
-              <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                            borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                              marginBottom: 4 }}>
-                  Run Status
+              <>
+                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>{summary}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {RIGOR_GATES.map(g => {
+                    const state = !hasReview ? "neutral" : gp[g.key] === true ? "pass" : gp[g.key] === false ? "fail" : "neutral";
+                    const bg = state === "pass" ? `${COLORS.accent}18` : state === "fail" ? `${COLORS.danger}18` : COLORS.bg;
+                    const border = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.panelBorder;
+                    const fg = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.textDim;
+                    const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
+                    return (
+                      <span key={g.key} title={`${g.label} (${g.key})
+
+${g.why}`}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 999, background: bg, border: `1px solid ${border}`, color: fg, fontFamily: mono, fontSize: 11, fontWeight: 600, cursor: "help", whiteSpace: "nowrap" }}>
+                        <span style={{ fontSize: 10 }}>{icon}</span>{g.label}
+                      </span>
+                    );
+                  })}
                 </div>
-                <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textMuted,
-                              marginBottom: 12 }}>
-                  Lifecycle of your most recent submission.
-                </div>
-
-                {/* State badge */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: "50%",
-                                 background: p.dot,
-                                 boxShadow: runState === "running"
-                                   ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}`
-                                   : `0 0 4px ${p.dot}80`,
-                                 animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
-                  <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700,
-                                 color: p.fg, letterSpacing: "0.04em" }}>
-                    {p.label}
-                  </span>
-                </div>
-
-                {/* Body — plain-English description of what this state means */}
-                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                              lineHeight: 1.5, marginBottom: expId || (completedCount > 0) ? 10 : 0 }}>
-                  {bodyByState[runState]}
-                </div>
-
-                {/* Experiment id — only when a run has actually been accepted */}
-                {expId && (
-                  <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textMuted,
-                                marginBottom: completedCount > 0 ? 10 : 0,
-                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                       title={`Full experiment id: ${expId}`}>
-                    id: {expId.slice(0, 12)}…
-                  </div>
-                )}
-
-                {/* Complete-state CTA: surface the connection to COMPARE.
-                    The just-finished experiment is already in the library;
-                    this jumps tabs, refreshes, and pre-selects it. */}
-                {runState === "complete" && expId && onCompareThisRun && (
-                  <button
-                    onClick={() => onCompareThisRun(expId)}
-                    title="Jump to the Compare tab with this experiment already selected — pick one more to see them ranked side-by-side."
-                    style={{
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      gap: 6, width: "100%", padding: "8px 12px",
-                      marginBottom: completedCount > 0 ? 10 : 0,
-                      fontSize: 12, fontWeight: 700, fontFamily: mono,
-                      textTransform: "uppercase", letterSpacing: "0.08em",
-                      background: `${COLORS.purple}20`, color: COLORS.purple,
-                      border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
-                      cursor: "pointer", outline: "none",
-                    }}
-                  >
-                    Compare this run →
-                  </button>
-                )}
-
-                {/* Session totals — across the current browser session */}
-                {(completedCount > 0 || reviewedCount > 0) && (
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                                paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}
-                       title="Totals since you opened the dashboard. 'Reviewed' = the AI reviewer finished scoring the run against the Rigor Gates.">
-                    <span style={{ color: COLORS.text, fontWeight: 700 }}>{completedCount}</span>
-                    {" "}completed
-                    {reviewedCount > 0 && (
-                      <>
-                        {" · "}
-                        <span style={{ color: COLORS.purple, fontWeight: 700 }}>{reviewedCount}</span>
-                        {" AI-reviewed"}
-                      </>
-                    )}
-                    {" "}this session
-                  </div>
-                )}
-              </div>
+              </>
             );
           })()}
-
-          {/* Rigor Gates — color-coded pills driven by the latest review's
-              gates_passed dict. Grey = no result yet, green = passed, red = failed.
-              Hover a pill for the plain-English explanation. */}
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16 }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 10 }}>
-              Rigor Gates
-            </div>
-            {(() => {
-              const gp = observerReview?.gates_passed;
-              const hasReview = gp && typeof gp === "object";
-              const summary = hasReview
-                ? (() => {
-                    const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
-                    const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
-                    return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
-                  })()
-                : "No review yet — hover a pill for what it checks.";
-              return (
-                <>
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                                marginBottom: 10 }}>
-                    {summary}
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    {RIGOR_GATES.map(g => {
-                      const state = !hasReview ? "neutral"
-                                  : gp[g.key] === true ? "pass"
-                                  : gp[g.key] === false ? "fail"
-                                  : "neutral";
-                      const bg = state === "pass" ? `${COLORS.accent}18`
-                               : state === "fail" ? `${COLORS.danger}18`
-                               : COLORS.bg;
-                      const border = state === "pass" ? COLORS.accent
-                                   : state === "fail" ? COLORS.danger
-                                   : COLORS.panelBorder;
-                      const fg = state === "pass" ? COLORS.accent
-                               : state === "fail" ? COLORS.danger
-                               : COLORS.textDim;
-                      const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
-                      return (
-                        <span
-                          key={g.key}
-                          title={`${g.label} (${g.key})\n\n${g.why}`}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 4,
-                                   padding: "4px 8px", borderRadius: 999,
-                                   background: bg, border: `1px solid ${border}`,
-                                   color: fg, fontFamily: mono, fontSize: 11,
-                                   fontWeight: 600, cursor: "help",
-                                   whiteSpace: "nowrap" }}
-                        >
-                          <span style={{ fontSize: 10 }}>{icon}</span>
-                          {g.label}
-                        </span>
-                      );
-                    })}
-                  </div>
-                </>
-              );
-            })()}
-          </div>
         </div>
-
-        {/* Phase 9: Dual-state Observer — backtest pair cards stream here
-            live during a run, using the same visual language as LIVE.
-            flex: 1 so the chart expands to fill the column down to the
-            bottom of the adjacent (left) control panel. */}
-        {(observerProgress || observerResult) ? (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-            <ObserverModal
-              progress={observerProgress}
-              result={observerResult}
-              review={observerReview}
-              equityHistory={observerEquity}
-              totalTicks={observerTotalTicks}
-              variant="dock"
-              onClose={onObserverClose}
-            />
-          </div>
-        ) : (
-          <div style={{ flex: 1, background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16, minHeight: 180,
-                        display: "flex", flexDirection: "column" }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
-              Observer
-            </div>
-            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim, lineHeight: 1.5 }}>
-              Submit a backtest to stream per-tick pair state here in real time —
-              the same pair cards, regime badges, and equity curves as the LIVE view.
-            </div>
-          </div>
-        )}
       </div>
+
+      {/* Observer Chart / Modal */}
+      {(observerProgress || observerResult) ? (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <ObserverModal
+            progress={observerProgress}
+            result={observerResult}
+            review={observerReview}
+            equityHistory={observerEquity}
+            totalTicks={observerTotalTicks}
+            variant="dock"
+            onClose={onObserverClose}
+            onApplyOptimizations={onApplyOptimizations}
+          />
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${COLORS.panelBorder}`, borderRadius: 8, background: `${COLORS.panel}40`, color: COLORS.textMuted, fontFamily: mono, fontSize: 12 }}>
+          Submit a backtest to observe live metrics.
+        </div>
+      )}
     </div>
   );
 }
@@ -3482,6 +3344,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   }, []);
 
   const [wsUrl, setWsUrl] = useState(() => localStorage.getItem("hydra_ws_url") || DEFAULT_WS_URL);
+
+  const [researchTab, setResearchTab] = useState("LATEST_RUN");
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
