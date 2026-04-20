@@ -8,6 +8,8 @@ import pytest
 from hydra_rm_features import (
     realized_vol_pct,
     drawdown_velocity_pct_per_hr,
+    fill_rate_24h,
+    avg_slippage_bps_24h,
 )
 
 
@@ -114,3 +116,86 @@ def test_ddv_uses_peak_inside_window_not_all_history():
     )
     result = drawdown_velocity_pct_per_hr(hist, now=t_end, window_minutes=60)
     assert abs(result - (-5.0)) < 0.01
+
+
+# ─── journal features (fill_rate, slippage) ──────────────────
+
+
+def _entry(state, hours_ago, pair="SOL/USDC", side="BUY",
+           amount=1.0, limit=100.0, fill=None, reason=None, t_end=None):
+    """Build one order-journal entry for fill_rate / slippage tests."""
+    t_end = t_end or 1_700_000_000.0
+    placed_at_ts = t_end - hours_ago * 3600
+    import datetime as _dt
+    placed_at = _dt.datetime.fromtimestamp(placed_at_ts, tz=_dt.timezone.utc).isoformat()
+    final_at = placed_at  # tests treat placed_at == final_at; fine for rate/slip
+    return {
+        "placed_at": placed_at,
+        "pair": pair,
+        "side": side,
+        "intent": {"amount": amount, "limit_price": limit, "post_only": True},
+        "lifecycle": {
+            "state": state,
+            "vol_exec": amount if fill else 0.0,
+            "avg_fill_price": fill,
+            "final_at": final_at,
+            "terminal_reason": reason,
+        },
+    }
+
+
+def test_fill_rate_returns_none_when_no_orders_in_window():
+    assert fill_rate_24h([], now=1_700_000_000.0) is None
+    # Old entries outside window
+    old = [_entry("FILLED", hours_ago=48, fill=100.0)]
+    assert fill_rate_24h(old, now=1_700_000_000.0) is None
+
+
+def test_fill_rate_counts_terminal_states_only():
+    j = [
+        _entry("FILLED", hours_ago=1, fill=100.0),
+        _entry("FILLED", hours_ago=2, fill=100.0),
+        _entry("CANCELLED_UNFILLED", hours_ago=3),
+        _entry("PLACEMENT_FAILED", hours_ago=4, reason="insufficient_USDC_balance"),
+    ]
+    # 2 filled of 4 terminal = 0.5
+    assert fill_rate_24h(j, now=1_700_000_000.0) == 0.5
+
+
+def test_fill_rate_includes_partial_fills_as_filled():
+    j = [
+        _entry("PARTIALLY_FILLED", hours_ago=1, fill=100.0, amount=1.0),
+        _entry("CANCELLED_UNFILLED", hours_ago=2),
+    ]
+    assert fill_rate_24h(j, now=1_700_000_000.0) == 0.5
+
+
+def test_slippage_returns_none_when_no_filled_in_window():
+    assert avg_slippage_bps_24h([], now=1_700_000_000.0) is None
+    old = [_entry("FILLED", hours_ago=48, fill=100.0)]
+    assert avg_slippage_bps_24h(old, now=1_700_000_000.0) is None
+
+
+def test_slippage_buy_favorable_when_filled_below_limit():
+    """BUY limit 100.0 filled at 99.5 → favorable 50 bps."""
+    j = [_entry("FILLED", hours_ago=1, side="BUY", limit=100.0, fill=99.5)]
+    result = avg_slippage_bps_24h(j, now=1_700_000_000.0)
+    assert result is not None
+    assert abs(result - 50.0) < 0.01
+
+
+def test_slippage_sell_favorable_when_filled_above_limit():
+    """SELL limit 100.0 filled at 100.5 → favorable 50 bps."""
+    j = [_entry("FILLED", hours_ago=1, side="SELL", limit=100.0, fill=100.5)]
+    result = avg_slippage_bps_24h(j, now=1_700_000_000.0)
+    assert abs(result - 50.0) < 0.01
+
+
+def test_slippage_averages_across_fills():
+    """Mix of +50 bps and -100 bps → mean -25 bps."""
+    j = [
+        _entry("FILLED", hours_ago=1, side="BUY", limit=100.0, fill=99.5),  # +50
+        _entry("FILLED", hours_ago=2, side="BUY", limit=100.0, fill=101.0),  # -100
+    ]
+    result = avg_slippage_bps_24h(j, now=1_700_000_000.0)
+    assert abs(result - (-25.0)) < 0.01

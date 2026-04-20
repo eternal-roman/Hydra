@@ -149,3 +149,96 @@ def drawdown_velocity_pct_per_hr(
     pct_drop = (current_bal - peak_bal) / peak_bal * 100.0  # negative
     minutes_since_peak = max(1.0, (current_ts - peak_ts) / _SEC_PER_MIN)
     return round(pct_drop * 60.0 / minutes_since_peak, 2)
+
+
+# Terminal lifecycle states considered for the rate denominator.
+# Exclude PLACED and any non-terminal states — those are still in flight.
+_TERMINAL_STATES = frozenset({
+    "FILLED", "PARTIALLY_FILLED", "CANCELLED_UNFILLED", "PLACEMENT_FAILED",
+})
+_FILLED_STATES = frozenset({"FILLED", "PARTIALLY_FILLED"})
+
+
+def _iso_to_ts(iso: str) -> Optional[float]:
+    """Robust parser for ISO-8601 stored in the journal. Returns None on
+    malformed input rather than raising (caller drops the entry)."""
+    if not isinstance(iso, str):
+        return None
+    try:
+        import datetime as _dt
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        return _dt.datetime.fromisoformat(iso).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _entries_in_window(
+    journal: Iterable[Dict], now: float, hours: float,
+) -> List[Dict]:
+    """Filter journal to entries whose placed_at falls within the trailing
+    window. Entries with unparseable timestamps are dropped (robust against
+    a historical format drift without crashing the feature pipeline)."""
+    cutoff = now - hours * 3600
+    out = []
+    for e in journal:
+        ts = _iso_to_ts(e.get("placed_at", ""))
+        if ts is not None and ts >= cutoff:
+            out.append(e)
+    return out
+
+
+def fill_rate_24h(journal: Iterable[Dict], now: float) -> Optional[float]:
+    """Fraction of terminal orders in last 24h that filled (or partially).
+
+    Returns None when the window has zero terminal orders — no signal
+    yet, don't lie. Typical healthy value is 0.6–0.9 on post-only limits.
+    Values < 0.3 indicate execution quality issues (price moved away,
+    spreads widened, or engine is posting aggressively).
+    """
+    window = _entries_in_window(journal, now, hours=24.0)
+    terminal = [e for e in window if e.get("lifecycle", {}).get("state") in _TERMINAL_STATES]
+    if not terminal:
+        return None
+    filled = [e for e in terminal if e["lifecycle"]["state"] in _FILLED_STATES]
+    return round(len(filled) / len(terminal), 3)
+
+
+def avg_slippage_bps_24h(journal: Iterable[Dict], now: float) -> Optional[float]:
+    """Mean slippage of fills in last 24h, in bps, signed.
+
+    Convention:
+      positive = favorable to engine (BUY filled < limit, SELL filled > limit)
+      negative = adverse (BUY filled > limit, SELL filled < limit)
+      zero     = filled exactly at limit
+
+    On post-only orders favorable is the typical case since they only rest
+    at or inside the top of book. Persistent negative values indicate the
+    engine is chasing, which feeds RM's "bleed watch" concern. Returns
+    None when no fills are in the window.
+    """
+    window = _entries_in_window(journal, now, hours=24.0)
+    fills = [
+        e for e in window
+        if e.get("lifecycle", {}).get("state") in _FILLED_STATES
+        and e["lifecycle"].get("avg_fill_price") is not None
+        and e.get("intent", {}).get("limit_price") is not None
+    ]
+    if not fills:
+        return None
+    bps_list: List[float] = []
+    for e in fills:
+        side = e.get("side")
+        limit = float(e["intent"]["limit_price"])
+        filled = float(e["lifecycle"]["avg_fill_price"])
+        if limit <= 0:
+            continue
+        raw = (filled - limit) / limit * 10000.0
+        # Negate for BUY so positive always means favorable:
+        # BUY favorable when filled < limit (raw negative) -> flip sign
+        # SELL favorable when filled > limit (raw positive) -> already right
+        signed = -raw if side == "BUY" else raw
+        bps_list.append(signed)
+    if not bps_list:
+        return None
+    return round(sum(bps_list) / len(bps_list), 2)
