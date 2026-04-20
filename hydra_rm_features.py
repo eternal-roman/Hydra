@@ -108,3 +108,44 @@ def realized_vol_pct(
     sigma = math.sqrt(var)
     annualization = math.sqrt(_MIN_PER_YEAR / candle_minutes)
     return round(sigma * annualization * 100.0, 2)
+
+
+def drawdown_velocity_pct_per_hr(
+    history: Iterable[Tuple[float, float]],
+    now: float,
+    window_minutes: float = 60.0,
+) -> Optional[float]:
+    """Peak-to-current burn rate over a trailing window, in percent/hour.
+
+    Args:
+        history: iterable of (unix_seconds, balance) pairs, chronological
+            order not required. Caller typically passes a bounded deque.
+        now: current UNIX seconds (caller supplies for testability).
+        window_minutes: how far back to look for the peak. Default 60.
+
+    Returns:
+        Sign convention: negative = balance falling (real drawdown),
+        0.0 = flat or rising, positive = impossible by design (current
+        is always <= peak_in_window, since peak is max of window).
+        Returns None when the window contains less than
+        `_DDV_MIN_WINDOW_MIN` of data or when all samples lie outside
+        the window.
+    """
+    cutoff = now - window_minutes * _SEC_PER_MIN
+    in_window = [(ts, bal) for ts, bal in history if ts >= cutoff]
+    if not in_window:
+        return None
+    in_window.sort(key=lambda p: p[0])
+    span_min = (in_window[-1][0] - in_window[0][0]) / _SEC_PER_MIN
+    if span_min < _DDV_MIN_WINDOW_MIN:
+        return None
+
+    peak_ts, peak_bal = max(in_window, key=lambda p: p[1])
+    current_ts, current_bal = in_window[-1]
+    if peak_bal <= 0:
+        return None
+    if current_bal >= peak_bal:
+        return 0.0
+    pct_drop = (current_bal - peak_bal) / peak_bal * 100.0  # negative
+    minutes_since_peak = max(1.0, (current_ts - peak_ts) / _SEC_PER_MIN)
+    return round(pct_drop * 60.0 / minutes_since_peak, 2)

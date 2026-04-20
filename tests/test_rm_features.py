@@ -5,7 +5,10 @@ from collections import deque
 
 import pytest
 
-from hydra_rm_features import realized_vol_pct
+from hydra_rm_features import (
+    realized_vol_pct,
+    drawdown_velocity_pct_per_hr,
+)
 
 
 # ─── realized_vol_pct ────────────────────────────────────────
@@ -63,3 +66,51 @@ def test_realized_vol_uses_only_candles_inside_window():
     result = realized_vol_pct(_candles(wild + flat), window_minutes=60)
     assert result is not None
     assert result < 1.0  # near zero, not the wild regime
+
+
+# ─── drawdown_velocity_pct_per_hr ────────────────────────────
+
+
+def _balance_history(samples, t_end=None):
+    """Build a deque of (ts, balance) pairs. samples is a list of
+    (minutes_before_now, balance) tuples; easiest way to write the
+    fixture by hand."""
+    t_end = t_end or 1_700_000_000.0
+    return deque(sorted(
+        [(t_end - m * 60, b) for m, b in samples],
+        key=lambda p: p[0],
+    ))
+
+
+def test_ddv_returns_none_when_history_too_short():
+    """< 10 min of history: startup noise, refuse to compute."""
+    hist = _balance_history([(0, 1000.0), (5, 995.0)])  # only 5 min span
+    assert drawdown_velocity_pct_per_hr(hist, now=1_700_000_000.0) is None
+
+
+def test_ddv_returns_zero_when_balance_flat_or_rising():
+    """No drawdown means velocity is 0 by definition."""
+    t_end = 1_700_000_000.0
+    hist = _balance_history([(60, 1000.0), (30, 1010.0), (0, 1020.0)], t_end)
+    assert drawdown_velocity_pct_per_hr(hist, now=t_end) == 0.0
+
+
+def test_ddv_computes_peak_to_trough_burn_rate():
+    """Peak 1000 at t-60min, trough 950 at t-0: -5% over 60 min = -5.0%/hr."""
+    t_end = 1_700_000_000.0
+    hist = _balance_history([(60, 1000.0), (30, 975.0), (0, 950.0)], t_end)
+    result = drawdown_velocity_pct_per_hr(hist, now=t_end)
+    assert result is not None
+    assert abs(result - (-5.0)) < 0.01
+
+
+def test_ddv_uses_peak_inside_window_not_all_history():
+    """Window is last 60 min. Oldest entry (t-90min) at 1200 is ignored.
+    Peak-in-window 1000 at t-60; trough 950 at t-0 → -5%/hr."""
+    t_end = 1_700_000_000.0
+    hist = _balance_history(
+        [(90, 1200.0), (60, 1000.0), (30, 975.0), (0, 950.0)],
+        t_end,
+    )
+    result = drawdown_velocity_pct_per_hr(hist, now=t_end, window_minutes=60)
+    assert abs(result - (-5.0)) < 0.01
