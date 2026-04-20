@@ -43,6 +43,17 @@ def test_absolute_to_relative_bps_returns_none_when_either_input_none():
     assert _absolute_to_relative_bps(2.5, None, "BTC/USDC", "test") is None
 
 
+def test_absolute_to_relative_bps_returns_none_on_nan_or_inf():
+    """Phase-1 audit catch: float('nan') passes _maybe_float and would
+    propagate silently into R1/R2 (NaN comparisons always False = wrong
+    'no fire'). Helper must null these before they reach the rules."""
+    nan = float("nan")
+    inf = float("inf")
+    assert _absolute_to_relative_bps(nan, 50000.0, "BTC/USDC", "test") is None
+    assert _absolute_to_relative_bps(2.5, nan, "BTC/USDC", "test") is None
+    assert _absolute_to_relative_bps(inf, 50000.0, "BTC/USDC", "test") is None
+
+
 def test_absolute_to_relative_bps_returns_none_when_markprice_zero():
     assert _absolute_to_relative_bps(2.5, 0.0, "BTC/USDC", "test") is None
 

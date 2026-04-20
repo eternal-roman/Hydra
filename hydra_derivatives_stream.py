@@ -43,6 +43,7 @@ Spot-pair → derivatives mapping:
 """
 
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -86,6 +87,11 @@ def _absolute_to_relative_bps(
             return None
         bps = round((fr / mark_price) * 10000, 2)
     except (TypeError, ZeroDivisionError):
+        return None
+    # Defense against NaN/Inf upstream: float('nan') passes _maybe_float
+    # and survives every comparison silently. Null it before it reaches
+    # R1/R2 (where NaN comparisons are always False = wrong "no fire").
+    if math.isnan(bps) or math.isinf(bps):
         return None
     if abs(bps) > FUNDING_BPS_SANITY_MAX:
         print(
