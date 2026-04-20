@@ -192,8 +192,27 @@ class TestComputeBalanceUsd:
         agent = self._make_agent()
         result = agent._compute_balance_usd({"XXBT.B": 1.0})
         assert result["total_usd"] == 84000.0
-        assert result["staked_usd"] == 84000.0
-        assert result["tradable_usd"] == 0
+
+    def test_usdc_flex_earn_counted_in_total(self):
+        """Regression (v2.16.2): Kraken earn-flex products use the '.F'
+        suffix. Before .F joined STAKED_SUFFIXES the normalizer left the
+        asset as 'USDC.F' — which is not a price-table key — so the
+        balance silently valued at $0 in the dashboard history chart."""
+        agent = self._make_agent()
+        result = agent._compute_balance_usd({"USDC.F": 500.0})
+        assert result["total_usd"] == 500.0
+        # Earn-flex is instant-redeem but not directly tradable for
+        # limit-post-only orders, so it counts as staked.
+        assert result["staked_usd"] == 500.0
+        assert result["tradable_usd"] == 0.0
+
+    def test_flex_suffix_detected_as_staked(self):
+        assert KrakenCLI._is_staked("USDC.F") is True
+        assert KrakenCLI._is_staked("BTC.F") is True
+
+    def test_flex_suffix_stripped_in_normalize(self):
+        assert KrakenCLI._normalize_asset("USDC.F") == "USDC"
+        assert KrakenCLI._normalize_asset("XXBT.F") == "BTC"
 
 
 # ═══════════════════════════════════════════════════════════════

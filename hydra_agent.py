@@ -97,8 +97,12 @@ class KrakenCLI:
         "BTC/USDC": "BTC/USDC",
     }
 
-    # Suffixes Kraken uses for non-tradable (staked/bonded/locked) assets
-    STAKED_SUFFIXES = ('.B', '.S', '.M')
+    # Suffixes Kraken uses for non-tradable (staked/bonded/locked/earn) assets.
+    # .F = earn-flex (yield-bearing, instant-redeem) — e.g. USDC.F. v2.16.2
+    # adds .F to the suffix set: previously USDC.F normalized to itself,
+    # missed the "USDC"→1.0 USD price lookup, and was silently valued at $0
+    # in the dashboard's balance history chart + Total Balance stat.
+    STAKED_SUFFIXES = ('.B', '.S', '.M', '.F')
 
     # Kraken sometimes returns extended asset names — normalize to canonical form
     ASSET_NORMALIZE = {
@@ -1655,6 +1659,13 @@ class HydraAgent:
         self.pairs = pairs
         self.initial_balance = initial_balance
         self._competition_start_balance = None  # Set once on first start, persisted across resumes
+        # Portfolio-level drawdown (v2.16.2): per-pair engine.max_drawdown is a
+        # pinned running max across tiny dips; it does not reflect exchange-wide
+        # equity. Track here using total_usd from _compute_balance_usd so the
+        # dashboard's "Max DD" widget is meaningful. Persisted across --resume.
+        self._portfolio_peak_usd: float = 0.0
+        self._portfolio_max_drawdown_pct: float = 0.0
+        self._portfolio_current_drawdown_pct: float = 0.0
         self.interval = interval_seconds
         self.duration = duration_seconds
         self.mode = mode
@@ -2191,6 +2202,10 @@ class HydraAgent:
             # bypass __init__ and therefore never set self.thesis.
             "thesis_state": (getattr(self, "thesis", None).snapshot()
                              if getattr(self, "thesis", None) else {}),
+            "portfolio_drawdown": {
+                "peak_usd": getattr(self, "_portfolio_peak_usd", 0.0),
+                "max_pct": getattr(self, "_portfolio_max_drawdown_pct", 0.0),
+            },
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -2250,6 +2265,15 @@ class HydraAgent:
             self._normalize_journal_pairs(self.order_journal)
             if snapshot.get("competition_start_balance") is not None:
                 self._competition_start_balance = float(snapshot["competition_start_balance"])
+            # Restore portfolio-level drawdown so weeks-long peak is preserved
+            # across --resume. Fresh start (no key) leaves the zeros set in __init__.
+            pdd = snapshot.get("portfolio_drawdown") or {}
+            try:
+                self._portfolio_peak_usd = float(pdd.get("peak_usd", 0.0))
+                self._portfolio_max_drawdown_pct = float(pdd.get("max_pct", 0.0))
+            except (TypeError, ValueError):
+                self._portfolio_peak_usd = 0.0
+                self._portfolio_max_drawdown_pct = 0.0
             # Carry the persisted userref floor into _userref_counter. The
             # _reseed_userref_from_history() call in __init__ will raise it
             # further if the journal reveals higher values.
@@ -4852,6 +4876,22 @@ class HydraAgent:
             "total_usd": 0, "tradable_usd": 0, "staked_usd": 0, "assets": []
         }
 
+        # v2.16.2: portfolio-level drawdown tracking. Uses total_usd so a
+        # coordinated dip across all pairs (or a forex swing) is captured
+        # rather than buried under the max-of-per-pair aggregation the
+        # dashboard used to do. Zero totals (balance fetch failed) are
+        # skipped so we never register a spurious 100% drawdown.
+        total_usd_live = float(balance_usd.get("total_usd") or 0.0)
+        if total_usd_live > 0:
+            if total_usd_live > self._portfolio_peak_usd:
+                self._portfolio_peak_usd = total_usd_live
+            if self._portfolio_peak_usd > 0:
+                cur_dd = ((self._portfolio_peak_usd - total_usd_live) /
+                          self._portfolio_peak_usd * 100.0)
+                self._portfolio_current_drawdown_pct = round(cur_dd, 4)
+                if cur_dd > self._portfolio_max_drawdown_pct:
+                    self._portfolio_max_drawdown_pct = cur_dd
+
         pairs_data = {}
         for pair, state in all_states.items():
             pairs_data[pair] = state
@@ -4948,6 +4988,11 @@ class HydraAgent:
             "remaining": 0 if self.duration == 0 else round(self.duration - elapsed, 1),
             "balance": bal if "error" not in bal else {},
             "balance_usd": balance_usd,
+            "portfolio_drawdown": {
+                "peak_usd": round(self._portfolio_peak_usd, 2),
+                "current_pct": round(self._portfolio_current_drawdown_pct, 4),
+                "max_pct": round(self._portfolio_max_drawdown_pct, 4),
+            },
             "fee_tier": self._fee_tier_cache,
             "pairs": pairs_data,
             "order_journal": self.order_journal[-20:],
@@ -5166,7 +5211,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.16.1",
+            "version": "2.16.2",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

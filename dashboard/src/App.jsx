@@ -3474,8 +3474,10 @@ export default function App() {
       if (!r.ok) throw new Error(`status ${r.status}`);
       const j = await r.json();
       wsTokenRef.current = j.token || "";
+      return wsTokenRef.current;
     } catch (e) {
       console.error("[HYDRA] WS token fetch failed:", e);
+      return "";
     }
   }, []);
 
@@ -3483,12 +3485,14 @@ export default function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
-    ws.onopen = () => {
+    ws.onopen = async () => {
+      // v2.16.2: refresh the auth token FIRST, then flip `connected=true`.
+      // Prior ordering raced the async token fetch against any
+      // useEffect(() => sendMessage(...), [connected]) — notably the
+      // companion.connect kickoff — which sent messages with a stale or
+      // empty token and got auth_required, hiding the orb permanently.
+      await refreshWsToken();
       if (mountedRef.current) setConnected(true);
-      // Refresh the auth token on every (re)connect: the agent rotates
-      // it at each restart so a cached token would start returning
-      // auth_required until the user reloaded the page.
-      refreshWsToken();
     };
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
@@ -3576,6 +3580,15 @@ export default function App() {
               return;
             // ─── Companion channel ───
             case "companion.connect_ack": {
+              // v2.16.2: if the agent rotated its token between our last
+              // fetch and this send, refresh the token and keep the orb
+              // visible — the next user interaction (or a reconnect) will
+              // use the fresh token. Without this we'd stay hidden forever.
+              if (!msg.success && msg.error === "auth_required") {
+                refreshWsToken();
+                setCompanionVisible(true);
+                return;
+              }
               if (msg.success) {
                 const metas = {};
                 for (const c of (msg.all_companions || [])) metas[c.id] = c;
@@ -4056,9 +4069,11 @@ export default function App() {
   // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
   // across --resume (engine pnl_pct resets because initial_balance gets re-split).
   const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
-  // Max drawdown: engine tracks historical max per pair (persists across --resume).
-  // Supplement with max drawdown from the dashboard's own balance history so
-  // exchange-level drops (across all pairs) are also captured.
+  // Max drawdown: v2.16.2+ — agent tracks portfolio-level peak/max via
+  // balance_usd.total_usd and persists across --resume. Falls back to the
+  // legacy max-of-per-pair + in-session history if the agent hasn't sent
+  // the field yet (older snapshots, reconnect before first tick).
+  const portDD = state?.portfolio_drawdown || null;
   const engineDD = Math.max(...Object.values(pairs).map(p => p.portfolio?.max_drawdown_pct || 0), 0);
   let histDD = 0;
   if (history.length > 1) {
@@ -4069,7 +4084,8 @@ export default function App() {
       if (dd > histDD) histDD = dd;
     }
   }
-  const maxDD = Math.max(engineDD, histDD);
+  const maxDD = portDD?.max_pct != null ? portDD.max_pct : Math.max(engineDD, histDD);
+  const currentDD = portDD?.current_pct != null ? portDD.current_pct : 0;
   // Engine round-trip trades (position fully closed)
   const totalTrades = Object.values(pairs).reduce((s, p) => s + (p.performance?.total_trades || 0), 0);
   const totalWins = Object.values(pairs).reduce((s, p) => s + (p.performance?.win_count || 0), 0);
@@ -4274,7 +4290,12 @@ export default function App() {
             <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
               <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
-              <StatCard label="Max Drawdown" value={maxDD.toFixed(2)} unit="%" color={maxDD > 5 ? COLORS.danger : COLORS.warn} />
+              <StatCard
+                label={portDD ? "Max DD (Current)" : "Max Drawdown"}
+                value={portDD ? `${maxDD.toFixed(2)} (${currentDD.toFixed(2)})` : maxDD.toFixed(2)}
+                unit="%"
+                color={maxDD > 5 ? COLORS.danger : COLORS.warn}
+              />
               <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
             </div>
@@ -4916,7 +4937,7 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.16.1 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
