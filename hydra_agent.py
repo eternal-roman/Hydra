@@ -28,6 +28,7 @@ import traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from collections import deque
 from typing import Dict, List, Optional, Any, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1682,6 +1683,12 @@ class HydraAgent:
         # a killed session could collide with still-open orders' userrefs.
         self._userref_counter = int(time.time()) & 0x7FFFFFFF
 
+        # v2.16.0: balance-history buffer for RM drawdown-velocity feature.
+        # Bounded at 720 samples (12h @ 1/min). Not snapshot-persisted —
+        # reconstitutes from live balance stream on restart; first 10 min
+        # post-start feed drawdown_velocity None (insufficient window).
+        self._balance_history: deque = deque(maxlen=720)
+
         # Sizing config based on mode
         sizing = SIZING_COMPETITION if mode == "competition" else SIZING_CONSERVATIVE
 
@@ -1980,6 +1987,14 @@ class HydraAgent:
             self._save_snapshot()
         except Exception as e:
             print(f"  [HYDRA] Snapshot flush failed: {e}")
+
+    # ─── RM features: balance-history sample ──────────────────────────────
+
+    def _record_balance_sample(self, ts: float, balance: float) -> None:
+        """Append one balance sample to the RM-features buffer. Called once
+        per tick from the main loop; maxlen-bounded so no trimming needed."""
+        if balance is not None and balance >= 0:
+            self._balance_history.append((ts, float(balance)))
 
     # ─── Session snapshot (atomic JSON; resumable across runs) ─────────────
 
@@ -2731,6 +2746,15 @@ class HydraAgent:
                     self._current_portfolio_summary = self._build_portfolio_summary()
                 except Exception:
                     self._current_portfolio_summary = {}
+
+                # v2.16.0: feed RM drawdown-velocity buffer with the
+                # already-computed total NAV. Skip when summary failed.
+                try:
+                    equity = self._current_portfolio_summary.get("total_equity_usd")
+                    if equity is not None:
+                        self._record_balance_sample(time.time(), equity)
+                except Exception:
+                    pass
 
                 # Phase 1.95: Periodic portfolio strategist review (Grok)
                 # Track candle epoch — advances when ALL pairs have new timestamps
