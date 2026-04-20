@@ -253,6 +253,12 @@ def _count_stale_fields(qi: Dict[str, Any]) -> int:
     We also honor an optional aggregate field `staleness_s`: if it
     exceeds STALENESS_SECONDS_MAX, treat the whole block as stale
     (counts as 5 stale fields — above the threshold regardless).
+
+    Synthetic-pair awareness: if `synthetic_pair=True`, the OI- and
+    basis-derived fields are None by construction (no direct perp
+    exists, e.g. SOL/BTC). They are NOT stale — they are unavailable
+    by design. Skip them; R10 only watches the fields the synthetic
+    path actually populates (funding + cvd + regime).
     """
     aggregate = qi.get("staleness_s")
     try:
@@ -260,6 +266,10 @@ def _count_stale_fields(qi: Dict[str, Any]) -> int:
             return 5  # treat entire block as stale
     except (TypeError, ValueError):
         pass
-    tracked = ("funding_bps_8h", "oi_delta_1h_pct", "oi_price_regime",
-               "basis_apr_pct", "cvd_divergence_sigma")
+
+    if qi.get("synthetic_pair"):
+        tracked = ("funding_bps_8h", "cvd_divergence_sigma", "oi_price_regime")
+    else:
+        tracked = ("funding_bps_8h", "oi_delta_1h_pct", "oi_price_regime",
+                   "basis_apr_pct", "cvd_divergence_sigma")
     return sum(1 for k in tracked if qi.get(k) is None)

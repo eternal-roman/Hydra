@@ -42,7 +42,7 @@ regression bug, not a style issue.
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
 - **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.15.1
+- **Version pin:** v2.15.2
 
 ## Defaults (inherited)
 
@@ -69,6 +69,8 @@ regression bug, not a style issue.
 - **Ledger shield floor = 0.20 BTC** — cannot be lowered via API, ever
 - **SKIP ≠ BLOCK** — posture restriction SKIPs, BLOCK reserved for hard rules
 - **`HYDRA_COMPANION_LIVE_EXECUTION` default OFF** — proposals are paper until opted in
+- **Funding is markPrice-relative, never absolute** — Kraken Futures `PF_*` returns `fundingRate` as absolute USD-per-contract-per-period. Convert to bps via `(fundingRate / markPrice) * 10000`, never `fundingRate * 10000`. The `_absolute_to_relative_bps` helper in `hydra_derivatives_stream.py` enforces this, including a ±500 bps clamp against future API drift. Pre-v2.15.2 values were wrong by ~70000x (BTC) and ~80x (SOL); R1/R2 fires from that period are not authoritative.
+- **Synthetic pairs declare themselves to R10** — `DerivativesSnapshot.synthetic=True` propagates to `quant_indicators["synthetic_pair"]`; R10 then tracks only funding/cvd/regime (the fields the synthetic path actually populates). Adding a new pair without a direct Kraken Futures perp requires this flag, otherwise R10 will structurally force-hold every tick.
 
 Subsystem detail (indicators, regime, Kelly sizing, price precision,
 execution stream lifecycle, resume reconciliation, forex modifier,

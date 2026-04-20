@@ -27,8 +27,8 @@ Fields consumed per ticker:
   fundingRatePrediction, openInterest
 
 Signals surfaced per spot pair:
-  funding_bps_8h            : current 8h funding rate × 10000
-  funding_predicted_bps     : next 8h prediction
+  funding_bps_8h            : current 8h funding rate as bps (markPrice-relative)
+  funding_predicted_bps     : next 8h prediction as bps (markPrice-relative)
   oi_delta_1h_pct           : OI change over 1h window
   oi_delta_24h_pct          : OI change over 24h window
   oi_price_regime           : trend_confirm_long | trend_confirm_short
@@ -43,6 +43,7 @@ Spot-pair → derivatives mapping:
 """
 
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -57,6 +58,50 @@ SPOT_TO_DERIVATIVES: Dict[str, Dict[str, object]] = {
     "SOL/USDC": {"perp": "PF_SOLUSD", "quarterly_prefix": "PI_SOLUSD"},
     "SOL/BTC":  {"perp": None, "quarterly_prefix": None, "synthetic": True},
 }
+
+
+# Kraken Futures returns PF_* fundingRate as absolute (quote currency per
+# contract per funding period), NOT as a decimal rate. Convert to relative
+# bps by dividing by markPrice first. Pre-v2.15.2 the parser multiplied by
+# 10000 unconditionally, producing values that were wrong by markPrice (~70000x
+# for BTC, ~80x for SOL). BTC's garbage tripped R1/R2; SOL's looked plausible
+# but misled the Quant.
+#
+# Sanity bound is defense-in-depth against future API drift. Real funding
+# extremes on Kraken Futures perps live in ±100 bps/8h; ±500 leaves 5x
+# headroom. Past that, null + warn rather than feed R1/R2 a poisoned input.
+FUNDING_BPS_SANITY_MAX = 500.0
+
+
+def _absolute_to_relative_bps(
+    fr: Optional[float], mark_price: Optional[float],
+    pair: str, source: str,
+) -> Optional[float]:
+    """Convert Kraken Futures absolute fundingRate to relative bps.
+    Returns None if either input is missing/zero/non-finite, or if the
+    resulting magnitude exceeds the sanity bound."""
+    if fr is None or mark_price is None:
+        return None
+    try:
+        if mark_price == 0:
+            return None
+        bps = round((fr / mark_price) * 10000, 2)
+    except (TypeError, ZeroDivisionError):
+        return None
+    # Defense against NaN/Inf upstream: float('nan') passes _maybe_float
+    # and survives every comparison silently. Null it before it reaches
+    # R1/R2 (where NaN comparisons are always False = wrong "no fire").
+    if math.isnan(bps) or math.isinf(bps):
+        return None
+    if abs(bps) > FUNDING_BPS_SANITY_MAX:
+        print(
+            f"  [DerivativesStream] {pair} funding {bps:+.1f} bps from {source} "
+            f"exceeds sanity bound ±{FUNDING_BPS_SANITY_MAX:.0f}; nulling. "
+            f"Investigate Kraken Futures API units or WSL bridge.",
+            file=sys.stderr,
+        )
+        return None
+    return bps
 
 
 @dataclass
@@ -239,22 +284,49 @@ class DerivativesStream:
         """Invoke `kraken -o json futures tickers` via WSL and return
         the tickers array. Returns [] on any error — caller treats an
         empty list as 'no update this cycle' (fetch_errors increments,
-        staleness grows). NEVER calls any authenticated subcommand."""
+        staleness grows). NEVER calls any authenticated subcommand.
+
+        v2.15.2: log per failure mode so stuck WSL bridges are visible.
+        Prior behavior swallowed exceptions silently; staleness would
+        grow without any operator-visible cause.
+        """
         cmd_str = "source ~/.cargo/env && kraken -o json futures tickers 2>/dev/null"
         cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=self.HTTP_TIMEOUT_S
             )
-            stdout = result.stdout.strip()
-            if not stdout:
-                return []
-            payload = json.loads(stdout)
-            if not isinstance(payload, dict):
-                return []
-            return payload.get("tickers", []) or []
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        except subprocess.TimeoutExpired:
+            print(
+                f"  [DerivativesStream] kraken CLI timeout after "
+                f"{self.HTTP_TIMEOUT_S}s — WSL bridge may be stuck",
+                file=sys.stderr,
+            )
             return []
+        except OSError as e:
+            print(
+                f"  [DerivativesStream] OSError invoking WSL/kraken: {e} "
+                f"— check `wsl -l -v` for distro 'Ubuntu'",
+                file=sys.stderr,
+            )
+            return []
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            return []
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            preview = stdout[:120].replace("\n", " ")
+            print(
+                f"  [DerivativesStream] JSON parse error from kraken CLI: {e} "
+                f"— payload preview: {preview!r}",
+                file=sys.stderr,
+            )
+            return []
+        if not isinstance(payload, dict):
+            return []
+        return payload.get("tickers", []) or []
 
     # ─── Per-pair populate ───────────────────────────────────────
 
@@ -271,10 +343,19 @@ class DerivativesStream:
             snap.mark_price = mark
         if idx is not None:
             snap.spot_price = idx
-        if fr is not None:
-            snap.funding_bps_8h = round(fr * 10000, 2)
-        if fr_pred is not None:
-            snap.funding_predicted_bps = round(fr_pred * 10000, 2)
+        # Use the freshly extracted `mark` (not snap.mark_price which could be
+        # stale from a prior tick where this tick lacks markPrice). If mark is
+        # missing this round, both funding fields go None — we cannot guess.
+        # Unlike the guarded fields above, funding writes are unconditional
+        # (helper may return None). Reason: a stale funding bps anchored to a
+        # markPrice that didn't refresh this tick would silently mislead R1/R2.
+        # Nulling forces R10 to flag staleness via its missing-field count.
+        snap.funding_bps_8h = _absolute_to_relative_bps(
+            fr, mark, snap.pair, "fundingRate"
+        )
+        snap.funding_predicted_bps = _absolute_to_relative_bps(
+            fr_pred, mark, snap.pair, "fundingRatePrediction"
+        )
         if oi is not None:
             snap.open_interest = oi
 
@@ -324,11 +405,37 @@ class DerivativesStream:
         crowded, and the SOL/BTC mark ratio from the two USD perps."""
         sol_fr = _maybe_float(sol_tick.get("fundingRate"))
         btc_fr = _maybe_float(btc_tick.get("fundingRate"))
-        if sol_fr is not None and btc_fr is not None:
-            snap.funding_bps_8h = round((sol_fr - btc_fr) * 10000, 2)
-
         sol_mark = _maybe_float(sol_tick.get("markPrice"))
         btc_mark = _maybe_float(btc_tick.get("markPrice"))
+
+        # Each leg's fundingRate is absolute USD/contract/period — they don't
+        # share a denominator. Normalize each by its own markPrice before the
+        # subtraction. If either leg lacks markPrice, the synthetic signal is
+        # undefined; null it rather than emit garbage.
+        sol_rel = _absolute_to_relative_bps(
+            sol_fr, sol_mark, snap.pair, "synthetic.sol"
+        )
+        btc_rel = _absolute_to_relative_bps(
+            btc_fr, btc_mark, snap.pair, "synthetic.btc"
+        )
+        if sol_rel is not None and btc_rel is not None:
+            diff = round(sol_rel - btc_rel, 2)
+            # Re-clamp the diff: per-leg clamp bounds each input to ±500, so the
+            # subtraction can still reach ±1000. A diff exceeding ±500 means the
+            # two legs disagree at unrealistic magnitudes — null the synthetic too.
+            if abs(diff) > FUNDING_BPS_SANITY_MAX:
+                print(
+                    f"  [DerivativesStream] {snap.pair} synthetic funding "
+                    f"{diff:+.1f} bps exceeds sanity bound; nulling.",
+                    file=sys.stderr,
+                )
+                snap.funding_bps_8h = None
+            else:
+                snap.funding_bps_8h = diff
+        else:
+            # Same null-on-stale rationale as _populate_from_ticker — see comment there.
+            snap.funding_bps_8h = None
+
         if sol_mark is not None and btc_mark is not None and btc_mark > 0:
             ratio = sol_mark / btc_mark
             snap.mark_price = round(ratio, 8)

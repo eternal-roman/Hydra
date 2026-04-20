@@ -3224,6 +3224,7 @@ class HydraAgent:
                         "oi_price_regime": snap.oi_price_regime,
                         "basis_apr_pct": snap.basis_apr_pct,
                         "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
+                        "synthetic_pair": snap.synthetic,
                     }
             except Exception:
                 pass
@@ -4994,7 +4995,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.15.1",
+            "version": "2.15.2",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
