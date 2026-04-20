@@ -1996,6 +1996,163 @@ class HydraAgent:
         if balance is not None and balance >= 0:
             self._balance_history.append((ts, float(balance)))
 
+    # ─── v2.16.0: quant_indicators assembly + RM engine-internal features ──
+
+    @staticmethod
+    def _engine_candles_as_dicts(engine: Optional[object]) -> List[Dict[str, float]]:
+        """Normalize engine candle buffer into [{ts, close}, ...] form.
+
+        Real HydraEngine exposes `engine.candles` as a list of Candle
+        dataclasses (with `timestamp`/`close`). Tests may provide a mock
+        with `engine.get_candles()` returning dicts directly. Either form
+        is accepted; unknown shapes return []."""
+        if engine is None:
+            return []
+        # Prefer get_candles() if present (mocks/future API)
+        if hasattr(engine, "get_candles"):
+            try:
+                raw = engine.get_candles() or []
+                # If already list of dicts, pass through
+                if raw and isinstance(raw[0], dict):
+                    return list(raw)
+                # Otherwise treat as list of Candle-like objects
+                return [
+                    {"ts": float(getattr(c, "timestamp", getattr(c, "ts", 0))),
+                     "close": float(getattr(c, "close"))}
+                    for c in raw
+                ]
+            except Exception:
+                pass
+        # Fall back to the real engine attribute
+        try:
+            raw = getattr(engine, "candles", []) or []
+            return [
+                {"ts": float(getattr(c, "timestamp", getattr(c, "ts", 0))),
+                 "close": float(getattr(c, "close"))}
+                for c in raw
+            ]
+        except Exception:
+            return []
+
+    def _build_quant_indicators(self, pair: str, state: Dict) -> None:
+        """Assemble the quant_indicators dict for one pair. Mutates state.
+
+        Combines DerivativesStream snapshot + engine CVD divergence
+        (pre-v2.16 fields) with the six v2.16.0 RM engine-internal
+        features. The kill switch HYDRA_RM_FEATURES_DISABLED=1 is read
+        on every call so it can be flipped live without restart."""
+        quant_indicators: Dict[str, Any] = {}
+        if self.derivatives_stream is not None:
+            try:
+                snap = self.derivatives_stream.latest(pair)
+                if snap is not None:
+                    quant_indicators = {
+                        "funding_bps_8h": snap.funding_bps_8h,
+                        "funding_predicted_bps": snap.funding_predicted_bps,
+                        "oi_delta_1h_pct": snap.oi_delta_1h_pct,
+                        "oi_delta_24h_pct": snap.oi_delta_24h_pct,
+                        "oi_price_regime": snap.oi_price_regime,
+                        "basis_apr_pct": snap.basis_apr_pct,
+                        "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
+                        "synthetic_pair": snap.synthetic,
+                    }
+            except Exception:
+                pass
+
+        engine = self.engines.get(pair)
+        if engine is not None:
+            try:
+                quant_indicators["cvd_divergence_sigma"] = engine.cvd_divergence_sigma()
+            except Exception:
+                pass
+
+        # v2.16.0: RM engine-internal features. Kill switch read live.
+        if os.environ.get("HYDRA_RM_FEATURES_DISABLED") != "1":
+            self._add_rm_features(pair, engine, quant_indicators)
+
+        if quant_indicators:
+            state["quant_indicators"] = quant_indicators
+
+    def _add_rm_features(
+        self, pair: str, engine: Optional[object], qi: Dict[str, Any],
+    ) -> None:
+        """Compute and attach the six engine-internal RM features. Every
+        call site is defensively guarded: a single broken feature cannot
+        take down the indicator block."""
+        from hydra_rm_features import (
+            realized_vol_pct,
+            drawdown_velocity_pct_per_hr,
+            fill_rate_24h,
+            avg_slippage_bps_24h,
+            minutes_since_last_trade,
+        )
+        now = time.time()
+        candles = self._engine_candles_as_dicts(engine)
+
+        try:
+            qi["realized_vol_1h_pct"] = realized_vol_pct(candles, window_minutes=60)
+            qi["realized_vol_24h_pct"] = realized_vol_pct(candles, window_minutes=1440)
+        except Exception:
+            qi["realized_vol_1h_pct"] = None
+            qi["realized_vol_24h_pct"] = None
+
+        try:
+            qi["drawdown_velocity_pct_per_hr"] = drawdown_velocity_pct_per_hr(
+                list(self._balance_history), now=now,
+            )
+        except Exception:
+            qi["drawdown_velocity_pct_per_hr"] = None
+
+        journal = list(self.order_journal) if hasattr(self, "order_journal") else []
+        try:
+            qi["fill_rate_24h"] = fill_rate_24h(journal, now=now)
+        except Exception:
+            qi["fill_rate_24h"] = None
+        try:
+            qi["avg_slippage_bps_24h"] = avg_slippage_bps_24h(journal, now=now)
+        except Exception:
+            qi["avg_slippage_bps_24h"] = None
+        try:
+            qi["minutes_since_last_trade"] = minutes_since_last_trade(journal, now=now)
+        except Exception:
+            qi["minutes_since_last_trade"] = None
+
+        # Cross-pair correlation: SOL/USDC <-> BTC/USDC, symmetric on both pairs.
+        try:
+            qi["cross_pair_corr_24h"] = self._compute_cross_pair_corr_24h()
+        except Exception:
+            qi["cross_pair_corr_24h"] = None
+
+    def _compute_cross_pair_corr_24h(self) -> Optional[float]:
+        """Derive 15m-candle log-returns for BTC/USDC and SOL/USDC, align
+        by index, compute Pearson. Returns None if either engine missing
+        or insufficient samples."""
+        import math
+        from hydra_rm_features import cross_pair_corr
+        btc = self.engines.get("BTC/USDC")
+        sol = self.engines.get("SOL/USDC")
+        if btc is None or sol is None:
+            return None
+        btc_c = self._engine_candles_as_dicts(btc)
+        sol_c = self._engine_candles_as_dicts(sol)
+        # Use last 97 candles (15m * 97 ~ 24h) -> 96 returns
+        n = min(len(btc_c), len(sol_c), 97)
+        if n < 31:
+            return None
+        btc_tail = btc_c[-n:]
+        sol_tail = sol_c[-n:]
+        btc_ret, sol_ret = [], []
+        for i in range(1, n):
+            try:
+                b0, b1 = float(btc_tail[i - 1]["close"]), float(btc_tail[i]["close"])
+                s0, s1 = float(sol_tail[i - 1]["close"]), float(sol_tail[i]["close"])
+                if b0 > 0 and s0 > 0:
+                    btc_ret.append(math.log(b1 / b0))
+                    sol_ret.append(math.log(s1 / s0))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return cross_pair_corr(btc_ret, sol_ret)
+
     # ─── Session snapshot (atomic JSON; resumable across runs) ─────────────
 
     def _snapshot_path(self) -> str:
@@ -3235,31 +3392,8 @@ class HydraAgent:
         # v2.14: inject QUANT INDICATORS block — DerivativesStream values
         # plus engine's CVD divergence. Absent stream / stale data surface
         # as None; the Quant prompt + Python R10 rule handle degradation.
-        quant_indicators: Dict[str, Any] = {}
-        if self.derivatives_stream is not None:
-            try:
-                snap = self.derivatives_stream.latest(pair)
-                if snap is not None:
-                    quant_indicators = {
-                        "funding_bps_8h": snap.funding_bps_8h,
-                        "funding_predicted_bps": snap.funding_predicted_bps,
-                        "oi_delta_1h_pct": snap.oi_delta_1h_pct,
-                        "oi_delta_24h_pct": snap.oi_delta_24h_pct,
-                        "oi_price_regime": snap.oi_price_regime,
-                        "basis_apr_pct": snap.basis_apr_pct,
-                        "staleness_s": round(snap.staleness_s, 1) if snap.staleness_s != float("inf") else None,
-                        "synthetic_pair": snap.synthetic,
-                    }
-            except Exception:
-                pass
-        try:
-            engine = self.engines.get(pair)
-            if engine is not None:
-                quant_indicators["cvd_divergence_sigma"] = engine.cvd_divergence_sigma()
-        except Exception:
-            pass
-        if quant_indicators:
-            state["quant_indicators"] = quant_indicators
+        # v2.16.0: also adds the six engine-internal RM features.
+        self._build_quant_indicators(pair, state)
 
         try:
             decision = self.brain.deliberate(state)
