@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.16.0] — 2026-04-19
+
+### Added
+
+- **Risk Manager engine-internal features** — six new signals in `quant_indicators` from a new pure-Python module `hydra_rm_features.py` (stdlib only, no I/O, no mutation): `realized_vol_{1h,24h}_pct`, `drawdown_velocity_pct_per_hr`, `fill_rate_24h`, `avg_slippage_bps_24h`, `cross_pair_corr_24h`, `minutes_since_last_trade`. Surfaced to the Risk Manager prompt with concrete numeric cue thresholds (e.g., `drawdown_velocity_pct_per_hr < -3.0 → ADJUST 0.5x`, `fill_rate_24h < 0.3 → flag execution_broken`, `cross_pair_corr_24h > 0.8 → tighten on overlapping cluster`). Removes the structural reason RM was producing only "general caution" — it now has specific, articulable input fields to cite.
+- **Env kill switch** `HYDRA_RM_FEATURES_DISABLED=1` — skips all feature computation in `_build_quant_indicators`; instant rollback without redeploy.
+- **In-memory balance-history buffer** on `HydraAgent` — bounded deque (720 samples ≈ 12h at 1/min) feeding the drawdown-velocity feature. Not snapshot-persisted; reconstitutes from the live balance stream on restart.
+
+### Changed
+
+- **`RISK_MANAGER_PROMPT`** — added INPUT FEATURES section listing the six new fields with per-feature cue thresholds and a citation rule ("`reasoning` must quote the numeric value; generic caution is not a valid reason"). Hard mandate #5 replaced from a "> 50% of NAV" heuristic with a correlation-aware cluster check using `cross_pair_corr_24h`.
+- **Dashboard QUANT and RISK opinion blocks** — restyled to mirror the GROK STRATEGIST visual treatment: padded "pressed cavity inlay" container with soft shaded backdrop, pill label, white body text. Each block collapses cleanly when its content is empty. New `COLORS.risk = "#a78bfa"` (lavender) replaces the prior gray (`COLORS.textDim`) for the Risk Manager voice — visually distinct from the existing `COLORS.purple = "#8855ff"` used by the volatile regime so they don't clash when both render.
+
+### Fixed
+
+- **Snapshot + rolling-journal persistence excludes `PLACEMENT_FAILED` entries** — pre-exchange diagnostics (`insufficient_USDC_balance`, `placement_error:api`) are useful in the in-memory current-session journal for live debugging but were surviving across `--resume` via the snapshot's `order_journal` field, then merging back into the rolling file, then re-displaying as failed-trade rows in the dashboard. New `_journal_for_persistence()` helper used by both write paths filters them out; in-memory `self.order_journal` is unchanged so current-session diagnostics survive. Defense-in-depth filter added to the dashboard's order-journal render so any historical entries stop appearing as trades.
+
+---
+
 ## [2.15.2] — 2026-04-19
 
 ### Fixed

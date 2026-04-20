@@ -42,7 +42,7 @@ regression bug, not a style issue.
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
 - **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.15.2
+- **Version pin:** v2.16.0
 
 ## Defaults (inherited)
 
@@ -71,6 +71,8 @@ regression bug, not a style issue.
 - **`HYDRA_COMPANION_LIVE_EXECUTION` default OFF** — proposals are paper until opted in
 - **Funding is markPrice-relative, never absolute** — Kraken Futures `PF_*` returns `fundingRate` as absolute USD-per-contract-per-period. Convert to bps via `(fundingRate / markPrice) * 10000`, never `fundingRate * 10000`. The `_absolute_to_relative_bps` helper in `hydra_derivatives_stream.py` enforces this, including a ±500 bps clamp against future API drift. Pre-v2.15.2 values were wrong by ~70000x (BTC) and ~80x (SOL); R1/R2 fires from that period are not authoritative.
 - **Synthetic pairs declare themselves to R10** — `DerivativesSnapshot.synthetic=True` propagates to `quant_indicators["synthetic_pair"]`; R10 then tracks only funding/cvd/regime (the fields the synthetic path actually populates). Adding a new pair without a direct Kraken Futures perp requires this flag, otherwise R10 will structurally force-hold every tick.
+- **`hydra_rm_features.py` is pure** — no I/O, subprocess, network, or file access; every function returns `Optional[float]` (or `Optional[dict]`) from input alone, returning `None` on insufficient data. A future contributor adding side effects breaks the "fails-silent with None" contract that lets R10 and RM reason over missing vs corrupted data and that lets `HYDRA_RM_FEATURES_DISABLED` work as an instant rollback.
+- **`PLACEMENT_FAILED` entries are session-only** — pre-exchange diagnostics (`insufficient_USDC_balance`, `placement_error:api`) live in the in-memory `HydraAgent.order_journal` for live debugging but MUST NOT persist to `hydra_session_snapshot.json` or the rolling `hydra_order_journal.json`. The `_journal_for_persistence()` helper is the single chokepoint; both write paths (`_save_snapshot` and the per-tick rolling write) go through it. If you add a third write path, route it through the helper too.
 
 Subsystem detail (indicators, regime, Kelly sizing, price precision,
 execution stream lifecycle, resume reconciliation, forex modifier,
@@ -85,6 +87,7 @@ shutdown) → `cbp --label hydra.engine_invariants` + `hydra.trading_invariants`
 | brain | `hydra_brain.py` | 3-agent AI: Claude Market Quant + Risk Manager + Grok Strategist |
 | derivatives_stream | `hydra_derivatives_stream.py` | Kraken Futures public data via kraken CLI (funding, OI, basis) — read-only, SIGNAL INPUT ONLY |
 | quant_rules | `hydra_quant_rules.py` | R1-R10 deterministic guardrails (funding extreme, OI regime, basis euphoric, CVD divergence, contrarian edge, staleness) |
+| rm_features | `hydra_rm_features.py` | pure engine-internal RM signals (realized vol, DD velocity, fill rate, slippage, cross-pair corr, idle minutes) — stdlib only, no I/O, no mutation |
 | tuner | `hydra_tuner.py` | self-tuning params; `apply_external_param_update` + `rollback_to_previous` (depth=1 deque) |
 | companions | `hydra_companions/` | chat/proposals/nudges/ladder/live executor/CBP client/souls |
 | backtest | `hydra_backtest.py` | replay engine; reuses HydraEngine verbatim; `HYDRA_VERSION` lives here |
@@ -173,6 +176,7 @@ every call (tokens rotate).
 | `CBP_SIDECAR_ENABLED` | memory | default on; `=0` falls through to JSONL; also `state/_disabled` flag |
 | `CBP_RUNNER_DIR` | memory | override sibling `cbp-runner` checkout location |
 | `HYDRA_POSTEDIT_HOOK_DISABLED` | tooling | silence hook during heavy refactors |
+| `HYDRA_RM_FEATURES_DISABLED` | rm_features | `=1` skips engine-internal feature computation in `_build_quant_indicators`; instant rollback without redeploy. Default off (features enabled). |
 
 ## Build / run
 
