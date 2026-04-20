@@ -7,6 +7,7 @@ import shlex
 import asyncio
 import threading
 import secrets
+import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
@@ -69,6 +70,8 @@ class DashboardBroadcaster:
         self._loop = None
         self._thread = None
         self._handlers: Dict[str, Any] = {}
+        self.active_agents: Dict[str, Dict[str, Any]] = {}
+        self.next_agent_port = 8766
         self.compat_mode = compat_mode
         self.production_mode = os.environ.get("HYDRA_PRODUCTION", "0") == "1"
         # Freshly generated per-process token. Inbound command messages
@@ -80,6 +83,9 @@ class DashboardBroadcaster:
         
         # Register core auth handlers
         self.register_handler("login", self._handle_login)
+        self.register_handler("save_keys", self._handle_save_keys)
+        self.register_handler("start_agent", self._handle_start_agent)
+        self.register_handler("stop_agent", self._handle_stop_agent)
 
     def _handle_login(self, payload: dict) -> dict:
         username = payload.get("username")
@@ -92,6 +98,82 @@ class DashboardBroadcaster:
             token = hydra_auth.create_access_token({"sub": username, "role": user["role"]})
             return {"success": True, "token": token, "user": user}
         return {"success": False, "error": "Invalid credentials"}
+        
+    def _handle_save_keys(self, payload: dict) -> dict:
+        jwt_token = payload.get("jwt")
+        if not jwt_token:
+            return {"success": False, "error": "Unauthorized"}
+            
+        user_info = hydra_auth.verify_token(jwt_token)
+        if not user_info:
+            return {"success": False, "error": "Invalid token"}
+            
+        username = user_info.get("sub")
+        conn = sqlite3.connect("hydra_users.db")
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE username = ?", (username,))
+        row = c.fetchone()
+        conn.close()
+        
+        if not row:
+            return {"success": False, "error": "User not found"}
+            
+        user_id = row[0]
+        api_key = payload.get("api_key")
+        api_secret = payload.get("api_secret")
+        exchange = payload.get("exchange", "kraken")
+        
+        if not api_key or not api_secret:
+            return {"success": False, "error": "Missing API key or secret"}
+            
+        success = hydra_auth.save_api_keys(user_id, exchange, api_key, api_secret)
+        return {"success": success}
+
+    def _handle_start_agent(self, payload: dict) -> dict:
+        jwt_token = payload.get("jwt")
+        if not jwt_token: return {"success": False, "error": "Unauthorized"}
+        user_info = hydra_auth.verify_token(jwt_token)
+        if not user_info: return {"success": False, "error": "Invalid token"}
+        
+        username = user_info.get("sub")
+        if username in self.active_agents:
+            # Agent already running for this user
+            return {"success": True, "port": self.active_agents[username]["port"]}
+            
+        port = self.next_agent_port
+        self.next_agent_port += 1
+        
+        # Spawn the agent process
+        try:
+            # Pass --user to trigger API key injection, and --ws-port for its isolated UI feed
+            cmd = ["python", "hydra_agent.py", "--user", username, "--ws-port", str(port)]
+            if payload.get("paper"):
+                cmd.append("--paper")
+            if payload.get("resume"):
+                cmd.append("--resume")
+                
+            proc = subprocess.Popen(cmd)
+            self.active_agents[username] = {"process": proc, "port": port}
+            return {"success": True, "port": port}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _handle_stop_agent(self, payload: dict) -> dict:
+        jwt_token = payload.get("jwt")
+        if not jwt_token: return {"success": False, "error": "Unauthorized"}
+        user_info = hydra_auth.verify_token(jwt_token)
+        if not user_info: return {"success": False, "error": "Invalid token"}
+        
+        username = user_info.get("sub")
+        if username not in self.active_agents:
+            return {"success": False, "error": "Agent not running"}
+            
+        proc_info = self.active_agents.pop(username)
+        try:
+            proc_info["process"].terminate()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _write_token_files(self) -> None:
         payload = json.dumps({"token": self.auth_token})
@@ -273,4 +355,24 @@ class DashboardBroadcaster:
         except Exception:
             self.clients.discard(client)
 
-
+if __name__ == "__main__":
+    print("========================================")
+    print(" HYDRA WebSocket Manager (Multi-Tenant)")
+    print("========================================")
+    print()
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    
+    # Initialize the database to ensure tables exist
+    hydra_auth.init_db()
+    
+    port = int(os.environ.get("HYDRA_WS_PORT", 8765))
+    server = DashboardBroadcaster(host="0.0.0.0", port=port, compat_mode=True)
+    server.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[WS] Shutting down manager...")
+        server.stop()

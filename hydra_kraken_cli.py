@@ -97,7 +97,15 @@ class KrakenCLI:
         RCE in the WSL environment. v2.15.0 hardens the boundary.
         """
         quoted = " ".join(shlex.quote(str(a)) for a in args)
-        cmd_str = f"source ~/.cargo/env && kraken {quoted} -o json 2>/dev/null"
+        
+        # Multi-tenancy: inject dynamic API keys if provided in the process environment
+        cmd_str = "source ~/.cargo/env"
+        api_key = os.environ.get("KRAKEN_API_KEY")
+        api_secret = os.environ.get("KRAKEN_API_SECRET")
+        if api_key and api_secret:
+            cmd_str += f" && export KRAKEN_API_KEY={shlex.quote(api_key)} && export KRAKEN_API_SECRET={shlex.quote(api_secret)}"
+            
+        cmd_str += f" && kraken {quoted} -o json 2>/dev/null"
         cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
         try:
             result = subprocess.run(

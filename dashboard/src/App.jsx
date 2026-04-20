@@ -6,7 +6,7 @@ import "./App.css";
 // ═══════════════════════════════════════════════════════════════
 
 // Override at build time with VITE_HYDRA_WS_URL for non-localhost deployments.
-const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
+const DEFAULT_WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
 // WS auth token file is written by the agent at startup to
 // dashboard/public/hydra_ws_token.json. Vite serves public/ at root,
 // so a plain fetch returns the current token. Rotates every agent
@@ -835,6 +835,7 @@ function TabSwitcher({ activeTab, onChange, backtestRunning }) {
     { key: "BACKTEST", label: "BACKTEST", color: COLORS.blue },
     { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
     { key: "THESIS",   label: "THESIS",   color: COLORS.warn },
+    { key: "SETTINGS", label: "SETTINGS", color: COLORS.text },
   ];
   return (
     // Gap: 10 puts visible air between each tab so the row breathes.
@@ -3481,9 +3482,11 @@ export function HydraDashboard({ jwtToken, onLogout }) {
     }
   }, []);
 
+  const [wsUrl, setWsUrl] = useState(() => localStorage.getItem("hydra_ws_url") || DEFAULT_WS_URL);
+
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     ws.onopen = async () => {
       // v2.16.2: refresh the auth token FIRST, then flip `connected=true`.
@@ -3768,6 +3771,13 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               setCompareInFlight(false);
               setViewInFlight(null);
               return;
+            case "start_agent_ack":
+              if (msg.success && msg.port) {
+                const newUrl = `ws://localhost:${msg.port}`;
+                localStorage.setItem("hydra_ws_url", newUrl);
+                setWsUrl(newUrl);
+              }
+              return;
             default:
               // Unknown typed message → drop silently. Do NOT fall through
               // to applyLiveState: a malformed backtest-side message with
@@ -3799,6 +3809,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   useEffect(() => { connectRef.current = connect; }, [connect]);
 
   useEffect(() => { refreshWsToken(); }, [refreshWsToken]);
+
+  // Fallback to reconnect if WS_URL changes
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.url !== wsUrl) {
+      wsRef.current.close();
+      connect();
+    }
+  }, [wsUrl, connect]);
 
   // Phase 8: send a typed WS message (used by BacktestControlPanel).
   // v2.15.0: every send carries the per-session auth token.
@@ -4179,6 +4197,11 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
         return (
           <>
+            {activeTab === "SETTINGS" && (
+              <div style={{ padding: "16px 24px" }}>
+                <SettingsSurface wsSend={sendMessage} />
+              </div>
+            )}
             {activeTab === "BACKTEST" && (
               <div style={{ padding: "16px 24px" }}>
                 <BacktestControlPanel
@@ -4977,7 +5000,7 @@ function AuthSurface({ onLogin }) {
     setError("");
 
     try {
-      const ws = new WebSocket(WS_URL);
+      const ws = new WebSocket(DEFAULT_WS_URL);
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: "login", username, password }));
       };
@@ -5076,6 +5099,84 @@ function AuthSurface({ onLogin }) {
             {loading ? "Authenticating..." : "Initialize Session"}
           </button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+function SettingsSurface({ wsSend }) {
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  const handleSave = () => {
+    setSaving(true);
+    setStatus(null);
+    const jwt = localStorage.getItem("hydra_jwt");
+    wsSend(JSON.stringify({ type: "save_keys", jwt, api_key: apiKey, api_secret: apiSecret }));
+    setTimeout(() => {
+      setSaving(false);
+      setStatus({ type: "success", msg: "API Keys Saved Securely" });
+      setApiKey(""); setApiSecret("");
+    }, 1000);
+  };
+
+  const handleStart = () => {
+    setStatus({ type: "info", msg: "Starting isolated engine instance..." });
+    const jwt = localStorage.getItem("hydra_jwt");
+    wsSend(JSON.stringify({ type: "start_agent", jwt }));
+  };
+
+  return (
+    <div style={{
+      padding: "24px", backgroundColor: COLORS.panel, borderRadius: "8px",
+      border: `1px solid ${COLORS.panelBorder}`, maxWidth: "600px", margin: "32px auto"
+    }}>
+      <h2 style={{ fontSize: "24px", fontWeight: "bold", color: COLORS.text, marginBottom: "24px" }}>Engine Settings</h2>
+      
+      <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+        <div style={{ backgroundColor: "#0f0f11", padding: "16px", borderRadius: "6px", border: `1px solid ${COLORS.panelBorder}` }}>
+          <h3 style={{ fontSize: "18px", color: COLORS.accent, fontWeight: "600", marginBottom: "8px" }}>1. Exchange Credentials</h3>
+          <p style={{ fontSize: "14px", color: COLORS.textDim, marginBottom: "16px" }}>Hydra uses symmetric encryption to store your keys. A unique background engine process will be spawned using your keys.</p>
+          
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: "500", color: COLORS.textDim, marginBottom: "4px" }}>Kraken API Key</label>
+              <input type="text" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{ width: "100%", backgroundColor: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`, borderRadius: "4px", padding: "8px 12px", color: COLORS.text, outline: "none" }} placeholder="..." />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: "500", color: COLORS.textDim, marginBottom: "4px" }}>Kraken API Secret</label>
+              <input type="password" value={apiSecret} onChange={e => setApiSecret(e.target.value)} style={{ width: "100%", backgroundColor: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`, borderRadius: "4px", padding: "8px 12px", color: COLORS.text, outline: "none" }} placeholder="..." />
+            </div>
+            <button onClick={handleSave} disabled={saving || !apiKey || !apiSecret} style={{
+              width: "100%", padding: "8px 0", backgroundColor: `${COLORS.accent}33`, color: COLORS.accent,
+              borderRadius: "4px", fontWeight: "500", border: "none", cursor: (saving || !apiKey || !apiSecret) ? "not-allowed" : "pointer", opacity: (saving || !apiKey || !apiSecret) ? 0.5 : 1
+            }}>
+              {saving ? "Encrypting & Saving..." : "Save API Keys"}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: "#0f0f11", padding: "16px", borderRadius: "6px", border: `1px solid ${COLORS.panelBorder}` }}>
+          <h3 style={{ fontSize: "18px", color: COLORS.blue, fontWeight: "600", marginBottom: "8px" }}>2. Launch Engine</h3>
+          <p style={{ fontSize: "14px", color: COLORS.textDim, marginBottom: "16px" }}>Start your isolated background execution engine. The dashboard will automatically reconnect to your engine's live feed.</p>
+          <button onClick={handleStart} style={{
+              width: "100%", padding: "8px 0", backgroundColor: `${COLORS.blue}33`, color: COLORS.blue,
+              borderRadius: "4px", fontWeight: "500", border: "none", cursor: "pointer"
+            }}>Start Hydra Agent</button>
+        </div>
+
+        {status && (
+          <div style={{
+            padding: "12px", borderRadius: "4px", textAlign: "center", fontSize: "14px",
+            backgroundColor: status.type === 'success' ? `${COLORS.accent}1A` : `${COLORS.blue}1A`,
+            color: status.type === 'success' ? COLORS.accent : COLORS.blue,
+            border: `1px solid ${status.type === 'success' ? `${COLORS.accent}33` : `${COLORS.blue}33`}`
+          }}>
+            {status.msg}
+          </div>
+        )}
       </div>
     </div>
   );

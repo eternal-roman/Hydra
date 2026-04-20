@@ -101,6 +101,7 @@ class HydraAgent:
         candle_interval: int = 15,
         reset_params: bool = False,
         resume: bool = False,
+        json_stream: bool = False,
     ):
         self.pairs = pairs
         self.initial_balance = initial_balance
@@ -116,6 +117,7 @@ class HydraAgent:
         self.duration = duration_seconds
         self.mode = mode
         self.paper = paper
+        self.json_stream = json_stream
         self.candle_interval = candle_interval
         self.running = True
         self.start_time = None
@@ -178,7 +180,9 @@ class HydraAgent:
                 print(f"  [TUNER] {pair}: loaded tuned params (update #{self.trackers[pair].update_count})")
 
         # Dashboard broadcaster
-        self.broadcaster = DashboardBroadcaster(port=ws_port)
+        self.broadcaster = None
+        if not self.json_stream:
+            self.broadcaster = DashboardBroadcaster(port=ws_port)
 
         # ─── Thesis layer (v2.13.0, Phase A — Golden Unicorn) ──────────
         # Slow-moving persistent worldview + user-authored intent. Phase A
@@ -3712,6 +3716,10 @@ def main():
                         help="Reset learned tuning parameters to defaults")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from last session snapshot (engines + coordinator state)")
+    parser.add_argument("--json-stream", action="store_true",
+                        help="Stream state to stdout instead of starting a WS server")
+    parser.add_argument("--user", type=str, default=None,
+                        help="Run agent as specific user (fetches API keys from DB)")
 
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",")]
@@ -3732,6 +3740,15 @@ def main():
     print(f"  Duration: {args.duration}s")
     if not args.paper:
         print(f"  Dead man's switch will be active.")
+    if args.user:
+        import hydra_auth
+        keys = hydra_auth.get_api_keys_by_username(args.user, "kraken")
+        if keys:
+            os.environ["KRAKEN_API_KEY"] = keys["api_key"]
+            os.environ["KRAKEN_API_SECRET"] = keys["api_secret"]
+            print(f"  [AUTH] Injected Kraken API keys for user '{args.user}'")
+        else:
+            print(f"  [AUTH] WARNING: No API keys found for user '{args.user}'. Falling back to default env.")
     print()
 
     agent = HydraAgent(
@@ -3745,6 +3762,7 @@ def main():
         candle_interval=candle_interval,
         reset_params=args.reset_params,
         resume=args.resume,
+        json_stream=args.json_stream,
     )
     agent.run()
 
