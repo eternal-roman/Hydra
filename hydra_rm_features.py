@@ -242,3 +242,60 @@ def avg_slippage_bps_24h(journal: Iterable[Dict], now: float) -> Optional[float]
     if not bps_list:
         return None
     return round(sum(bps_list) / len(bps_list), 2)
+
+
+def cross_pair_corr(
+    returns_a: Sequence[float],
+    returns_b: Sequence[float],
+    min_samples: int = _CORR_MIN_SAMPLES,
+) -> Optional[float]:
+    """Pearson correlation between two return series.
+
+    Truncates both series to the shorter length (caller typically passes
+    equal-length candle-aligned returns; this is defensive). Returns None
+    on fewer than `min_samples` points or when either series has zero
+    variance (correlation undefined). Result clamped to [-1.0, 1.0] to
+    absorb floating-point overshoot at the extremes.
+    """
+    n = min(len(returns_a), len(returns_b))
+    if n < min_samples:
+        return None
+    a = list(returns_a[:n])
+    b = list(returns_b[:n])
+    mean_a = sum(a) / n
+    mean_b = sum(b) / n
+    var_a = sum((x - mean_a) ** 2 for x in a)
+    var_b = sum((x - mean_b) ** 2 for x in b)
+    if var_a == 0 or var_b == 0:
+        return None
+    cov = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(n))
+    r = cov / math.sqrt(var_a * var_b)
+    # Clamp to absorb FP overshoot past ±1 on perfectly correlated inputs.
+    return round(max(-1.0, min(1.0, r)), 4)
+
+
+def minutes_since_last_trade(
+    journal: Iterable[Dict], now: float,
+) -> Optional[float]:
+    """Time since the most recent FILLED/PARTIALLY_FILLED entry's final_at.
+
+    Returns None when no such entry exists (never traded / fresh install).
+    Useful RM cue: a long idle spell after a loss may indicate the engine
+    is waiting for setup, but paired with other flags (fill_rate crash,
+    DD velocity negative) suggests a stuck state worth flagging.
+    """
+    fills = [
+        e for e in journal
+        if e.get("lifecycle", {}).get("state") in _FILLED_STATES
+    ]
+    if not fills:
+        return None
+    timestamps = []
+    for e in fills:
+        ts = _iso_to_ts(e["lifecycle"].get("final_at") or e.get("placed_at", ""))
+        if ts is not None:
+            timestamps.append(ts)
+    if not timestamps:
+        return None
+    most_recent = max(timestamps)
+    return round((now - most_recent) / _SEC_PER_MIN, 1)

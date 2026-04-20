@@ -10,6 +10,8 @@ from hydra_rm_features import (
     drawdown_velocity_pct_per_hr,
     fill_rate_24h,
     avg_slippage_bps_24h,
+    cross_pair_corr,
+    minutes_since_last_trade,
 )
 
 
@@ -199,3 +201,58 @@ def test_slippage_averages_across_fills():
     ]
     result = avg_slippage_bps_24h(j, now=1_700_000_000.0)
     assert abs(result - (-25.0)) < 0.01
+
+
+# ─── cross_pair_corr ─────────────────────────────────────────
+
+
+def test_corr_returns_none_on_too_few_samples():
+    assert cross_pair_corr([0.01] * 5, [0.01] * 5) is None
+
+
+def test_corr_returns_none_on_zero_variance():
+    n = 40
+    assert cross_pair_corr([0.0] * n, [0.01 * i for i in range(n)]) is None
+
+
+def test_corr_perfect_positive():
+    returns = [0.01 * (i - 20) for i in range(40)]  # non-constant
+    result = cross_pair_corr(returns, returns)
+    assert result is not None
+    assert abs(result - 1.0) < 1e-6
+
+
+def test_corr_perfect_negative():
+    a = [0.01 * (i - 20) for i in range(40)]
+    b = [-r for r in a]
+    assert abs(cross_pair_corr(a, b) - (-1.0)) < 1e-6
+
+
+def test_corr_uncorrelated_series_near_zero():
+    # Alternating deterministic signs — correlation to a ramp is ~0.
+    a = [(-1) ** i * 0.01 for i in range(40)]
+    b = [0.01 * i for i in range(40)]
+    result = cross_pair_corr(a, b)
+    assert abs(result) < 0.1
+
+
+# ─── minutes_since_last_trade ────────────────────────────────
+
+
+def test_minutes_since_returns_none_when_no_trades_ever():
+    assert minutes_since_last_trade([], now=1_700_000_000.0) is None
+    # Only non-terminal / non-filled entries
+    j = [_entry("CANCELLED_UNFILLED", hours_ago=1)]
+    assert minutes_since_last_trade(j, now=1_700_000_000.0) is None
+
+
+def test_minutes_since_reads_most_recent_fill():
+    t_end = 1_700_000_000.0
+    j = [
+        _entry("FILLED", hours_ago=5, fill=100.0, t_end=t_end),
+        _entry("FILLED", hours_ago=2, fill=100.0, t_end=t_end),
+        _entry("CANCELLED_UNFILLED", hours_ago=1, t_end=t_end),
+    ]
+    result = minutes_since_last_trade(j, now=t_end)
+    assert result is not None
+    assert abs(result - 120.0) < 0.1  # 2 hours = 120 min
