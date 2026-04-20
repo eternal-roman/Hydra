@@ -2158,6 +2158,18 @@ class HydraAgent:
     def _snapshot_path(self) -> str:
         return os.path.join(self._snapshot_dir, "hydra_session_snapshot.json")
 
+    def _journal_for_persistence(self) -> List[Dict[str, Any]]:
+        """Return the journal slice to persist to disk. Excludes
+        PLACEMENT_FAILED entries — those are pre-exchange diagnostics
+        useful in-session for live debugging, but they re-pollute the
+        dashboard on restart if persisted. The in-memory
+        self.order_journal still contains them for the current session.
+
+        Caps at the most recent 200 non-failed entries (matches the prior
+        [-200:] cap on the unfiltered list)."""
+        return [e for e in self.order_journal
+                if e.get("lifecycle", {}).get("state") != "PLACEMENT_FAILED"][-200:]
+
     def _save_snapshot(self):
         """Atomically save session state to disk (.tmp -> os.replace)."""
         snapshot = {
@@ -2169,7 +2181,7 @@ class HydraAgent:
             "competition_start_balance": self._competition_start_balance,
             "engines": {pair: eng.snapshot_runtime() for pair, eng in self.engines.items()},
             "coordinator_regime_history": self.coordinator.regime_history,
-            "order_journal": self.order_journal[-200:],
+            "order_journal": self._journal_for_persistence(),
             # Persist the userref counter so a restart never re-issues a
             # userref already in-flight on the exchange from this session.
             "userref_counter": self._userref_counter,
@@ -3215,12 +3227,13 @@ class HydraAgent:
                 # no data is lost on crash. Atomic write (.tmp + os.replace)
                 # so a crash mid-write cannot corrupt the file into
                 # half-valid JSON. Mirrors _save_snapshot's pattern.
-                if self.order_journal:
+                filtered_journal = self._journal_for_persistence()
+                if filtered_journal:
                     rolling_file = os.path.join(self._snapshot_dir, "hydra_order_journal.json")
                     rolling_tmp = rolling_file + ".tmp"
                     try:
                         with open(rolling_tmp, "w") as f:
-                            json.dump(self.order_journal, f, indent=2)
+                            json.dump(filtered_journal, f, indent=2)
                         os.replace(rolling_tmp, rolling_file)
                     except Exception as e:
                         # HF-003 fix: previously "except Exception: pass" silently
