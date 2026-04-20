@@ -278,22 +278,49 @@ class DerivativesStream:
         """Invoke `kraken -o json futures tickers` via WSL and return
         the tickers array. Returns [] on any error — caller treats an
         empty list as 'no update this cycle' (fetch_errors increments,
-        staleness grows). NEVER calls any authenticated subcommand."""
+        staleness grows). NEVER calls any authenticated subcommand.
+
+        v2.15.2: log per failure mode so stuck WSL bridges are visible.
+        Prior behavior swallowed exceptions silently; staleness would
+        grow without any operator-visible cause.
+        """
         cmd_str = "source ~/.cargo/env && kraken -o json futures tickers 2>/dev/null"
         cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=self.HTTP_TIMEOUT_S
             )
-            stdout = result.stdout.strip()
-            if not stdout:
-                return []
-            payload = json.loads(stdout)
-            if not isinstance(payload, dict):
-                return []
-            return payload.get("tickers", []) or []
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        except subprocess.TimeoutExpired:
+            print(
+                f"  [DerivativesStream] kraken CLI timeout after "
+                f"{self.HTTP_TIMEOUT_S}s — WSL bridge may be stuck",
+                file=sys.stderr,
+            )
             return []
+        except OSError as e:
+            print(
+                f"  [DerivativesStream] OSError invoking WSL/kraken: {e} "
+                f"— check `wsl -l -v` for distro 'Ubuntu'",
+                file=sys.stderr,
+            )
+            return []
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            return []
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            preview = stdout[:120].replace("\n", " ")
+            print(
+                f"  [DerivativesStream] JSON parse error from kraken CLI: {e} "
+                f"— payload preview: {preview!r}",
+                file=sys.stderr,
+            )
+            return []
+        if not isinstance(payload, dict):
+            return []
+        return payload.get("tickers", []) or []
 
     # ─── Per-pair populate ───────────────────────────────────────
 

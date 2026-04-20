@@ -6,6 +6,7 @@ invariant (no order-placement imports exist in the module).
 """
 from collections import deque
 import os
+import subprocess
 import time
 
 import pytest
@@ -337,3 +338,46 @@ def test_module_contains_no_order_placement_calls():
             f"SPOT-ONLY INVARIANT VIOLATED: '{pat}' appears in "
             f"hydra_derivatives_stream.py. This module must stay read-only."
         )
+
+
+# ─── Fetch failure-mode logging ──────────────────────────────
+
+
+def test_fetch_tickers_logs_timeout_distinctly(stream, monkeypatch, capsys):
+    s = stream
+
+    def fake_run(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="kraken", timeout=10)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = s._fetch_tickers()
+    assert result == []
+    err = capsys.readouterr().err
+    assert "timeout" in err.lower(), f"expected timeout-labelled warning, got: {err!r}"
+
+
+def test_fetch_tickers_logs_json_error_distinctly(stream, monkeypatch, capsys):
+    s = stream
+
+    class FakeResult:
+        stdout = "not json{{"
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeResult())
+    result = s._fetch_tickers()
+    assert result == []
+    err = capsys.readouterr().err
+    assert "json" in err.lower(), f"expected json-labelled warning, got: {err!r}"
+
+
+def test_fetch_tickers_logs_oserror_distinctly(stream, monkeypatch, capsys):
+    s = stream
+
+    def fake_run(*a, **kw):
+        raise OSError("WSL not available")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = s._fetch_tickers()
+    assert result == []
+    err = capsys.readouterr().err
+    assert "oserror" in err.lower() or "wsl" in err.lower()
