@@ -1442,7 +1442,7 @@ function GatesSummary({ review }) {
     .map(k => ({ key: k, label: k, why: "(unrecognised gate — shown for completeness)" }));
   const all = [...RIGOR_GATES, ...extras];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4,
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 5,
                   fontFamily: mono, fontSize: 10 }}>
       {all.map(g => {
         const passed = gp[g.key];
@@ -2488,7 +2488,7 @@ function DocumentLibraryPanel({ documentCount, sendMessage }) {
   );
 }
 
-function PendingProposalCard({ p, sendMessage }) {
+function PendingProposalCard({ p, sendMessage, onBacktest }) {
   const [notes, setNotes] = useState("");
   const meta = p._meta || {};
   const failed = meta.failed === true;
@@ -2557,6 +2557,20 @@ function PendingProposalCard({ p, sendMessage }) {
               approve
             </button>
           </div>
+          {onBacktest && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={() => onBacktest(p)}
+                style={{ width: "100%", padding: "6px 14px",
+                         background: "transparent",
+                         color: COLORS.purple,
+                         border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
+                         cursor: "pointer", fontFamily: mono, fontSize: 11,
+                         fontWeight: 700, letterSpacing: "0.08em",
+                         textTransform: "uppercase" }}>
+                Backtest Proposal
+              </button>
+            </div>
+          )}
         </>
       )}
       {failed && (
@@ -2573,7 +2587,7 @@ function PendingProposalCard({ p, sendMessage }) {
   );
 }
 
-function PendingProposalsPanel({ proposals, sendMessage }) {
+function PendingProposalsPanel({ proposals, sendMessage, onBacktest }) {
   useEffect(() => {
     // Refresh on mount — agent pushes updates via thesis_state broadcasts,
     // but the explicit list request ensures we have a snapshot even if no
@@ -2596,7 +2610,7 @@ function PendingProposalsPanel({ proposals, sendMessage }) {
         </div>
       )}
       {items.map((p) => (
-        <PendingProposalCard key={p.proposal_id} p={p} sendMessage={sendMessage} />
+        <PendingProposalCard key={p.proposal_id} p={p} sendMessage={sendMessage} onBacktest={onBacktest} />
       ))}
     </ThesisCard>
   );
@@ -2902,7 +2916,7 @@ function IntentPromptsPanel({ intents, max, sendMessage }) {
   );
 }
 
-function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
+function ThesisPanel({ thesisState, sendMessage, pendingProposals, onBacktest }) {
   // Before the first thesis_state response, show a loading shell.
   if (thesisState == null) {
     return (
@@ -3145,6 +3159,7 @@ function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
         <PendingProposalsPanel
           proposals={pendingProposals}
           sendMessage={sendMessage}
+          onBacktest={onBacktest}
         />
         <IntentPromptsPanel
           intents={thesisState.active_intents || []}
@@ -3332,7 +3347,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   // in v2.15.0 until this was hoisted).
   const refreshWsToken = useCallback(async () => {
     try {
-      const r = await fetch(WS_TOKEN_URL, { cache: "no-store" });
+      const r = await fetch(`${WS_TOKEN_URL}?t=${Date.now()}`, { cache: "no-store" });
       if (!r.ok) throw new Error(`status ${r.status}`);
       const j = await r.json();
       wsTokenRef.current = j.token || "";
@@ -3665,8 +3680,16 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       setConnected(false);
       reconnectRef.current = setTimeout(() => connectRef.current?.(), 3000);
     };
-    ws.onerror = () => { ws.close(); };
-  }, [applyLiveState, refreshWsToken]);
+    ws.onerror = () => {
+      if (wsUrl !== DEFAULT_WS_URL) {
+        console.warn(`[HYDRA] Connection failed on ${wsUrl}. Reverting to default ${DEFAULT_WS_URL}`);
+        localStorage.removeItem("hydra_ws_url");
+        // Update state to trigger re-render and re-connect via useEffect
+        setWsUrl(DEFAULT_WS_URL);
+      }
+      ws.close();
+    };
+  }, [applyLiveState, refreshWsToken, wsUrl]);
 
   // Keep `connectRef` pointing at the freshest connect closure
   useEffect(() => { connectRef.current = connect; }, [connect]);
@@ -4135,6 +4158,11 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 thesisState={thesisState}
                 sendMessage={sendMessage}
                 pendingProposals={pendingProposals}
+                onBacktest={(p) => {
+                  setStagedProposal(p);
+                  setActiveTab("RESEARCH");
+                  setResearchTab("LATEST_RUN");
+                }}
               />
             )}
             {/* Floating observer on LIVE tab — dual-state view. Appears
