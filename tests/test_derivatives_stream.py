@@ -106,12 +106,16 @@ def test_latest_returns_initial_snapshot_with_nones(stream):
 
 def test_populate_from_ticker_updates_snapshot(stream):
     snap = stream._snapshots["BTC/USDC"]
+    # Kraken Futures PF_* fundingRate is absolute USD/contract/period.
+    # Bps = (fr/markPrice)*10000. With markPrice=95000.5:
+    #   fr=4.75025 → 4.75025/95000.5 = 5.0e-5 → 0.5 bps
+    #   fr=3.80020 → 3.80020/95000.5 = 4.0e-5 → 0.4 bps
     tick = {
         "symbol": "PF_XBTUSD",
         "markPrice": "95000.5",
         "indexPrice": "94990.0",
-        "fundingRate": "0.00005",          # 0.5 bps / 8h
-        "fundingRatePrediction": "0.00004",
+        "fundingRate": "4.75025",
+        "fundingRatePrediction": "3.80020",
         "openInterest": "12345.67",
     }
     now = time.time()
@@ -142,13 +146,105 @@ def test_oi_delta_computes_against_history(stream):
 def test_synthetic_sol_btc_computes_from_usd_perps(stream):
     s = DerivativesStream(pairs=["SOL/BTC"])
     snap = s._snapshots["SOL/BTC"]
-    sol = {"fundingRate": "0.0001", "markPrice": "150.0"}  # 1 bps SOL funding
-    btc = {"fundingRate": "0.00005", "markPrice": "60000.0"}  # 0.5 bps BTC funding
+    # Each leg's funding must be normalized by its own markPrice first.
+    # sol: 0.015 / 150 = 1.0e-4 → 1.0 bps
+    # btc: 3.0 / 60000 = 5.0e-5 → 0.5 bps
+    # diff: 1.0 - 0.5 = 0.5 bps
+    sol = {"fundingRate": "0.015", "markPrice": "150.0"}
+    btc = {"fundingRate": "3.0", "markPrice": "60000.0"}
     s._populate_synthetic(snap, sol, btc, time.time())
-    # Delta funding in bps: (0.0001 - 0.00005) * 10000 = 0.5
     assert snap.funding_bps_8h == 0.5
     # Ratio: 150 / 60000 = 0.0025
     assert snap.mark_price == 0.0025
+
+
+# ─── Funding markPrice-relative + sanity clamp (v2.15.2) ────
+
+
+def test_funding_uses_relative_rate_not_absolute(stream):
+    """Kraken Futures PF_* returns fundingRate as absolute USD per contract
+    per period, not as a decimal rate. Correct conversion to bps requires
+    dividing by markPrice. Pre-fix bug: BTC at markPrice=50000 with
+    fundingRate=-0.5 produced -5000 bps (firing R2 spuriously); correct
+    output is -0.10 bps."""
+    s = stream
+    snap = DerivativesSnapshot(pair="BTC/USDC", perp_symbol="PF_XBTUSD")
+    tick = {"fundingRate": -0.5, "markPrice": 50000.0, "indexPrice": 50000.0}
+    s._populate_from_ticker(snap, tick, time.time())
+    # (-0.5 / 50000) * 10000 = -0.10 bps
+    assert snap.funding_bps_8h == -0.1, (
+        f"expected -0.1 bps from (fr/mp)*10000, got {snap.funding_bps_8h}"
+    )
+
+
+def test_funding_predicted_also_relative(stream):
+    s = stream
+    snap = DerivativesSnapshot(pair="BTC/USDC", perp_symbol="PF_XBTUSD")
+    tick = {
+        "fundingRate": 0.0,
+        "fundingRatePrediction": -1.0,
+        "markPrice": 50000.0,
+        "indexPrice": 50000.0,
+    }
+    s._populate_from_ticker(snap, tick, time.time())
+    # (-1.0 / 50000) * 10000 = -0.2 bps
+    assert snap.funding_predicted_bps == -0.2
+
+
+def test_funding_returns_none_when_markprice_missing(stream):
+    """Without markPrice we cannot compute relative funding. Don't guess."""
+    s = stream
+    snap = DerivativesSnapshot(pair="BTC/USDC", perp_symbol="PF_XBTUSD")
+    tick = {"fundingRate": -0.5}  # no markPrice
+    s._populate_from_ticker(snap, tick, time.time())
+    assert snap.funding_bps_8h is None
+
+
+def test_synthetic_funding_uses_per_leg_relative_rates(stream):
+    """Synthetic SOL/BTC funding cannot subtract two absolute USD-per-contract
+    rates that don't share a denominator. Each leg must be normalized to its
+    own markPrice first: (sol_fr/sol_mark - btc_fr/btc_mark) * 10000."""
+    s = DerivativesStream(pairs=["SOL/BTC"])
+    snap = s._snapshots["SOL/BTC"]
+    sol = {"fundingRate": -0.0036, "markPrice": 80.0}     # -0.45 bps relative
+    btc = {"fundingRate": -1.0,    "markPrice": 50000.0}  # -0.20 bps relative
+    s._populate_synthetic(snap, sol, btc, time.time())
+    # (-0.0036/80 - (-1.0/50000)) * 10000 = (-0.000045 + 0.00002) * 10000 = -0.25 bps
+    assert snap.funding_bps_8h == -0.25, (
+        f"synthetic must normalize each leg by its markPrice first, "
+        f"got {snap.funding_bps_8h}"
+    )
+
+
+def test_synthetic_funding_returns_none_when_either_markprice_missing(stream):
+    s = DerivativesStream(pairs=["SOL/BTC"])
+    snap = s._snapshots["SOL/BTC"]
+    sol = {"fundingRate": -0.0036}   # no markPrice
+    btc = {"fundingRate": -1.0, "markPrice": 50000.0}
+    s._populate_synthetic(snap, sol, btc, time.time())
+    assert snap.funding_bps_8h is None
+
+
+def test_funding_clamp_catches_unexpected_magnitude(stream):
+    """Defense-in-depth: even after the divide fix, if Kraken changes the
+    units again, ±500 bps clamps the value to None rather than feeding R1/R2
+    a poisoned signal."""
+    s = stream
+    snap = DerivativesSnapshot(pair="BTC/USDC", perp_symbol="PF_XBTUSD")
+    # markPrice=1.0 makes (fr/mp)*10000 == fr*10000.  fr=0.06 → 600 bps.
+    tick = {"fundingRate": 0.06, "markPrice": 1.0, "indexPrice": 1.0}
+    s._populate_from_ticker(snap, tick, time.time())
+    assert snap.funding_bps_8h is None, "out-of-band magnitude must null"
+
+
+def test_funding_normal_range_passes_through(stream):
+    """Regression guard: typical funding stays intact."""
+    s = stream
+    snap = DerivativesSnapshot(pair="BTC/USDC", perp_symbol="PF_XBTUSD")
+    # markPrice=50000, fundingRate=2.5 → 0.5 bps (normal)
+    tick = {"fundingRate": 2.5, "markPrice": 50000.0, "indexPrice": 50000.0}
+    s._populate_from_ticker(snap, tick, time.time())
+    assert snap.funding_bps_8h == 0.5
 
 
 # ─── Basis parsing ───────────────────────────────────────────
