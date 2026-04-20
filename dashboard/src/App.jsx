@@ -14,25 +14,25 @@ const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
 const WS_TOKEN_URL = "/hydra_ws_token.json";
 
 const COLORS = {
-  bg: "#0a0a0f",
-  panel: "#111118",
-  panelBorder: "#1e1e2e",
-  accent: "#00ff88",
-  danger: "#ff3366",
-  warn: "#ffaa00",
-  blue: "#3388ff",
-  purple: "#8855ff",
-  risk: "#a78bfa",  // softer lavender — RM dialogue (distinct from #8855ff volatile)
-  text: "#e8e8f0",
-  textDim: "#888899",
-  textMuted: "#555566",
-  buy: "#00ff88",
-  sell: "#ff3366",
-  hold: "#ffaa00",
-  trendUp: "#00ff88",
-  trendDown: "#ff3366",
-  ranging: "#ffaa00",
-  volatile: "#8855ff",
+  bg: "#09090b",
+  panel: "#18181b",
+  panelBorder: "#27272a",
+  accent: "#10b981",
+  danger: "#ef4444",
+  warn: "#f59e0b",
+  blue: "#3b82f6",
+  purple: "#8b5cf6",
+  risk: "#a78bfa",
+  text: "#f4f4f5",
+  textDim: "#a1a1aa",
+  textMuted: "#71717a",
+  buy: "#10b981",
+  sell: "#ef4444",
+  hold: "#f59e0b",
+  trendUp: "#10b981",
+  trendDown: "#ef4444",
+  ranging: "#f59e0b",
+  volatile: "#8b5cf6",
 };
 
 const regimeColor = (r) =>
@@ -4106,9 +4106,13 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Header */}
       <div style={{ borderBottom: `1px solid ${COLORS.panelBorder}`, padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", background: `${COLORS.panel}cc`, backdropFilter: "blur(12px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img src="/favicon.svg" alt="Hydra" style={{ width: 38, height: 38, filter: "drop-shadow(0 0 6px rgba(126, 20, 255, 0.4))" }} />
-          <div style={{ fontSize: 26, fontWeight: 800, fontFamily: heading, letterSpacing: "-0.04em" }}>
-            <span style={{ color: COLORS.accent }}>H</span><span style={{ color: COLORS.text }}>YDRA</span>
+          <img src="/favicon.png" alt="Hydra" style={{ width: 62, height: 62, filter: "drop-shadow(0 0 6px rgba(126, 20, 255, 0.4))" }} />
+          <div style={{ 
+            fontSize: 28, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>
+            HYDRA
           </div>
           <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.3, borderLeft: `1px solid ${COLORS.panelBorder}`, paddingLeft: 10, maxWidth: 220 }}>
             Hyper-adaptive Dynamic<br />Regime-switching Universal Agent
@@ -4273,8 +4277,12 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
       {activeTab === "LIVE" && ((!connected && !state) || (state && pairNames.length === 0)) ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
-          <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
-          <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
+          <img src="/favicon.png" alt="Hydra" style={{ width: 135, height: 135, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
+          <div style={{ 
+            fontSize: 56, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>HYDRA</div>
           <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
             {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${WS_URL}...`}
           </div>
@@ -5013,14 +5021,16 @@ function AuthSurface({ onLogin }) {
         <div style={{ marginBottom: 32 }}>
           <div style={{
             display: "inline-flex", alignItems: "center", justifyContent: "center",
-            width: 56, height: 56, borderRadius: "50%",
-            background: `radial-gradient(circle at 35% 30%, ${COLORS.accent}, ${COLORS.accent}88)`,
-            boxShadow: `0 0 16px ${COLORS.accent}66`,
+            width: 94, height: 94,
             marginBottom: 16
           }}>
-            <span style={{ fontSize: 28 }}>⚲</span>
+            <img src="/favicon.png" alt="Hydra" style={{ width: "100%", height: "100%", filter: "drop-shadow(0 0 16px rgba(16, 185, 129, 0.6))" }} />
           </div>
-          <h1 style={{ margin: 0, fontSize: 24, fontFamily: heading, letterSpacing: "-0.02em", color: COLORS.text }}>HYDRA</h1>
+          <h1 style={{ 
+            margin: 0, fontSize: 32, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>HYDRA</h1>
           <div style={{ fontSize: 12, color: COLORS.textMuted, letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 4 }}>
             Multi-Tenant Protocol
           </div>
