@@ -832,8 +832,7 @@ function CompanionDrawer({
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
-    { key: "BACKTEST", label: "BACKTEST", color: COLORS.blue },
-    { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
+    { key: "RESEARCH", label: "RESEARCH", color: COLORS.blue },
     { key: "THESIS",   label: "THESIS",   color: COLORS.warn },
     { key: "SETTINGS", label: "SETTINGS", color: COLORS.text },
   ];
@@ -3347,7 +3346,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [history, setHistory] = useState([]);
   const [orderJournal, setOrderJournal] = useState([]);
   // Phase 8: tab switcher + backtest message stash
-  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | BACKTEST | COMPARE | THESIS
+  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | RESEARCH | THESIS | SETTINGS
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -4202,33 +4201,69 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 <SettingsSurface wsSend={sendMessage} />
               </div>
             )}
-            {activeTab === "BACKTEST" && (
-              <div style={{ padding: "16px 24px" }}>
-                <BacktestControlPanel
-                  onSubmit={sendMessage}
-                  connected={connected}
-                  disabled={false}
-                  ackMsg={btLastAck}
-                  lastResultId={Object.keys(btResults).slice(-1)[0] || null}
-                  completedCount={Object.keys(btResults).length}
-                  reviewedCount={Object.keys(btReviews).length}
-                  observerProgress={observerClosed ? null : obsProgress}
-                  observerResult={observerClosed ? null : obsResult}
-                  observerReview={observerClosed ? null : obsReview}
-                  observerEquity={obsEquity}
-                  observerTotalTicks={totalTicks}
-                  onObserverClose={() => setObserverClosed(true)}
-                  onCompareThisRun={(expId) => {
-                    // Jump to COMPARE, refresh the library so the fresh run
-                    // is present, and pre-select it so the user only needs
-                    // to pick one more to comparison against.
-                    setCompareSelected((prev) =>
-                      prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
-                    );
-                    setActiveTab("COMPARE");
-                    fetchLibrary();
-                  }}
-                />
+            {activeTab === "RESEARCH" && (
+              <div style={{ padding: "16px 24px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
+                {/* Left Column: Backtest Control Panel */}
+                <div style={{ flex: "0 0 500px" }}>
+                  <BacktestControlPanel
+                    onSubmit={sendMessage}
+                    connected={connected}
+                    disabled={false}
+                    ackMsg={btLastAck}
+                    lastResultId={Object.keys(btResults).slice(-1)[0] || null}
+                    completedCount={Object.keys(btResults).length}
+                    reviewedCount={Object.keys(btReviews).length}
+                    observerProgress={observerClosed ? null : obsProgress}
+                    observerResult={observerClosed ? null : obsResult}
+                    observerReview={observerClosed ? null : obsReview}
+                    observerEquity={obsEquity}
+                    observerTotalTicks={totalTicks}
+                    onObserverClose={() => setObserverClosed(true)}
+                    onCompareThisRun={(expId) => {
+                      setCompareSelected((prev) =>
+                        prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
+                      );
+                      fetchLibrary();
+                    }}
+                  />
+                </div>
+                
+                {/* Right Column: Compare Library & Report */}
+                <div style={{ flex: 1 }}>
+                  {viewingExpId && (
+                    <div style={{ marginBottom: 12, padding: "10px 16px",
+                                  background: `${COLORS.blue}10`,
+                                  border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
+                                  fontFamily: mono, fontSize: 12, color: COLORS.blue,
+                                  display: "flex", justifyContent: "space-between",
+                                  alignItems: "center" }}>
+                      <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
+                      <button onClick={() => setViewingExpId(null)}
+                              style={{ background: "transparent", border: "none",
+                                       color: COLORS.blue, cursor: "pointer",
+                                       fontFamily: mono, fontSize: 12 }}>
+                        dismiss
+                      </button>
+                    </div>
+                  )}
+                  <CompareView
+                    experiments={filteredExperiments}
+                    selectedIds={compareSelected}
+                    onToggleSelect={toggleSelectExperiment}
+                    onClearSelection={clearSelection}
+                    onRefresh={fetchLibrary}
+                    onView={viewExperiment}
+                    onCompare={runCompare}
+                    compareReport={compareReport}
+                    loading={libLoading}
+                    compareInFlight={compareInFlight}
+                    onGoToBacktest={() => { /* No-op now since we are in RESEARCH */ }}
+                    totalInStore={libExperiments.length}
+                    onDismissReport={() => {
+                      setCompareReport(null);
+                    }}
+                  />
+                </div>
               </div>
             )}
             {activeTab === "THESIS" && (
@@ -4237,47 +4272,6 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 sendMessage={sendMessage}
                 pendingProposals={pendingProposals}
               />
-            )}
-            {activeTab === "COMPARE" && (
-              <div style={{ padding: "16px 24px" }}>
-                {viewingExpId && (
-                  <div style={{ marginBottom: 12, padding: "10px 16px",
-                                background: `${COLORS.blue}10`,
-                                border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                fontFamily: mono, fontSize: 12, color: COLORS.blue,
-                                display: "flex", justifyContent: "space-between",
-                                alignItems: "center" }}>
-                    <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
-                    <button onClick={() => setViewingExpId(null)}
-                            style={{ background: "transparent", border: "none",
-                                     color: COLORS.blue, cursor: "pointer",
-                                     fontFamily: mono, fontSize: 12 }}>
-                      dismiss
-                    </button>
-                  </div>
-                )}
-                <CompareView
-                  experiments={filteredExperiments}
-                  selectedIds={compareSelected}
-                  onToggleSelect={toggleSelectExperiment}
-                  onClearSelection={clearSelection}
-                  onRefresh={fetchLibrary}
-                  onView={viewExperiment}
-                  onCompare={runCompare}
-                  compareReport={compareReport}
-                  loading={libLoading}
-                  compareInFlight={compareInFlight}
-                  onGoToBacktest={() => setActiveTab("BACKTEST")}
-                  totalInStore={libExperiments.length}
-                  onDismissReport={() => {
-                    // "Change Selection" path: clear the last result so the
-                    // library reappears and the user can pick a different
-                    // set. Selection itself is kept — likely the user wants
-                    // to swap one row, not start from scratch.
-                    setCompareReport(null);
-                  }}
-                />
-              </div>
             )}
             {/* Floating observer on LIVE tab — dual-state view. Appears
                 whenever a backtest is mid-run or just completed; user can
@@ -4307,7 +4301,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
             WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
           }}>HYDRA</div>
           <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
-            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${WS_URL}...`}
+            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${DEFAULT_WS_URL}...`}
           </div>
           <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
         </div>
@@ -4968,7 +4962,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]
