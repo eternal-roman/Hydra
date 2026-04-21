@@ -10,20 +10,16 @@ const DEFAULT_WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765
 
 // Constrain any wsUrl that can be influenced by client-side state (localStorage,
 // server-provided `start_agent_ack.port`) to `ws[s]://<loopback>[:<port>][/path]`.
-// Anything else falls back to DEFAULT_WS_URL. Blocks CodeQL js/server-side-unvalidated-url-redirection
-// by ensuring the URL sink in `new WebSocket(...)` only accepts validated loopback endpoints.
-const ALLOWED_WS_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// Anything else falls back to DEFAULT_WS_URL. Regex-based allowlist (not URL
+// parser) so CodeQL js/request-forgery recognises this as a sanitiser — the
+// query trusts `RegExp.test()` on an anchored pattern as a guard, whereas it
+// does not follow string round-trips through `new URL(...)`.
+const SAFE_WS_URL_RE = /^wss?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:\/[\w\-./]*)?$/;
 function sanitizeWsUrl(candidate) {
-  if (typeof candidate !== "string" || candidate.length === 0) return DEFAULT_WS_URL;
-  try {
-    const u = new URL(candidate);
-    if (u.protocol !== "ws:" && u.protocol !== "wss:") return DEFAULT_WS_URL;
-    if (!ALLOWED_WS_HOSTS.has(u.hostname)) return DEFAULT_WS_URL;
-    if (u.port && !/^\d{1,5}$/.test(u.port)) return DEFAULT_WS_URL;
-    return u.toString();
-  } catch {
-    return DEFAULT_WS_URL;
+  if (typeof candidate === "string" && SAFE_WS_URL_RE.test(candidate)) {
+    return candidate;
   }
+  return DEFAULT_WS_URL;
 }
 // WS auth token file is written by the agent at startup to
 // dashboard/public/hydra_ws_token.json. Vite serves public/ at root,
