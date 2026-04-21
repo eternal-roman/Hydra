@@ -9,7 +9,8 @@
 >
 > **Cold subsystem detail lives in CBP, not here.** When you touch a
 > subsystem, load its node first:
-> `python C:/Users/elamj/Dev/cbp-runner/bin/memory-read.py --label <slug>`.
+> `python $CBP_RUNNER_DIR/bin/memory-read.py --label <slug>` (default
+> `CBP_RUNNER_DIR` resolves to a sibling `../cbp-runner` checkout).
 > This file is the hot index — pointers, rules, and cross-cutting
 > invariants only. Point, don't duplicate.
 
@@ -131,9 +132,9 @@ cbp --label hydra.companion_subsystem   # orb default ON, live-exec opt-in
 cbp --label hydra.tests_live_harness    # 33+ scenarios, smoke/mock/validate/live modes
 ```
 
-Discovery: `python C:/Users/elamj/Dev/cbp-runner/bin/memory-read.py --tag group:hydra_spec`
+Discovery: `python $CBP_RUNNER_DIR/bin/memory-read.py --tag group:hydra_spec`
 for the whole spec set, or `--label hydra.<slug>` for one node.
-Persist new learnings: `python C:/Users/elamj/Dev/cbp-runner/bin/memory-write.py --label <slug> --summary <text> --tag ...`
+Persist new learnings: `python $CBP_RUNNER_DIR/bin/memory-write.py --label <slug> --summary <text> --tag ...`
 
 ## Claude Code tooling
 
@@ -155,8 +156,9 @@ Persist new learnings: `python C:/Users/elamj/Dev/cbp-runner/bin/memory-write.py
 | experiments_store | `.hydra-experiments/` | owner `experiments`; `presets.json` + `reviewer_config.json` bootstrap from code on first init (delete to regenerate); `shadow_outcomes.jsonl` append-only |
 
 CBP sidecar: auto-launched by `start_hydra.bat` / `start_all.bat` via
-`python %CBP_RUNNER_DIR%\supervisor.py --detach` (default
-`C:\Users\elamj\Dev\cbp-runner`; override `CBP_RUNNER_DIR`). Client:
+`python %CBP_RUNNER_DIR%\supervisor.py --detach` (default `CBP_RUNNER_DIR`
+points at a sibling `../cbp-runner` checkout; override to anywhere).
+Missing checkout = launch skipped, client degrades to JSONL. Client:
 `hydra_companions.cbp_client.CbpClient` reads `state/ready.json` on
 every call (tokens rotate).
 
