@@ -430,7 +430,7 @@ function CompanionSwitcher({ active, onSwitch }) {
   );
 }
 
-function CompanionMessage({ m, theme, userTheme }) {
+function CompanionMessage({ m, theme }) {
   const isUser = m.role === "user";
   const isProactive = m.proactive === true;
   return (
@@ -1002,12 +1002,7 @@ function Checkbox({ checked, onChange, label, hint }) {
   );
 }
 
-function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResultId,
-                                completedCount = 0, reviewedCount = 0,
-                                observerProgress = null, observerResult = null,
-                                observerReview = null, observerEquity = null,
-                                observerTotalTicks = 0, onObserverClose = null,
-                                onCompareThisRun = null }) {
+function BacktestControlPanel({ onSubmit, connected, disabled, stagedProposal }) {
   const [preset, setPreset] = useState("default");
   const [hypothesis, setHypothesis] = useState("");
   const [pairs, setPairs] = useState("SOL/USDC");
@@ -1015,6 +1010,16 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   const [seed, setSeed] = useState(42);
   const [withMC, setWithMC] = useState(true);
   const [withWF, setWithWF] = useState(false);
+
+  useEffect(() => {
+    if (stagedProposal && stagedProposal.hypothesis) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHypothesis(stagedProposal.hypothesis);
+      if (stagedProposal.pair) {
+        setPairs(stagedProposal.pair);
+      }
+    }
+  }, [stagedProposal]);
 
   const hypothesisValid = hypothesis.trim().length >= 8;
   const nCandlesNum = Number(nCandles);
@@ -1173,7 +1178,7 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
 
 function BacktestResults({ 
   ackMsg, observerProgress, observerResult, observerReview, 
-  observerEquity, observerTotalTicks, completedCount, reviewedCount, 
+  observerEquity, observerTotalTicks, completedCount, 
   onObserverClose, onApplyOptimizations, onCompareThisRun 
 }) {
   const stage = observerProgress?.stage;
@@ -1690,7 +1695,7 @@ const VERDICT_COLORS = {
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
                              onView, loading,
                              onCompare, canCompare, compareInFlight, onGoToBacktest,
-                             totalInStore, compact = false }) {
+                             totalInStore }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
@@ -2153,6 +2158,34 @@ function CompareResults({ report, experimentsById, onDismiss }) {
   );
 }
 
+function CompareStep({ n, title, body, active, done }) {
+  const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
+                  padding: "8px 0",
+                  borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
+      <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
+                    background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
+                    border: `1px solid ${tone}`,
+                    color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {done ? "✓" : n}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
+                      color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
+                      marginBottom: 2 }}>
+          {title}
+        </div>
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                      lineHeight: 1.5 }}>
+          {body}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
                        onView, onCompare, compareReport, loading,
                        compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
@@ -2169,33 +2202,6 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
                     : canCompare ? 3
                     : 0;
 
-  const Step = ({ n, title, body, active, done }) => {
-    const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
-    return (
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
-                    padding: "8px 0",
-                    borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
-        <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
-                      background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
-                      border: `1px solid ${tone}`,
-                      color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
-                      display: "flex", alignItems: "center", justifyContent: "center" }}>
-          {done ? "✓" : n}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
-                        color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
-                        marginBottom: 2 }}>
-            {title}
-          </div>
-          <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                        lineHeight: 1.5 }}>
-            {body}
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   return (
     // Bound the whole CompareView to the viewport height (minus the top tab
@@ -2224,7 +2230,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
           signal vs. noise via paired-bootstrap p-values.
         </div>
 
-        <Step
+        <CompareStep
           n={1}
           active={currentStep === 1}
           done={currentStep > 1}
@@ -2245,14 +2251,14 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
             )
           }
         />
-        <Step
+        <CompareStep
           n={2}
           active={currentStep === 2}
           done={currentStep > 2}
           title="Filter and find the experiments you want"
           body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
         />
-        <Step
+        <CompareStep
           n={3}
           active={currentStep === 3}
           done={compareReport?.success}
@@ -2636,7 +2642,7 @@ function PendingProposalsPanel({ proposals, sendMessage, onBacktest }) {
   );
 }
 
-function LaddersPanel({ ladders, max, sendMessage }) {
+function LaddersPanel({ ladders, sendMessage }) {
   const [pair, setPair] = useState("BTC/USDC");
   const [side, setSide] = useState("BUY");
   const [total, setTotal] = useState("");
@@ -3265,6 +3271,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [libExperiments, setLibExperiments] = useState([]);    // full list from WS
   const [libLoading, setLibLoading] = useState(false);
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
+  const [stagedProposal, setStagedProposal] = useState(null);
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
   const [viewingExpId, setViewingExpId] = useState(null);      // single-experiment detail view (stretch)
   // ─── Companion state (Phase 1+) ───
@@ -3723,6 +3730,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       }
       ws.close();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyLiveState, refreshWsToken, wsUrl]);
 
   // Keep `connectRef` pointing at the freshest connect closure
@@ -3879,14 +3887,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const companionSwitch = useCallback((cid) => {
     setActiveCompanion(cid);
     getUnreadSetter(cid)(false);
-    try { localStorage.setItem("hydra.companion.active", cid); } catch {}
+    try { localStorage.setItem("hydra.companion.active", cid); } catch { /* ignore */ }
     sendMessage({ type: "companion.switch", to_id: cid });
   }, [sendMessage, getUnreadSetter]);
 
   const companionToggle = useCallback(() => {
     setCompanionDrawerOpen((prev) => {
       const next = !prev;
-      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch {}
+      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch { /* ignore */ }
       if (next) getUnreadSetter(activeCompanion)(false);
       return next;
     });
@@ -4027,9 +4035,9 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const totalFills = jStats.total_fills || 0;
   const fillsByPair = jStats.fills_by_pair || {};
   const fillWinRate = jStats.fill_win_rate || 0;
-  // Win rate: prefer engine round-trip rate when available, fall back to
-  // journal fill-derived rate so the stat updates as soon as sells execute.
-  const overallWinRate = totalTrades > 0 ? engineWinRate : fillWinRate;
+  // Win rate: use journal fill-derived rate when available so it reflects partial closes,
+  // falling back to engine round-trip rate.
+  const overallWinRate = totalFills > 0 ? fillWinRate : engineWinRate;
 
   return (
     <div style={{ background: COLORS.bg, minHeight: "100vh", color: COLORS.text, padding: 0 }}>
@@ -4122,60 +4130,78 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                     onSubmit={sendMessage}
                     connected={connected}
                     disabled={false}
-                    ackMsg={btLastAck}
-                    lastResultId={Object.keys(btResults).slice(-1)[0] || null}
-                    completedCount={Object.keys(btResults).length}
-                    reviewedCount={Object.keys(btReviews).length}
-                    observerProgress={observerClosed ? null : obsProgress}
-                    observerResult={observerClosed ? null : obsResult}
-                    observerReview={observerClosed ? null : obsReview}
-                    observerEquity={obsEquity}
-                    observerTotalTicks={totalTicks}
-                    onObserverClose={() => setObserverClosed(true)}
-                    onCompareThisRun={(expId) => {
-                      setCompareSelected((prev) =>
-                        prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
-                      );
-                      fetchLibrary();
-                    }}
+                    stagedProposal={stagedProposal}
                   />
                 </div>
                 
-                {/* Right Column: Compare Library & Report */}
-                <div style={{ flex: 1 }}>
-                  {viewingExpId && (
-                    <div style={{ marginBottom: 12, padding: "10px 16px",
-                                  background: `${COLORS.blue}10`,
-                                  border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                  fontFamily: mono, fontSize: 12, color: COLORS.blue,
-                                  display: "flex", justifyContent: "space-between",
-                                  alignItems: "center" }}>
-                      <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
-                      <button onClick={() => setViewingExpId(null)}
-                              style={{ background: "transparent", border: "none",
-                                       color: COLORS.blue, cursor: "pointer",
-                                       fontFamily: mono, fontSize: 12 }}>
-                        dismiss
-                      </button>
+                {/* Right Column: Backtest Results or Compare Library */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                    <button onClick={() => setResearchTab("LATEST_RUN")}
+                            style={{ padding: "6px 16px", background: researchTab === "LATEST_RUN" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LATEST_RUN" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LATEST_RUN" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
+                      Latest Run
+                    </button>
+                    <button onClick={() => setResearchTab("LIBRARY")}
+                            style={{ padding: "6px 16px", background: researchTab === "LIBRARY" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LIBRARY" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LIBRARY" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
+                      Compare Library
+                    </button>
+                  </div>
+
+                  {researchTab === "LATEST_RUN" ? (
+                    <BacktestResults
+                      ackMsg={btLastAck}
+                      observerProgress={observerClosed ? null : obsProgress}
+                      observerResult={observerClosed ? null : obsResult}
+                      observerReview={observerClosed ? null : obsReview}
+                      observerEquity={obsEquity}
+                      observerTotalTicks={totalTicks}
+                      completedCount={Object.keys(btResults).length}
+                      onObserverClose={() => setObserverClosed(true)}
+                      onCompareThisRun={(expId) => {
+                        setCompareSelected((prev) =>
+                          prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
+                        );
+                        setResearchTab("LIBRARY");
+                        fetchLibrary();
+                      }}
+                    />
+                  ) : (
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                      {viewingExpId && (
+                        <div style={{ marginBottom: 12, padding: "10px 16px",
+                                      background: `${COLORS.blue}10`,
+                                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
+                                      fontFamily: mono, fontSize: 12, color: COLORS.blue,
+                                      display: "flex", justifyContent: "space-between",
+                                      alignItems: "center" }}>
+                          <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
+                          <button onClick={() => setViewingExpId(null)}
+                                  style={{ background: "transparent", border: "none",
+                                           color: COLORS.blue, cursor: "pointer",
+                                           fontFamily: mono, fontSize: 12 }}>
+                            dismiss
+                          </button>
+                        </div>
+                      )}
+                      <CompareView
+                        experiments={filteredExperiments}
+                        selectedIds={compareSelected}
+                        onToggleSelect={toggleSelectExperiment}
+                        onClearSelection={clearSelection}
+                        onRefresh={fetchLibrary}
+                        onView={viewExperiment}
+                        onCompare={runCompare}
+                        compareReport={compareReport}
+                        loading={libLoading}
+                        compareInFlight={compareInFlight}
+                        onGoToBacktest={() => { /* No-op */ }}
+                        totalInStore={libExperiments.length}
+                        onDismissReport={() => {
+                          setCompareReport(null);
+                        }}
+                      />
                     </div>
                   )}
-                  <CompareView
-                    experiments={filteredExperiments}
-                    selectedIds={compareSelected}
-                    onToggleSelect={toggleSelectExperiment}
-                    onClearSelection={clearSelection}
-                    onRefresh={fetchLibrary}
-                    onView={viewExperiment}
-                    onCompare={runCompare}
-                    compareReport={compareReport}
-                    loading={libLoading}
-                    compareInFlight={compareInFlight}
-                    onGoToBacktest={() => { /* No-op now since we are in RESEARCH */ }}
-                    totalInStore={libExperiments.length}
-                    onDismissReport={() => {
-                      setCompareReport(null);
-                    }}
-                  />
                 </div>
               </div>
             )}
@@ -4771,7 +4797,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 const pf = fillsByPair[pair] || { buys: 0, sells: 0, sell_wins: 0, sell_losses: 0 };
                 const pairSellTotal = (pf.sell_wins || 0) + (pf.sell_losses || 0);
                 const pairFillWR = pairSellTotal > 0 ? ((pf.sell_wins || 0) / pairSellTotal * 100) : 0;
-                const winRate = (perf.total_trades || 0) > 0 ? engineWR : pairFillWR;
+                const winRate = pairSellTotal > 0 ? pairFillWR : engineWR;
                 const pairFills = pf.buys + pf.sells;
                 const pairPnl = (jStats.pnl_by_pair || {})[pair] || {};
                 const pairNetUsd = pairPnl.net_usd || 0;
@@ -4940,7 +4966,7 @@ function AuthSurface({ onLogin }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "center",
-      minHeight: "100vh", background: COLORS.bg, fontFamily: mono, color: COLORS.text,
+      minHeight: "100vh", fontFamily: mono, color: COLORS.text,
       background: `radial-gradient(circle at 50% 50%, ${COLORS.panel}, ${COLORS.bg})`
     }}>
       <div style={{
