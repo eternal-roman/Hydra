@@ -9,7 +9,10 @@ local JSONL store whenever CBP is unreachable.
 
 Environment:
     CBP_RUNNER_DIR   absolute path to the cbp-runner checkout.
-                     Defaults to C:/Users/elamj/Dev/cbp-runner.
+                     Defaults to `../cbp-runner` resolved relative to this
+                     file (i.e. a sibling checkout next to the Hydra repo
+                     root). A missing directory is not an error — every
+                     client call degrades silently.
     CBP_CLIENT_TIMEOUT_S  per-call HTTP timeout (default 1.5).
 
 Usage:
@@ -31,9 +34,11 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_RUNNER_DIR = Path(os.environ.get(
-    "CBP_RUNNER_DIR", "C:/Users/elamj/Dev/cbp-runner"
-))
+# Default to `<hydra_repo>/../cbp-runner` (sibling checkout). Resolving via
+# __file__ keeps behaviour stable regardless of cwd and avoids burning a
+# developer-specific absolute path into the source.
+_SIBLING_DEFAULT = (Path(__file__).resolve().parent.parent.parent / "cbp-runner")
+DEFAULT_RUNNER_DIR = Path(os.environ.get("CBP_RUNNER_DIR", str(_SIBLING_DEFAULT)))
 DEFAULT_TIMEOUT_S = float(os.environ.get("CBP_CLIENT_TIMEOUT_S", "1.5"))
 
 

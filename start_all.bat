@@ -8,9 +8,9 @@ echo ========================================
 echo.
 
 :: Kick the CBP memory sidecar first (idempotent; no-op if already up).
-if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=C:\Users\elamj\Dev\cbp-runner"
+if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=%~dp0..\cbp-runner"
 if exist "%CBP_RUNNER_DIR%\supervisor.py" (
-    echo [%date% %time%] Bringing up CBP sidecar ^(%CBP_RUNNER_DIR%^)
+    echo [%date% %time%] Bringing up CBP sidecar
     start "CBP Runner Sidecar" cmd /c "cd /d %CBP_RUNNER_DIR% && python supervisor.py"
 )
 

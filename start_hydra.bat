@@ -10,9 +10,9 @@ echo.
 :: Start the CBP memory sidecar (idempotent; --detach is a no-op if
 :: already running). Failure is intentionally swallowed — Hydra must
 :: never block on the sidecar per cbp-runner/CLAUDE.md.
-if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=C:\Users\elamj\Dev\cbp-runner"
+if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=%~dp0..\cbp-runner"
 if exist "%CBP_RUNNER_DIR%\supervisor.py" (
-    echo [%date% %time%] Starting CBP sidecar ^(detached^) via %CBP_RUNNER_DIR%
+    echo [%date% %time%] Starting CBP sidecar ^(detached^)
     python "%CBP_RUNNER_DIR%\supervisor.py" --detach >nul 2>&1
 )
 
