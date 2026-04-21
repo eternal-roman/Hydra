@@ -3278,6 +3278,77 @@ function ConnectionStatus({ connected, tick }) {
   );
 }
 
+// ─── Loading Screen ───
+
+function LoadingScreen({ connected }) {
+  const [progress, setProgress] = useState(0);
+  const [phraseIndex, setPhraseIndex] = useState(0);
+
+  const phrases = [
+    "Waking the Hydra...",
+    "Confabulating with the blockchain...",
+    "Bribing market makers...",
+    "Calculating lambo trajectories...",
+    "Reticulating splines...",
+    "Consulting the astrology charts...",
+    "Frontrunning retail...",
+    "Pumping the bags...",
+    "Reverting to mean..."
+  ];
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setProgress(p => {
+        const remaining = 99 - p;
+        const inc = Math.max(0.2, remaining * 0.05); // Ease out
+        const next = p + inc;
+        return next > 99 ? 99 : next;
+      });
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPhraseIndex(i => (i + 1) % phrases.length);
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [phrases.length]);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 32 }}>
+      <div style={{ position: "relative", width: 140, height: 140, marginBottom: 12 }}>
+        <img src="/favicon.png" alt="Hydra" style={{ width: "100%", height: "100%", filter: "drop-shadow(0 0 20px rgba(16, 185, 129, 0.4))", position: "relative", zIndex: 2 }} />
+        {/* Pulsing ring */}
+        <div style={{ position: "absolute", top: -15, left: -15, right: -15, bottom: -15, borderRadius: "50%", border: `2px solid ${COLORS.accent}`, opacity: 0.5, animation: "hc-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite", zIndex: 1 }} />
+        <style>{`@keyframes hc-ping { 75%, 100% { transform: scale(1.4); opacity: 0; } }`}</style>
+      </div>
+      
+      <div style={{ 
+        fontSize: 56, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+        background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+        WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+        marginTop: -16
+      }}>HYDRA</div>
+
+      <div style={{ width: 320, display: "flex", flexDirection: "column", gap: 14, alignItems: "center" }}>
+        {/* Progress Bar */}
+        <div style={{ width: "100%", height: 6, background: COLORS.panelBorder, borderRadius: 3, overflow: "hidden", position: "relative" }}>
+          <div style={{ width: `${progress}%`, height: "100%", background: COLORS.accent, transition: "width 0.1s linear", boxShadow: `0 0 10px ${COLORS.accent}80` }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", width: "100%", fontFamily: mono, fontSize: 13 }}>
+          <span style={{ color: COLORS.textDim }}>{phrases[phraseIndex]}</span>
+          <span style={{ color: COLORS.accent, fontWeight: 700 }}>{Math.floor(progress)}%</span>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, marginTop: 8 }}>
+        {connected ? "Connection established. Awaiting first tick..." : `Waiting for agent connection on ${DEFAULT_WS_URL}...`}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ───
 
 export function HydraDashboard({ jwtToken, onLogout }) {
@@ -4285,19 +4356,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
         );
       })()}
 
-      {activeTab === "LIVE" && ((!connected && !state) || (state && pairNames.length === 0)) ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
-          <img src="/favicon.png" alt="Hydra" style={{ width: 135, height: 135, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
-          <div style={{ 
-            fontSize: 56, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
-            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-          }}>HYDRA</div>
-          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
-            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${DEFAULT_WS_URL}...`}
-          </div>
-          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
-        </div>
+      {activeTab === "LIVE" && (!state || pairNames.length === 0) ? (
+        <LoadingScreen connected={connected} />
       ) : null}
 
       {activeTab === "LIVE" && state && pairNames.length > 0 && (
