@@ -7,6 +7,24 @@ import "./App.css";
 
 // Override at build time with VITE_HYDRA_WS_URL for non-localhost deployments.
 const DEFAULT_WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
+
+// Constrain any wsUrl that can be influenced by client-side state (localStorage,
+// server-provided `start_agent_ack.port`) to `ws[s]://<loopback>[:<port>][/path]`.
+// Anything else falls back to DEFAULT_WS_URL. Blocks CodeQL js/server-side-unvalidated-url-redirection
+// by ensuring the URL sink in `new WebSocket(...)` only accepts validated loopback endpoints.
+const ALLOWED_WS_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+function sanitizeWsUrl(candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) return DEFAULT_WS_URL;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== "ws:" && u.protocol !== "wss:") return DEFAULT_WS_URL;
+    if (!ALLOWED_WS_HOSTS.has(u.hostname)) return DEFAULT_WS_URL;
+    if (u.port && !/^\d{1,5}$/.test(u.port)) return DEFAULT_WS_URL;
+    return u.toString();
+  } catch {
+    return DEFAULT_WS_URL;
+  }
+}
 // WS auth token file is written by the agent at startup to
 // dashboard/public/hydra_ws_token.json. Vite serves public/ at root,
 // so a plain fetch returns the current token. Rotates every agent
@@ -3412,13 +3430,13 @@ export function HydraDashboard({ jwtToken, onLogout }) {
     }
   }, []);
 
-  const [wsUrl, setWsUrl] = useState(() => localStorage.getItem("hydra_ws_url") || DEFAULT_WS_URL);
+  const [wsUrl, setWsUrl] = useState(() => sanitizeWsUrl(localStorage.getItem("hydra_ws_url")));
 
   const [researchTab, setResearchTab] = useState("LATEST_RUN");
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(sanitizeWsUrl(wsUrl));
     wsRef.current = ws;
     ws.onopen = async () => {
       // v2.16.2: refresh the auth token FIRST, then flip `connected=true`.
@@ -3707,8 +3725,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               setViewInFlight(null);
               return;
             case "start_agent_ack":
-              if (msg.success && msg.port) {
-                const newUrl = `ws://localhost:${msg.port}`;
+              if (msg.success && Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536) {
+                const newUrl = sanitizeWsUrl(`ws://localhost:${msg.port}`);
                 localStorage.setItem("hydra_ws_url", newUrl);
                 setWsUrl(newUrl);
               }
