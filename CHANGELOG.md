@@ -6,6 +6,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.17.1] — 2026-04-21
+
+### Security
+
+- **No hardcoded default admin password.** `hydra_auth.init_db()` previously
+  seeded an `admin`/`admin` row whenever the users table was empty. Anyone
+  reaching the WS server on initial deploy could log in with the published
+  default. First-run now seeds an admin user *only* when
+  `HYDRA_ADMIN_PASSWORD` is set; otherwise a single stderr line prints a
+  bootstrap instruction and no user is created. For manual provisioning:
+  `python hydra_auth.py create-user <username> [--admin]` (reads
+  `HYDRA_NEW_USER_PASSWORD` or prompts via `getpass`).
+- **JWT and Fernet secrets persist across restarts.** Prior behaviour was
+  `os.urandom(...)` per-process fallbacks when `HYDRA_JWT_SECRET` /
+  `HYDRA_ENCRYPTION_KEY` were unset, meaning (a) every issued token
+  invalidated on restart, and (b) every Fernet-encrypted API secret in
+  `hydra_users.db` became undecryptable — silently corrupting stored
+  exchange credentials for any operator who forgot to pin the env vars.
+  Secrets now resolve via env-var → `hydra_auth_state.json` (gitignored,
+  0600 on POSIX) → generate-and-persist, in that order, with a single
+  stderr warning on the generate path. Env vars still win; existing
+  state files survive restarts; a corrupted state file self-heals.
+
+### Added
+
+- **Startup audit for pre-v2.17.1 installs.** `hydra_auth` now runs
+  `_audit_legacy_default_admin()` at module import; if `admin`/`admin`
+  still authenticates against the DB it prints a loud stderr warning with
+  concrete rotation steps on every startup until the row is replaced.
+  Operators who ran any earlier release have a known published admin
+  credential in their DB — this closes the blast window rather than
+  relying on them noticing the CHANGELOG entry.
+- `tests/test_auth.py` — 10 subprocess-level tests covering no-default-admin,
+  env-gated admin seeding, secret persistence across restarts, env-var
+  precedence, corrupt-state-file recovery, legacy-admin detection, and
+  the `create-user` CLI (happy path, duplicate rejection, `--admin` role).
+- `.gitignore` entries for `hydra_auth_state.json` and its `.tmp`
+  write-ahead sibling.
+
+---
+
 ## [2.17.0] — 2026-04-21
 
 ### Added

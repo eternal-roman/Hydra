@@ -5032,7 +5032,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.17.0 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.17.1 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]
