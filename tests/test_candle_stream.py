@@ -9,7 +9,7 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import CandleStream
+from hydra_streams import CandleStream
 
 
 PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]

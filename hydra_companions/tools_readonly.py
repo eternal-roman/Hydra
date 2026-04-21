@@ -323,8 +323,8 @@ def get_chart_snapshot(agent, pair: str) -> dict:
                     median = statistics.median(non_zero)
                     if median > 0:
                         atr_expansion_ratio = round(atr_pct_current / median, 2)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         try:
             candles = list(engine.candles)[-100:]
             for i, c in enumerate(reversed(candles)):
@@ -334,8 +334,8 @@ def get_chart_snapshot(agent, pair: str) -> dict:
                     last_bb_upper_touch_ago = i
                 if last_bb_lower_touch_ago is not None and last_bb_upper_touch_ago is not None:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     return {
         "pair": pair,
@@ -515,10 +515,10 @@ def compose_context_blob(agent, *, pair: Optional[str] = None,
                     f"bb_lower_touch_ago={st.get('last_bb_lower_touch_candles_ago')} "
                     f"bb_upper_touch_ago={st.get('last_bb_upper_touch_candles_ago')}"
                 )
-        except ToolAccessDenied:
-            pass
-        except Exception:
-            pass
+        except ToolAccessDenied as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     # Journal tail — gated on allowlist via enforce_tool_access. When
     # access is granted but the journal is empty, emit an explicit
@@ -540,10 +540,10 @@ def compose_context_blob(agent, *, pair: Optional[str] = None,
                     )
             else:
                 parts.append(f"[journal: 0 entries (source={src})]")
-        except ToolAccessDenied:
-            pass
-        except Exception:
-            pass
+        except ToolAccessDenied as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     blob = "\n".join(parts)
     suffix = "\n...[trunc]"

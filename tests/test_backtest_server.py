@@ -409,7 +409,7 @@ class TestBroadcasterRefactor(unittest.TestCase):
     registry and the inbound-dispatch coroutine logic."""
 
     def setUp(self):
-        from hydra_agent import DashboardBroadcaster
+        from hydra_ws_server import DashboardBroadcaster
         self.DashboardBroadcaster = DashboardBroadcaster
         self.bc = DashboardBroadcaster(host="127.0.0.1", port=0)
         # No start() — we never accept real connections.

@@ -259,8 +259,8 @@ class MockExecutor:
                 f.write(json.dumps({
                     "ts": time.time(), "event": event, "proposal": proposal,
                 }) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════

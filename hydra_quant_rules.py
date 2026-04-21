@@ -264,8 +264,8 @@ def _count_stale_fields(qi: Dict[str, Any]) -> int:
     try:
         if aggregate is not None and float(aggregate) > STALENESS_SECONDS_MAX:
             return 5  # treat entire block as stale
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
 
     if qi.get("synthetic_pair"):
         tracked = ("funding_bps_8h", "cvd_divergence_sigma", "oi_price_regime")

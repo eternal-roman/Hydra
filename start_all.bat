@@ -11,7 +11,7 @@ echo.
 if not defined CBP_RUNNER_DIR set "CBP_RUNNER_DIR=C:\Users\elamj\Dev\cbp-runner"
 if exist "%CBP_RUNNER_DIR%\supervisor.py" (
     echo [%date% %time%] Bringing up CBP sidecar ^(%CBP_RUNNER_DIR%^)
-    python "%CBP_RUNNER_DIR%\supervisor.py" --detach >nul 2>&1
+    start "CBP Runner Sidecar" cmd /c "cd /d %CBP_RUNNER_DIR% && python supervisor.py"
 )
 
 :: Start dashboard in a new window

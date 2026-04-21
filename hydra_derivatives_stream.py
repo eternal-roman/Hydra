@@ -514,8 +514,8 @@ class DerivativesStream:
             days = max(1.0, (expiry - now) / 86400)
             premium = (q_mark - perp_mark) / perp_mark
             snap.basis_apr_pct = round(premium * (365.0 / days) * 100.0, 2)
-        except (ValueError, IndexError):
-            pass
+        except (ValueError, IndexError) as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ─── Helpers (module-private) ───────────────────────────────────

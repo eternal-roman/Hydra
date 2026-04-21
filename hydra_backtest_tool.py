@@ -758,8 +758,8 @@ class BacktestToolDispatcher:
                 "reason": reason,
                 "input": compact_input,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════

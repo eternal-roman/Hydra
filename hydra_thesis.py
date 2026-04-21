@@ -458,8 +458,8 @@ class ThesisTracker:
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
-            except OSError:
-                pass
+            except OSError as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a deep-copyable dict of current state for session snapshot."""
@@ -664,8 +664,8 @@ class ThesisTracker:
                 if exp < _iso_now():
                     dropped += 1
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             kept.append(it)
         if dropped:
             self._state["active_intents"] = kept
@@ -1180,8 +1180,8 @@ class ThesisTracker:
                 r["filled_at"] = _iso_now()
                 try:
                     r["filled_price"] = float(filled_price)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
                 hit = True
             # Advance ladder status if every rung terminated
             rungs = l.get("rungs", []) or []
@@ -1362,8 +1362,8 @@ class ThesisTracker:
             try:
                 if os.path.exists(tmp):
                     os.remove(tmp)
-            except OSError:
-                pass
+            except OSError as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             return None
         return path
 
@@ -1446,8 +1446,8 @@ class ThesisTracker:
         try:
             if os.path.exists(path):
                 os.remove(path)
-        except OSError:
-            pass
+        except OSError as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _apply_proposal(self, proposal: Dict[str, Any]) -> bool:
         """Merge a proposal's fields into the thesis state.
@@ -1477,8 +1477,8 @@ class ThesisTracker:
                     if conf is not None:
                         try:
                             post["confidence"] = _clamp(float(conf), 0.0, 1.0)
-                        except (TypeError, ValueError):
-                            pass
+                        except (TypeError, ValueError) as e:
+                            import logging; logging.warning(f"Ignored exception: {e}")
                     self._state["posterior"] = post
 
             cu = proposal.get("checklist_updates") or {}
@@ -1562,8 +1562,8 @@ class ThesisTracker:
                 try:
                     p = max(1, min(5, int(patch["priority"])))
                     i["priority"] = p
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
             if "expires_at" in patch:
                 exp = patch["expires_at"]
                 i["expires_at"] = exp if isinstance(exp, str) or exp is None else None

@@ -122,8 +122,8 @@ class LiveExecutor:
         if watcher is not None:
             try:
                 watcher.register(p, placed)
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
         self._broadcast("companion.ladder.executed", {
             "proposal_id": p.proposal_id,
@@ -147,8 +147,8 @@ class LiveExecutor:
     def _broadcast(self, msg_type: str, payload: dict) -> None:
         try:
             self.agent.broadcaster.broadcast_message(msg_type, payload)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _broadcast_failed(self, proposal_id: str, companion_id: str, reason: str) -> None:
         self._broadcast("companion.trade.failed", {
@@ -164,8 +164,8 @@ class LiveExecutor:
                 entry.update(extra)
             with PROPOSALS_LOG.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 def _safe_trim(r: dict) -> dict:

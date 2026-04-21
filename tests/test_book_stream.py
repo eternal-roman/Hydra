@@ -9,7 +9,7 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import BookStream
+from hydra_streams import BookStream
 from hydra_engine import OrderBookAnalyzer
 
 

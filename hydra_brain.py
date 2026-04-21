@@ -1417,20 +1417,20 @@ Make the final call. Think carefully, then respond with JSON only."""
             cleaned = fence_match.group(1).strip()
         try:
             return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         match = re.search(r'\{[^{}]*\}', cleaned, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
         match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
         print(f"  [BRAIN] Failed to parse JSON: {text[:100]}")
         return None
 
@@ -1495,8 +1495,8 @@ Make the final call. Think carefully, then respond with JSON only."""
             event["ts"] = datetime.now(timezone.utc).isoformat()
             with open(self._jsonl_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, default=str) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _estimated_cost(self) -> float:
         """Estimate daily API cost from token usage (primary + strategist)."""
@@ -1547,8 +1547,8 @@ Make the final call. Think carefully, then respond with JSON only."""
                f"(enforce_budget={self.enforce_budget})")
         try:
             print(msg, flush=True)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         if self.broadcaster is not None and hasattr(self.broadcaster, "broadcast_message"):
             try:
                 self.broadcaster.broadcast_message("cost_alert", {
@@ -1558,8 +1558,8 @@ Make the final call. Think carefully, then respond with JSON only."""
                     "day_key": today.isoformat() if today else "",
                     "enforce_budget": self.enforce_budget,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
 
     def get_stats(self) -> Dict:
         """Return brain statistics for dashboard."""

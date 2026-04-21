@@ -16,7 +16,8 @@ import time
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hydra_agent import ExecutionStream, FakeExecutionStream  # noqa: E402
+from hydra_streams import FakeExecutionStream  # noqa: E402
+from hydra_streams import ExecutionStream
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -370,15 +371,15 @@ class TestRestartStatePreservation:
         sequence numbering at 1. Carrying over the old _last_sequence would
         produce a spurious 'sequence gap' warning on the first executions
         message after restart."""
-        import hydra_agent
+        import hydra_streams
         es = ExecutionStream(paper=False)
         es._last_sequence = 9999
-        # Patch the subprocess module reference used inside hydra_agent so
+        # Patch the subprocess module reference used inside hydra_streams so
         # start() spawns a stub instead of a real wsl.exe. Restore in finally
         # to keep sibling tests hermetic.
-        original_popen = hydra_agent.subprocess.Popen
+        original_popen = hydra_streams.subprocess.Popen
         try:
-            hydra_agent.subprocess.Popen = lambda *a, **kw: _make_empty_fake_proc()
+            hydra_streams.subprocess.Popen = lambda *a, **kw: _make_empty_fake_proc()
             # Suppress the [EXECSTREAM] start/exit prints so they don't
             # pollute test output — they're normal here, just noisy.
             with _PrintCapture():
@@ -391,7 +392,7 @@ class TestRestartStatePreservation:
             assert ok is True
             assert es._last_sequence is None
         finally:
-            hydra_agent.subprocess.Popen = original_popen
+            hydra_streams.subprocess.Popen = original_popen
             with _PrintCapture():
                 es.stop()
 

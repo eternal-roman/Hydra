@@ -38,7 +38,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from hydra_agent import HydraAgent, KrakenCLI, FakeExecutionStream, FakeTickerStream  # noqa: E402
+from hydra_agent import HydraAgent  # noqa: E402
+from hydra_kraken_cli import KrakenCLI
+from hydra_streams import FakeExecutionStream, FakeTickerStream
 from hydra_engine import HydraEngine  # noqa: E402
 
 

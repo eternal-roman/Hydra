@@ -421,8 +421,8 @@ class BacktestWorkerPool:
             }
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════

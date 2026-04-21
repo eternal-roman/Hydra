@@ -6,7 +6,21 @@ import "./App.css";
 // ═══════════════════════════════════════════════════════════════
 
 // Override at build time with VITE_HYDRA_WS_URL for non-localhost deployments.
-const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
+const DEFAULT_WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
+
+// Constrain any wsUrl that can be influenced by client-side state (localStorage,
+// server-provided `start_agent_ack.port`) to `ws[s]://<loopback>[:<port>][/path]`.
+// Anything else falls back to DEFAULT_WS_URL. Regex-based allowlist (not URL
+// parser) so CodeQL js/request-forgery recognises this as a sanitiser — the
+// query trusts `RegExp.test()` on an anchored pattern as a guard, whereas it
+// does not follow string round-trips through `new URL(...)`.
+const SAFE_WS_URL_RE = /^wss?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:\/[\w\-./]*)?$/;
+function sanitizeWsUrl(candidate) {
+  if (typeof candidate === "string" && SAFE_WS_URL_RE.test(candidate)) {
+    return candidate;
+  }
+  return DEFAULT_WS_URL;
+}
 // WS auth token file is written by the agent at startup to
 // dashboard/public/hydra_ws_token.json. Vite serves public/ at root,
 // so a plain fetch returns the current token. Rotates every agent
@@ -14,25 +28,25 @@ const WS_URL = import.meta.env.VITE_HYDRA_WS_URL || "ws://localhost:8765";
 const WS_TOKEN_URL = "/hydra_ws_token.json";
 
 const COLORS = {
-  bg: "#0a0a0f",
-  panel: "#111118",
-  panelBorder: "#1e1e2e",
-  accent: "#00ff88",
-  danger: "#ff3366",
-  warn: "#ffaa00",
-  blue: "#3388ff",
-  purple: "#8855ff",
-  risk: "#a78bfa",  // softer lavender — RM dialogue (distinct from #8855ff volatile)
-  text: "#e8e8f0",
-  textDim: "#888899",
-  textMuted: "#555566",
-  buy: "#00ff88",
-  sell: "#ff3366",
-  hold: "#ffaa00",
-  trendUp: "#00ff88",
-  trendDown: "#ff3366",
-  ranging: "#ffaa00",
-  volatile: "#8855ff",
+  bg: "#09090b",
+  panel: "#18181b",
+  panelBorder: "#27272a",
+  accent: "#10b981",
+  danger: "#ef4444",
+  warn: "#f59e0b",
+  blue: "#3b82f6",
+  purple: "#8b5cf6",
+  risk: "#a78bfa",
+  text: "#f4f4f5",
+  textDim: "#a1a1aa",
+  textMuted: "#71717a",
+  buy: "#10b981",
+  sell: "#ef4444",
+  hold: "#f59e0b",
+  trendUp: "#10b981",
+  trendDown: "#ef4444",
+  ranging: "#f59e0b",
+  volatile: "#8b5cf6",
 };
 
 const regimeColor = (r) =>
@@ -236,6 +250,19 @@ function ConfidenceMeter({ confidence, signal }) {
 // dashboard keeps in memory. A long-running session otherwise leaks ~60
 // floats/tick * pairs * experiments. LRU-ish: newest wins, oldest drop.
 const MAX_EQUITY_HISTORY_EXPERIMENTS = 10;
+// Cap for per-experiment dicts (progress / results / reviews) so long
+// sessions with many backtests don't leak unbounded state.
+const MAX_BACKTEST_DICT_ENTRIES = 50;
+
+function lruCapDict(dict, key, value, cap) {
+  const merged = { ...dict, [key]: value };
+  const keys = Object.keys(merged);
+  if (keys.length <= cap) return merged;
+  const keep = keys.slice(-cap);
+  const trimmed = {};
+  for (const k of keep) trimmed[k] = merged[k];
+  return trimmed;
+}
 
 // Known top-level keys on the legacy raw-state dict (compat_mode=true
 // broadcaster shape, from hydra_agent._build_dashboard_state). Used to
@@ -417,7 +444,7 @@ function CompanionSwitcher({ active, onSwitch }) {
   );
 }
 
-function CompanionMessage({ m, theme, userTheme }) {
+function CompanionMessage({ m, theme }) {
   const isUser = m.role === "user";
   const isProactive = m.proactive === true;
   return (
@@ -664,6 +691,12 @@ function CompanionDrawer({
   // Submit lock via ref so double-presses within the same React tick
   // can't slip past the guard (state updates are async; refs are sync).
   const submitLockRef = useRef(false);
+  const submitTimeoutRef = useRef(null);
+  useEffect(() => {
+    return () => {
+      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+    };
+  }, []);
   const submit = () => {
     if (submitLockRef.current) return;
     const text = draft.trim();
@@ -672,7 +705,8 @@ function CompanionDrawer({
     setSending(true);
     onSend(text);
     setDraft("");
-    setTimeout(() => {
+    submitTimeoutRef.current = setTimeout(() => {
+      submitTimeoutRef.current = null;
       submitLockRef.current = false;
       setSending(false);
     }, 350);
@@ -829,12 +863,35 @@ function CompanionDrawer({
   );
 }
 
+function FeatureFlagBanner({ flag, note }) {
+  return (
+    <div style={{
+      margin: "12px 24px 0",
+      padding: "8px 12px",
+      background: `${COLORS.warn}12`,
+      border: `1px solid ${COLORS.warn}55`,
+      borderRadius: 4,
+      fontFamily: mono,
+      fontSize: 11,
+      color: COLORS.warn,
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+    }}>
+      <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>EXPERIMENTAL</span>
+      <span style={{ color: COLORS.textDim }}>
+        Feature-flagged — behavior may change. {note} Kill switch: <code>{flag}=1</code>.
+      </span>
+    </div>
+  );
+}
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
-    { key: "BACKTEST", label: "BACKTEST", color: COLORS.blue },
-    { key: "COMPARE",  label: "COMPARE",  color: COLORS.purple },
+    { key: "RESEARCH", label: "RESEARCH", color: COLORS.blue },
     { key: "THESIS",   label: "THESIS",   color: COLORS.warn },
+    { key: "SETTINGS", label: "SETTINGS", color: COLORS.text },
   ];
   return (
     // Gap: 10 puts visible air between each tab so the row breathes.
@@ -982,12 +1039,7 @@ function Checkbox({ checked, onChange, label, hint }) {
   );
 }
 
-function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResultId,
-                                completedCount = 0, reviewedCount = 0,
-                                observerProgress = null, observerResult = null,
-                                observerReview = null, observerEquity = null,
-                                observerTotalTicks = 0, onObserverClose = null,
-                                onCompareThisRun = null }) {
+function BacktestControlPanel({ onSubmit, connected, disabled, stagedProposal }) {
   const [preset, setPreset] = useState("default");
   const [hypothesis, setHypothesis] = useState("");
   const [pairs, setPairs] = useState("SOL/USDC");
@@ -995,6 +1047,16 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   const [seed, setSeed] = useState(42);
   const [withMC, setWithMC] = useState(true);
   const [withWF, setWithWF] = useState(false);
+
+  useEffect(() => {
+    if (stagedProposal && stagedProposal.hypothesis) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHypothesis(stagedProposal.hypothesis);
+      if (stagedProposal.pair) {
+        setPairs(stagedProposal.pair);
+      }
+    }
+  }, [stagedProposal]);
 
   const hypothesisValid = hypothesis.trim().length >= 8;
   const nCandlesNum = Number(nCandles);
@@ -1036,21 +1098,24 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, alignItems: "stretch",
-                   height: "calc(100vh - 140px)", minHeight: 520 }}>
-      {/* LEFT: control form */}
-      <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                    borderRadius: 8, padding: 20, alignSelf: "stretch",
-                    overflowY: "auto", minHeight: 0 }}>
-        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                      marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
+    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
+                  borderRadius: 8, padding: 20, alignSelf: "stretch",
+                  overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
+                    marginBottom: 18, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <div>
-            <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
-            <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
+        <div style={{ display: "flex", flexDirection: "column", gap: 20, flex: 1 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
+              <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
+            </div>
+            <div>
+              <FieldLabel labelSize={11} hintSize={12}>Pairs</FieldLabel>
+              <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC" fontSize={14} padding="8px 10px" />
+            </div>
           </div>
 
           <div>
@@ -1067,11 +1132,6 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
                 {8 - hypothesis.trim().length} more character(s) required
               </div>
             )}
-          </div>
-
-          <div>
-            <FieldLabel labelSize={11} hintSize={12}>Pairs (comma-separated)</FieldLabel>
-            <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC,BTC/USDC" fontSize={14} padding="8px 12px" />
           </div>
 
           {/* Candles + Seed: label row, input row, hint row — each grid row aligned
@@ -1116,12 +1176,15 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
             />
           </div>
 
+        </div>
+        
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${COLORS.panelBorder}` }}>
           <button
             onClick={submit}
             disabled={!canSubmit}
             style={{
-              marginTop: 6,
-              padding: "12px 18px",
+              width: "100%",
+              padding: "14px 18px",
               fontSize: 14,
               fontWeight: 700,
               fontFamily: mono,
@@ -1141,293 +1204,154 @@ function BacktestControlPanel({ onSubmit, connected, disabled, ackMsg, lastResul
           </button>
 
           {!connected && (
-            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono }}>
+            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 12, textAlign: "center" }}>
               Disconnected — start hydra_agent.py to enable.
             </div>
           )}
-
         </div>
-      </div>
+    </div>
+  );
+}
 
-      {/* RIGHT: tri-panel (Last Result + Status + Rigor Gates) above the observer chart */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch",
-                    minHeight: 0 }}>
-        {/* Tri-panel: three equal panels sharing the same width as the observer
-            chart beneath them. */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12,
-                      flex: "0 0 auto" }}>
-          {/* Last Result */}
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16 }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
-              Last Result
+function BacktestResults({ 
+  ackMsg, observerProgress, observerResult, observerReview, 
+  observerEquity, observerTotalTicks, completedCount, 
+  onObserverClose, onApplyOptimizations, onCompareThisRun 
+}) {
+  const stage = observerProgress?.stage;
+  const runState =
+    ackMsg && ackMsg.success === false ? "rejected" :
+    observerResult ? "complete" :
+    (observerProgress && (stage === "running" || stage === "started")) ? "running" :
+    ackMsg?.success ? "queued" :
+    "idle";
+
+  const paletteByState = {
+    idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
+    queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
+    running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
+    complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
+    rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
+  };
+  const p = paletteByState[runState];
+
+  const bodyByState = {
+    idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
+    queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
+    running: observerProgress
+      ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
+      : "Executing. Live data streams into the Observer chart below.",
+    complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
+    rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
+  };
+
+  const expId = observerResult?.experiment_id
+             || observerProgress?.experiment_id
+             || ackMsg?.experiment_id;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch", minHeight: 0, height: "100%" }}>
+      {/* Horizontal Tri-panel */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, flex: "0 0 auto" }}>
+        
+        {/* Last Result */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 12 }}>Last Result</div>
+          {observerResult?.metrics ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
+              <span style={{ color: COLORS.textDim }}>Trades</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{observerResult.metrics.total_trades}</span>
+              <span style={{ color: COLORS.textDim }}>Return</span>
+              <span style={{ textAlign: "right", color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
+                {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
+                {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
+              </span>
+              <span style={{ color: COLORS.textDim }}>Sharpe</span>
+              <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(observerResult.metrics.sharpe)}</span>
+              <span style={{ color: COLORS.textDim }}>Max DD</span>
+              <span style={{ color: COLORS.warn, textAlign: "right" }}>{(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%</span>
             </div>
-            {observerResult?.metrics ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto",
-                            rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
-                <span style={{ color: COLORS.textDim }}>Trades</span>
-                <span style={{ color: COLORS.text, textAlign: "right" }}>
-                  {observerResult.metrics.total_trades}
-                </span>
-                <span style={{ color: COLORS.textDim }}>Return</span>
-                <span style={{ textAlign: "right",
-                               color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
-                  {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
-                  {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
-                </span>
-                <span style={{ color: COLORS.textDim }}>Sharpe</span>
-                <span style={{ color: COLORS.text, textAlign: "right" }}>
-                  {fmtInd(observerResult.metrics.sharpe)}
-                </span>
-                <span style={{ color: COLORS.textDim }}>Max DD</span>
-                <span style={{ color: COLORS.warn, textAlign: "right" }}>
-                  {(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%
-                </span>
-                {observerResult.metrics.profit_factor != null && (
-                  <>
-                    <span style={{ color: COLORS.textDim }}>Profit Factor</span>
-                    <span style={{ color: COLORS.text, textAlign: "right" }}>
-                      {observerResult.metrics.profit_factor.toFixed(2)}
-                    </span>
-                  </>
-                )}
-                {observerResult.metrics.win_rate_pct != null && (
-                  <>
-                    <span style={{ color: COLORS.textDim }}>Win Rate</span>
-                    <span style={{ color: COLORS.text, textAlign: "right" }}>
-                      {observerResult.metrics.win_rate_pct.toFixed(0)}%
-                    </span>
-                  </>
-                )}
-              </div>
-            ) : (
-              <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>
-                No completed backtest yet this session.
-              </div>
-            )}
+          ) : (
+            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>No completed backtest yet this session.</div>
+          )}
+          {observerResult?.experiment_id && completedCount >= 2 && onCompareThisRun && (
+            <div style={{ marginTop: 12 }}>
+              <button onClick={() => onCompareThisRun(observerResult.experiment_id)}
+                      style={{ padding: "4px 8px", fontSize: 10, fontFamily: mono, background: "transparent", color: COLORS.blue, border: `1px solid ${COLORS.blue}40`, borderRadius: 4, cursor: "pointer", textTransform: "uppercase" }}>
+                Compare in Library
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Run Status */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 4 }}>Run Status</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", background: p.dot, boxShadow: runState === "running" ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}` : `0 0 4px ${p.dot}80`, animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
+            <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: p.fg, letterSpacing: "0.04em" }}>{p.label}</span>
           </div>
+          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, lineHeight: 1.5, marginBottom: expId ? 10 : 0 }}>{bodyByState[runState]}</div>
+        </div>
 
-          {/* Run Status — lifecycle of the most recent submission. Derives a
-              single state from (ackMsg × observerProgress × observerResult). */}
+        {/* Rigor Gates */}
+        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
+          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 10 }}>Rigor Gates</div>
           {(() => {
-            // State machine:
-            //   idle       — never submitted
-            //   rejected   — server refused (validation, quota, etc.)
-            //   queued     — accepted, not started yet
-            //   running    — tick stream active
-            //   complete   — terminal result received
-            const stage = observerProgress?.stage;
-            const runState =
-              ackMsg && ackMsg.success === false ? "rejected" :
-              observerResult ? "complete" :
-              (observerProgress && (stage === "running" || stage === "started")) ? "running" :
-              ackMsg?.success ? "queued" :
-              "idle";
-
-            const paletteByState = {
-              idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
-              queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
-              running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
-              complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
-              rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
-            };
-            const p = paletteByState[runState];
-
-            const bodyByState = {
-              idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
-              queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
-              running: observerProgress
-                ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
-                : "Executing. Live data streams into the Observer chart below.",
-              complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
-              rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
-            };
-
-            const expId = observerResult?.experiment_id
-                       || observerProgress?.experiment_id
-                       || ackMsg?.experiment_id;
-
+            const gp = observerReview?.gates_passed;
+            const hasReview = gp && typeof gp === "object";
+            const summary = hasReview
+              ? (() => {
+                  const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
+                  const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
+                  return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
+                })()
+              : "No review yet — hover a pill for what it checks.";
             return (
-              <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                            borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                              marginBottom: 4 }}>
-                  Run Status
+              <>
+                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>{summary}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {RIGOR_GATES.map(g => {
+                    const state = !hasReview ? "neutral" : gp[g.key] === true ? "pass" : gp[g.key] === false ? "fail" : "neutral";
+                    const bg = state === "pass" ? `${COLORS.accent}18` : state === "fail" ? `${COLORS.danger}18` : COLORS.bg;
+                    const border = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.panelBorder;
+                    const fg = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.textDim;
+                    const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
+                    return (
+                      <span key={g.key} title={`${g.label} (${g.key})
+
+${g.why}`}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 999, background: bg, border: `1px solid ${border}`, color: fg, fontFamily: mono, fontSize: 11, fontWeight: 600, cursor: "help", whiteSpace: "nowrap" }}>
+                        <span style={{ fontSize: 10 }}>{icon}</span>{g.label}
+                      </span>
+                    );
+                  })}
                 </div>
-                <div style={{ fontSize: 11, fontFamily: mono, color: COLORS.textMuted,
-                              marginBottom: 12 }}>
-                  Lifecycle of your most recent submission.
-                </div>
-
-                {/* State badge */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: "50%",
-                                 background: p.dot,
-                                 boxShadow: runState === "running"
-                                   ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}`
-                                   : `0 0 4px ${p.dot}80`,
-                                 animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
-                  <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700,
-                                 color: p.fg, letterSpacing: "0.04em" }}>
-                    {p.label}
-                  </span>
-                </div>
-
-                {/* Body — plain-English description of what this state means */}
-                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                              lineHeight: 1.5, marginBottom: expId || (completedCount > 0) ? 10 : 0 }}>
-                  {bodyByState[runState]}
-                </div>
-
-                {/* Experiment id — only when a run has actually been accepted */}
-                {expId && (
-                  <div style={{ fontFamily: mono, fontSize: 10, color: COLORS.textMuted,
-                                marginBottom: completedCount > 0 ? 10 : 0,
-                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                       title={`Full experiment id: ${expId}`}>
-                    id: {expId.slice(0, 12)}…
-                  </div>
-                )}
-
-                {/* Complete-state CTA: surface the connection to COMPARE.
-                    The just-finished experiment is already in the library;
-                    this jumps tabs, refreshes, and pre-selects it. */}
-                {runState === "complete" && expId && onCompareThisRun && (
-                  <button
-                    onClick={() => onCompareThisRun(expId)}
-                    title="Jump to the Compare tab with this experiment already selected — pick one more to see them ranked side-by-side."
-                    style={{
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      gap: 6, width: "100%", padding: "8px 12px",
-                      marginBottom: completedCount > 0 ? 10 : 0,
-                      fontSize: 12, fontWeight: 700, fontFamily: mono,
-                      textTransform: "uppercase", letterSpacing: "0.08em",
-                      background: `${COLORS.purple}20`, color: COLORS.purple,
-                      border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
-                      cursor: "pointer", outline: "none",
-                    }}
-                  >
-                    Compare this run →
-                  </button>
-                )}
-
-                {/* Session totals — across the current browser session */}
-                {(completedCount > 0 || reviewedCount > 0) && (
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                                paddingTop: 10, borderTop: `1px solid ${COLORS.panelBorder}` }}
-                       title="Totals since you opened the dashboard. 'Reviewed' = the AI reviewer finished scoring the run against the Rigor Gates.">
-                    <span style={{ color: COLORS.text, fontWeight: 700 }}>{completedCount}</span>
-                    {" "}completed
-                    {reviewedCount > 0 && (
-                      <>
-                        {" · "}
-                        <span style={{ color: COLORS.purple, fontWeight: 700 }}>{reviewedCount}</span>
-                        {" AI-reviewed"}
-                      </>
-                    )}
-                    {" "}this session
-                  </div>
-                )}
-              </div>
+              </>
             );
           })()}
-
-          {/* Rigor Gates — color-coded pills driven by the latest review's
-              gates_passed dict. Grey = no result yet, green = passed, red = failed.
-              Hover a pill for the plain-English explanation. */}
-          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16 }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 10 }}>
-              Rigor Gates
-            </div>
-            {(() => {
-              const gp = observerReview?.gates_passed;
-              const hasReview = gp && typeof gp === "object";
-              const summary = hasReview
-                ? (() => {
-                    const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
-                    const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
-                    return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
-                  })()
-                : "No review yet — hover a pill for what it checks.";
-              return (
-                <>
-                  <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim,
-                                marginBottom: 10 }}>
-                    {summary}
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    {RIGOR_GATES.map(g => {
-                      const state = !hasReview ? "neutral"
-                                  : gp[g.key] === true ? "pass"
-                                  : gp[g.key] === false ? "fail"
-                                  : "neutral";
-                      const bg = state === "pass" ? `${COLORS.accent}18`
-                               : state === "fail" ? `${COLORS.danger}18`
-                               : COLORS.bg;
-                      const border = state === "pass" ? COLORS.accent
-                                   : state === "fail" ? COLORS.danger
-                                   : COLORS.panelBorder;
-                      const fg = state === "pass" ? COLORS.accent
-                               : state === "fail" ? COLORS.danger
-                               : COLORS.textDim;
-                      const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
-                      return (
-                        <span
-                          key={g.key}
-                          title={`${g.label} (${g.key})\n\n${g.why}`}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 4,
-                                   padding: "4px 8px", borderRadius: 999,
-                                   background: bg, border: `1px solid ${border}`,
-                                   color: fg, fontFamily: mono, fontSize: 11,
-                                   fontWeight: 600, cursor: "help",
-                                   whiteSpace: "nowrap" }}
-                        >
-                          <span style={{ fontSize: 10 }}>{icon}</span>
-                          {g.label}
-                        </span>
-                      );
-                    })}
-                  </div>
-                </>
-              );
-            })()}
-          </div>
         </div>
-
-        {/* Phase 9: Dual-state Observer — backtest pair cards stream here
-            live during a run, using the same visual language as LIVE.
-            flex: 1 so the chart expands to fill the column down to the
-            bottom of the adjacent (left) control panel. */}
-        {(observerProgress || observerResult) ? (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-            <ObserverModal
-              progress={observerProgress}
-              result={observerResult}
-              review={observerReview}
-              equityHistory={observerEquity}
-              totalTicks={observerTotalTicks}
-              variant="dock"
-              onClose={onObserverClose}
-            />
-          </div>
-        ) : (
-          <div style={{ flex: 1, background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                        borderRadius: 8, padding: 16, minHeight: 180,
-                        display: "flex", flexDirection: "column" }}>
-            <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                          marginBottom: 12 }}>
-              Observer
-            </div>
-            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim, lineHeight: 1.5 }}>
-              Submit a backtest to stream per-tick pair state here in real time —
-              the same pair cards, regime badges, and equity curves as the LIVE view.
-            </div>
-          </div>
-        )}
       </div>
+
+      {/* Observer Chart / Modal */}
+      {(observerProgress || observerResult) ? (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <ObserverModal
+            progress={observerProgress}
+            result={observerResult}
+            review={observerReview}
+            equityHistory={observerEquity}
+            totalTicks={observerTotalTicks}
+            variant="dock"
+            onClose={onObserverClose}
+            onApplyOptimizations={onApplyOptimizations}
+          />
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${COLORS.panelBorder}`, borderRadius: 8, background: `${COLORS.panel}40`, color: COLORS.textMuted, fontFamily: mono, fontSize: 12 }}>
+          Submit a backtest to observe live metrics.
+        </div>
+      )}
     </div>
   );
 }
@@ -1580,7 +1504,7 @@ function GatesSummary({ review }) {
     .map(k => ({ key: k, label: k, why: "(unrecognised gate — shown for completeness)" }));
   const all = [...RIGOR_GATES, ...extras];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4,
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 5,
                   fontFamily: mono, fontSize: 10 }}>
       {all.map(g => {
         const passed = gp[g.key];
@@ -1808,7 +1732,7 @@ const VERDICT_COLORS = {
 function ExperimentLibrary({ experiments, selectedIds, onToggleSelect, onRefresh, onClearSelection,
                              onView, loading,
                              onCompare, canCompare, compareInFlight, onGoToBacktest,
-                             totalInStore, compact = false }) {
+                             totalInStore }) {
   const count = experiments?.length || 0;
   const maxSelect = 8;
   const selCount = selectedIds.length;
@@ -2271,6 +2195,34 @@ function CompareResults({ report, experimentsById, onDismiss }) {
   );
 }
 
+function CompareStep({ n, title, body, active, done }) {
+  const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
+                  padding: "8px 0",
+                  borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
+      <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
+                    background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
+                    border: `1px solid ${tone}`,
+                    color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
+                    display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {done ? "✓" : n}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
+                      color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
+                      marginBottom: 2 }}>
+          {title}
+        </div>
+        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
+                      lineHeight: 1.5 }}>
+          {body}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
                        onView, onCompare, compareReport, loading,
                        compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
@@ -2287,33 +2239,6 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
                     : canCompare ? 3
                     : 0;
 
-  const Step = ({ n, title, body, active, done }) => {
-    const tone = done ? COLORS.accent : active ? COLORS.purple : COLORS.textMuted;
-    return (
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start",
-                    padding: "8px 0",
-                    borderTop: n === 1 ? "none" : `1px solid ${COLORS.panelBorder}60` }}>
-        <div style={{ flex: "0 0 28px", height: 28, borderRadius: "50%",
-                      background: done ? `${COLORS.accent}20` : active ? `${COLORS.purple}25` : "transparent",
-                      border: `1px solid ${tone}`,
-                      color: tone, fontFamily: mono, fontSize: 12, fontWeight: 700,
-                      display: "flex", alignItems: "center", justifyContent: "center" }}>
-          {done ? "✓" : n}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: heading, fontSize: 13, fontWeight: 700,
-                        color: active ? COLORS.text : done ? COLORS.textDim : COLORS.textMuted,
-                        marginBottom: 2 }}>
-            {title}
-          </div>
-          <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                        lineHeight: 1.5 }}>
-            {body}
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   return (
     // Bound the whole CompareView to the viewport height (minus the top tab
@@ -2342,7 +2267,7 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
           signal vs. noise via paired-bootstrap p-values.
         </div>
 
-        <Step
+        <CompareStep
           n={1}
           active={currentStep === 1}
           done={currentStep > 1}
@@ -2363,14 +2288,14 @@ function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelectio
             )
           }
         />
-        <Step
+        <CompareStep
           n={2}
           active={currentStep === 2}
           done={currentStep > 2}
           title="Filter and find the experiments you want"
           body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
         />
-        <Step
+        <CompareStep
           n={3}
           active={currentStep === 3}
           done={compareReport?.success}
@@ -2626,7 +2551,7 @@ function DocumentLibraryPanel({ documentCount, sendMessage }) {
   );
 }
 
-function PendingProposalCard({ p, sendMessage }) {
+function PendingProposalCard({ p, sendMessage, onBacktest }) {
   const [notes, setNotes] = useState("");
   const meta = p._meta || {};
   const failed = meta.failed === true;
@@ -2695,6 +2620,20 @@ function PendingProposalCard({ p, sendMessage }) {
               approve
             </button>
           </div>
+          {onBacktest && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={() => onBacktest(p)}
+                style={{ width: "100%", padding: "6px 14px",
+                         background: "transparent",
+                         color: COLORS.purple,
+                         border: `1px solid ${COLORS.purple}60`, borderRadius: 4,
+                         cursor: "pointer", fontFamily: mono, fontSize: 11,
+                         fontWeight: 700, letterSpacing: "0.08em",
+                         textTransform: "uppercase" }}>
+                Backtest Proposal
+              </button>
+            </div>
+          )}
         </>
       )}
       {failed && (
@@ -2711,7 +2650,7 @@ function PendingProposalCard({ p, sendMessage }) {
   );
 }
 
-function PendingProposalsPanel({ proposals, sendMessage }) {
+function PendingProposalsPanel({ proposals, sendMessage, onBacktest }) {
   useEffect(() => {
     // Refresh on mount — agent pushes updates via thesis_state broadcasts,
     // but the explicit list request ensures we have a snapshot even if no
@@ -2734,13 +2673,13 @@ function PendingProposalsPanel({ proposals, sendMessage }) {
         </div>
       )}
       {items.map((p) => (
-        <PendingProposalCard key={p.proposal_id} p={p} sendMessage={sendMessage} />
+        <PendingProposalCard key={p.proposal_id} p={p} sendMessage={sendMessage} onBacktest={onBacktest} />
       ))}
     </ThesisCard>
   );
 }
 
-function LaddersPanel({ ladders, max, sendMessage }) {
+function LaddersPanel({ ladders, sendMessage }) {
   const [pair, setPair] = useState("BTC/USDC");
   const [side, setSide] = useState("BUY");
   const [total, setTotal] = useState("");
@@ -3040,7 +2979,7 @@ function IntentPromptsPanel({ intents, max, sendMessage }) {
   );
 }
 
-function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
+function ThesisPanel({ thesisState, sendMessage, pendingProposals, onBacktest }) {
   // Before the first thesis_state response, show a loading shell.
   if (thesisState == null) {
     return (
@@ -3283,6 +3222,7 @@ function ThesisPanel({ thesisState, sendMessage, pendingProposals }) {
         <PendingProposalsPanel
           proposals={pendingProposals}
           sendMessage={sendMessage}
+          onBacktest={onBacktest}
         />
         <IntentPromptsPanel
           intents={thesisState.active_intents || []}
@@ -3338,15 +3278,88 @@ function ConnectionStatus({ connected, tick }) {
   );
 }
 
+// ─── Loading Screen ───
+
+function LoadingScreen({ connected }) {
+  const [progress, setProgress] = useState(0);
+  const [phraseIndex, setPhraseIndex] = useState(0);
+
+  const phrases = [
+    "Waking the Hydra...",
+    "Confabulating with the blockchain...",
+    "Bribing market makers...",
+    "Calculating lambo trajectories...",
+    "Reticulating splines...",
+    "Consulting the astrology charts...",
+    "Frontrunning retail...",
+    "Pumping the bags...",
+    "Reverting to mean..."
+  ];
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setProgress(p => {
+        const remaining = 99 - p;
+        const inc = Math.max(0.05, remaining * 0.015); // Slower ease out
+        const next = p + inc;
+        return next > 99 ? 99 : next;
+      });
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPhraseIndex(i => (i + 1) % phrases.length);
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [phrases.length]);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 32 }}>
+      <div style={{ position: "relative", width: 140, height: 140, marginBottom: 12 }}>
+        <img src="/favicon.png" alt="Hydra" style={{ width: "100%", height: "100%", filter: "drop-shadow(0 0 20px rgba(16, 185, 129, 0.4))", position: "relative", zIndex: 2 }} />
+        {/* Pulsing ring */}
+        <div style={{ position: "absolute", top: -15, left: -15, right: -15, bottom: -15, borderRadius: "50%", border: `2px solid ${COLORS.accent}`, opacity: 0.5, animation: "hc-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite", zIndex: 1 }} />
+        <style>{`@keyframes hc-ping { 75%, 100% { transform: scale(1.4); opacity: 0; } }`}</style>
+      </div>
+      
+      <div style={{ 
+        fontSize: 56, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+        background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+        WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+        marginTop: -16
+      }}>HYDRA</div>
+
+      <div style={{ width: 320, display: "flex", flexDirection: "column", gap: 14, alignItems: "center" }}>
+        {/* Progress Bar */}
+        <div style={{ width: "100%", height: 6, background: COLORS.panelBorder, borderRadius: 3, overflow: "hidden", position: "relative" }}>
+          <div style={{ width: `${progress}%`, height: "100%", background: COLORS.accent, transition: "width 0.1s linear", boxShadow: `0 0 10px ${COLORS.accent}80` }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", width: "100%", fontFamily: mono, fontSize: 13 }}>
+          <span style={{ color: COLORS.textDim }}>{phrases[phraseIndex]}</span>
+          <span style={{ color: COLORS.accent, fontWeight: 700 }}>{Math.floor(progress)}%</span>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, marginTop: 8 }}>
+        {connected ? "Connection established. Awaiting first tick..." : `Waiting for agent connection on ${DEFAULT_WS_URL}...`}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ───
 
-export default function App() {
+export function HydraDashboard({ jwtToken, onLogout }) {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
   const [orderJournal, setOrderJournal] = useState([]);
+  const [renderLoading, setRenderLoading] = useState(true);
+  const [loadingOpacity, setLoadingOpacity] = useState(1);
   // Phase 8: tab switcher + backtest message stash
-  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | BACKTEST | COMPARE | THESIS
+  const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | RESEARCH | THESIS | SETTINGS
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -3368,6 +3381,7 @@ export default function App() {
   const [libExperiments, setLibExperiments] = useState([]);    // full list from WS
   const [libLoading, setLibLoading] = useState(false);
   const [compareSelected, setCompareSelected] = useState([]);  // ids chosen for compare
+  const [stagedProposal, setStagedProposal] = useState(null);
   const [compareReport, setCompareReport] = useState(null);    // last compare ack
   const [viewingExpId, setViewingExpId] = useState(null);      // single-experiment detail view (stretch)
   // ─── Companion state (Phase 1+) ───
@@ -3439,6 +3453,10 @@ export default function App() {
   const pendingTimeoutsRef = useRef({});  // { [msgId]: timeoutHandle }
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // Exponential backoff counter for WS reconnect: doubles each failed
+  // attempt up to a cap. Reset to 0 on successful onopen so a transient
+  // blip doesn't push subsequent disconnects into slow retry.
+  const reconnectAttemptsRef = useRef(0);
   // Per-session WS auth token. Fetched lazily on first send (and on
   // auth_required retry); cached across reconnects unless agent
   // restarts rotate it.
@@ -3470,7 +3488,7 @@ export default function App() {
   // in v2.15.0 until this was hoisted).
   const refreshWsToken = useCallback(async () => {
     try {
-      const r = await fetch(WS_TOKEN_URL, { cache: "no-store" });
+      const r = await fetch(`${WS_TOKEN_URL}?t=${Date.now()}`, { cache: "no-store" });
       if (!r.ok) throw new Error(`status ${r.status}`);
       const j = await r.json();
       wsTokenRef.current = j.token || "";
@@ -3481,9 +3499,13 @@ export default function App() {
     }
   }, []);
 
+  const [wsUrl, setWsUrl] = useState(() => sanitizeWsUrl(localStorage.getItem("hydra_ws_url")));
+
+  const [researchTab, setResearchTab] = useState("LATEST_RUN");
+
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(sanitizeWsUrl(wsUrl));
     wsRef.current = ws;
     ws.onopen = async () => {
       // v2.16.2: refresh the auth token FIRST, then flip `connected=true`.
@@ -3492,7 +3514,10 @@ export default function App() {
       // companion.connect kickoff — which sent messages with a stale or
       // empty token and got auth_required, hiding the orb permanently.
       await refreshWsToken();
-      if (mountedRef.current) setConnected(true);
+      if (mountedRef.current) {
+        reconnectAttemptsRef.current = 0;
+        setConnected(true);
+      }
     };
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
@@ -3508,7 +3533,7 @@ export default function App() {
         if (msg && typeof msg.type === "string") {
           switch (msg.type) {
             case "backtest_progress":
-              setBtProgress((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              setBtProgress((prev) => lruCapDict(prev, msg.experiment_id, msg, MAX_BACKTEST_DICT_ENTRIES));
               // Accumulate per-pair equity for the observer chart. Cap total
               // stored experiments at MAX_EQUITY_HISTORY_EXPERIMENTS (LRU-ish)
               // so long sessions don't leak memory across many runs.
@@ -3535,7 +3560,7 @@ export default function App() {
               setObserverClosed(false);
               return;
             case "backtest_result":
-              setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              setBtResults((prev) => lruCapDict(prev, msg.experiment_id, msg, MAX_BACKTEST_DICT_ENTRIES));
               // Auto-refresh the library so the freshly-completed run is
               // present when the user next opens the COMPARE tab — without
               // this, the library only refreshes on tab-switch or manual
@@ -3550,7 +3575,7 @@ export default function App() {
               }
               return;
             case "backtest_review":
-              setBtReviews((prev) => ({ ...prev, [msg.experiment_id]: msg.review }));
+              setBtReviews((prev) => lruCapDict(prev, msg.experiment_id, msg.review, MAX_BACKTEST_DICT_ENTRIES));
               return;
             case "backtest_start_ack":
               setBtLastAck(msg);
@@ -3768,6 +3793,13 @@ export default function App() {
               setCompareInFlight(false);
               setViewInFlight(null);
               return;
+            case "start_agent_ack":
+              if (msg.success && Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536) {
+                const newUrl = sanitizeWsUrl(`ws://localhost:${msg.port}`);
+                localStorage.setItem("hydra_ws_url", newUrl);
+                setWsUrl(newUrl);
+              }
+              return;
             default:
               // Unknown typed message → drop silently. Do NOT fall through
               // to applyLiveState: a malformed backtest-side message with
@@ -3790,10 +3822,26 @@ export default function App() {
     ws.onclose = () => {
       if (!mountedRef.current) return;
       setConnected(false);
-      reconnectRef.current = setTimeout(() => connectRef.current?.(), 3000);
+      // Exponential backoff: 3s, 6s, 12s, 24s, capped at 60s. Jittered
+      // ±15% to avoid thundering herd if many dashboards reconnect in
+      // lockstep after a backend restart.
+      const attempt = reconnectAttemptsRef.current;
+      const base = Math.min(3000 * Math.pow(2, attempt), 60000);
+      const jitter = base * (0.85 + Math.random() * 0.30);
+      reconnectAttemptsRef.current = attempt + 1;
+      reconnectRef.current = setTimeout(() => connectRef.current?.(), jitter);
     };
-    ws.onerror = () => { ws.close(); };
-  }, [applyLiveState, refreshWsToken]);
+    ws.onerror = () => {
+      if (wsUrl !== DEFAULT_WS_URL) {
+        console.warn(`[HYDRA] Connection failed on ${wsUrl}. Reverting to default ${DEFAULT_WS_URL}`);
+        localStorage.removeItem("hydra_ws_url");
+        // Update state to trigger re-render and re-connect via useEffect
+        setWsUrl(DEFAULT_WS_URL);
+      }
+      ws.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyLiveState, refreshWsToken, wsUrl]);
 
   // Keep `connectRef` pointing at the freshest connect closure
   useEffect(() => { connectRef.current = connect; }, [connect]);
@@ -3949,14 +3997,14 @@ export default function App() {
   const companionSwitch = useCallback((cid) => {
     setActiveCompanion(cid);
     getUnreadSetter(cid)(false);
-    try { localStorage.setItem("hydra.companion.active", cid); } catch {}
+    try { localStorage.setItem("hydra.companion.active", cid); } catch { /* ignore */ }
     sendMessage({ type: "companion.switch", to_id: cid });
   }, [sendMessage, getUnreadSetter]);
 
   const companionToggle = useCallback(() => {
     setCompanionDrawerOpen((prev) => {
       const next = !prev;
-      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch {}
+      try { localStorage.setItem("hydra.companion.drawer.open", next ? "1" : "0"); } catch { /* ignore */ }
       if (next) getUnreadSetter(activeCompanion)(false);
       return next;
     });
@@ -4057,6 +4105,18 @@ export default function App() {
 
   const pairs = state?.pairs || {};
   const pairNames = Object.keys(pairs);
+  const isLoaded = state && pairNames.length > 0;
+
+  useEffect(() => {
+    if (isLoaded) {
+      setLoadingOpacity(0);
+      const timer = setTimeout(() => setRenderLoading(false), 600);
+      return () => clearTimeout(timer);
+    } else {
+      setRenderLoading(true);
+      setLoadingOpacity(1);
+    }
+  }, [isLoaded]);
   const balance = state?.balance || {};
   const balanceUsd = state?.balance_usd || null;
   const aiBrain = state?.ai_brain || null;
@@ -4097,18 +4157,22 @@ export default function App() {
   const totalFills = jStats.total_fills || 0;
   const fillsByPair = jStats.fills_by_pair || {};
   const fillWinRate = jStats.fill_win_rate || 0;
-  // Win rate: prefer engine round-trip rate when available, fall back to
-  // journal fill-derived rate so the stat updates as soon as sells execute.
-  const overallWinRate = totalTrades > 0 ? engineWinRate : fillWinRate;
+  // Win rate: use journal fill-derived rate when available so it reflects partial closes,
+  // falling back to engine round-trip rate.
+  const overallWinRate = totalFills > 0 ? fillWinRate : engineWinRate;
 
   return (
     <div style={{ background: COLORS.bg, minHeight: "100vh", color: COLORS.text, padding: 0 }}>
       {/* Header */}
       <div style={{ borderBottom: `1px solid ${COLORS.panelBorder}`, padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", background: `${COLORS.panel}cc`, backdropFilter: "blur(12px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img src="/favicon.svg" alt="Hydra" style={{ width: 38, height: 38, filter: "drop-shadow(0 0 6px rgba(126, 20, 255, 0.4))" }} />
-          <div style={{ fontSize: 26, fontWeight: 800, fontFamily: heading, letterSpacing: "-0.04em" }}>
-            <span style={{ color: COLORS.accent }}>H</span><span style={{ color: COLORS.text }}>YDRA</span>
+          <img src="/favicon.png" alt="Hydra" style={{ width: 62, height: 62, filter: "drop-shadow(0 0 6px rgba(126, 20, 255, 0.4))" }} />
+          <div style={{ 
+            fontSize: 28, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>
+            HYDRA
           </div>
           <div style={{ fontSize: 10, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.3, borderLeft: `1px solid ${COLORS.panelBorder}`, paddingLeft: 10, maxWidth: 220 }}>
             Hyper-adaptive Dynamic<br />Regime-switching Universal Agent
@@ -4175,82 +4239,117 @@ export default function App() {
 
         return (
           <>
-            {activeTab === "BACKTEST" && (
+            {activeTab === "SETTINGS" && (
               <div style={{ padding: "16px 24px" }}>
-                <BacktestControlPanel
-                  onSubmit={sendMessage}
-                  connected={connected}
-                  disabled={false}
-                  ackMsg={btLastAck}
-                  lastResultId={Object.keys(btResults).slice(-1)[0] || null}
-                  completedCount={Object.keys(btResults).length}
-                  reviewedCount={Object.keys(btReviews).length}
-                  observerProgress={observerClosed ? null : obsProgress}
-                  observerResult={observerClosed ? null : obsResult}
-                  observerReview={observerClosed ? null : obsReview}
-                  observerEquity={obsEquity}
-                  observerTotalTicks={totalTicks}
-                  onObserverClose={() => setObserverClosed(true)}
-                  onCompareThisRun={(expId) => {
-                    // Jump to COMPARE, refresh the library so the fresh run
-                    // is present, and pre-select it so the user only needs
-                    // to pick one more to comparison against.
-                    setCompareSelected((prev) =>
-                      prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
-                    );
-                    setActiveTab("COMPARE");
-                    fetchLibrary();
-                  }}
-                />
+                <SettingsSurface wsSend={sendMessage} />
               </div>
             )}
+            {activeTab === "RESEARCH" && (
+              <>
+              <FeatureFlagBanner
+                flag="HYDRA_BACKTEST_DISABLED"
+                note="Backtest worker pool and compare library are prototype-stage."
+              />
+              <div style={{ padding: "16px 24px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
+                {/* Left Column: Backtest Control Panel */}
+                <div style={{ flex: "0 0 500px" }}>
+                  <BacktestControlPanel
+                    onSubmit={sendMessage}
+                    connected={connected}
+                    disabled={false}
+                    stagedProposal={stagedProposal}
+                  />
+                </div>
+                
+                {/* Right Column: Backtest Results or Compare Library */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                  <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                    <button onClick={() => setResearchTab("LATEST_RUN")}
+                            style={{ padding: "6px 16px", background: researchTab === "LATEST_RUN" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LATEST_RUN" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LATEST_RUN" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
+                      Latest Run
+                    </button>
+                    <button onClick={() => setResearchTab("LIBRARY")}
+                            style={{ padding: "6px 16px", background: researchTab === "LIBRARY" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LIBRARY" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LIBRARY" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
+                      Compare Library
+                    </button>
+                  </div>
+
+                  {researchTab === "LATEST_RUN" ? (
+                    <BacktestResults
+                      ackMsg={btLastAck}
+                      observerProgress={observerClosed ? null : obsProgress}
+                      observerResult={observerClosed ? null : obsResult}
+                      observerReview={observerClosed ? null : obsReview}
+                      observerEquity={obsEquity}
+                      observerTotalTicks={totalTicks}
+                      completedCount={Object.keys(btResults).length}
+                      onObserverClose={() => setObserverClosed(true)}
+                      onCompareThisRun={(expId) => {
+                        setCompareSelected((prev) =>
+                          prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
+                        );
+                        setResearchTab("LIBRARY");
+                        fetchLibrary();
+                      }}
+                    />
+                  ) : (
+                    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                      {viewingExpId && (
+                        <div style={{ marginBottom: 12, padding: "10px 16px",
+                                      background: `${COLORS.blue}10`,
+                                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
+                                      fontFamily: mono, fontSize: 12, color: COLORS.blue,
+                                      display: "flex", justifyContent: "space-between",
+                                      alignItems: "center" }}>
+                          <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
+                          <button onClick={() => setViewingExpId(null)}
+                                  style={{ background: "transparent", border: "none",
+                                           color: COLORS.blue, cursor: "pointer",
+                                           fontFamily: mono, fontSize: 12 }}>
+                            dismiss
+                          </button>
+                        </div>
+                      )}
+                      <CompareView
+                        experiments={filteredExperiments}
+                        selectedIds={compareSelected}
+                        onToggleSelect={toggleSelectExperiment}
+                        onClearSelection={clearSelection}
+                        onRefresh={fetchLibrary}
+                        onView={viewExperiment}
+                        onCompare={runCompare}
+                        compareReport={compareReport}
+                        loading={libLoading}
+                        compareInFlight={compareInFlight}
+                        onGoToBacktest={() => { /* No-op */ }}
+                        totalInStore={libExperiments.length}
+                        onDismissReport={() => {
+                          setCompareReport(null);
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+              </>
+            )}
             {activeTab === "THESIS" && (
+              <>
+              <FeatureFlagBanner
+                flag="HYDRA_THESIS_DISABLED"
+                note="Posture, ladders, and Grok document processor are prototype-stage."
+              />
               <ThesisPanel
                 thesisState={thesisState}
                 sendMessage={sendMessage}
                 pendingProposals={pendingProposals}
+                onBacktest={(p) => {
+                  setStagedProposal(p);
+                  setActiveTab("RESEARCH");
+                  setResearchTab("LATEST_RUN");
+                }}
               />
-            )}
-            {activeTab === "COMPARE" && (
-              <div style={{ padding: "16px 24px" }}>
-                {viewingExpId && (
-                  <div style={{ marginBottom: 12, padding: "10px 16px",
-                                background: `${COLORS.blue}10`,
-                                border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                fontFamily: mono, fontSize: 12, color: COLORS.blue,
-                                display: "flex", justifyContent: "space-between",
-                                alignItems: "center" }}>
-                    <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
-                    <button onClick={() => setViewingExpId(null)}
-                            style={{ background: "transparent", border: "none",
-                                     color: COLORS.blue, cursor: "pointer",
-                                     fontFamily: mono, fontSize: 12 }}>
-                      dismiss
-                    </button>
-                  </div>
-                )}
-                <CompareView
-                  experiments={filteredExperiments}
-                  selectedIds={compareSelected}
-                  onToggleSelect={toggleSelectExperiment}
-                  onClearSelection={clearSelection}
-                  onRefresh={fetchLibrary}
-                  onView={viewExperiment}
-                  onCompare={runCompare}
-                  compareReport={compareReport}
-                  loading={libLoading}
-                  compareInFlight={compareInFlight}
-                  onGoToBacktest={() => setActiveTab("BACKTEST")}
-                  totalInStore={libExperiments.length}
-                  onDismissReport={() => {
-                    // "Change Selection" path: clear the last result so the
-                    // library reappears and the user can pick a different
-                    // set. Selection itself is kept — likely the user wants
-                    // to swap one row, not start from scratch.
-                    setCompareReport(null);
-                  }}
-                />
-              </div>
+              </>
             )}
             {/* Floating observer on LIVE tab — dual-state view. Appears
                 whenever a backtest is mid-run or just completed; user can
@@ -4271,19 +4370,15 @@ export default function App() {
         );
       })()}
 
-      {activeTab === "LIVE" && ((!connected && !state) || (state && pairNames.length === 0)) ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "80vh", flexDirection: "column", gap: 16 }}>
-          <img src="/favicon.svg" alt="Hydra" style={{ width: 80, height: 80, filter: "drop-shadow(0 0 12px rgba(126, 20, 255, 0.5))", marginBottom: 8 }} />
-          <div style={{ fontSize: 48, fontWeight: 800, fontFamily: heading, color: COLORS.textMuted }}>HYDRA</div>
-          <div style={{ fontSize: 14, color: COLORS.textDim, fontFamily: mono }}>
-            {connected ? "Waiting for first tick data..." : `Waiting for agent connection on ${WS_URL}...`}
-          </div>
-          <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono }}>python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC</div>
+      {activeTab === "LIVE" && renderLoading ? (
+        <div style={{ opacity: loadingOpacity, transition: "opacity 0.6s ease-in-out", position: isLoaded ? "absolute" : "relative", zIndex: 50, top: 0, left: 0, right: 0, bottom: 0, background: isLoaded ? COLORS.bg : "transparent" }}>
+          <LoadingScreen connected={connected} />
         </div>
       ) : null}
 
-      {activeTab === "LIVE" && state && pairNames.length > 0 && (
-        <div style={{ padding: "16px 24px" }}>
+      {activeTab === "LIVE" && isLoaded && (
+        <div style={{ padding: "16px 24px", animation: "hc-dashboard-fade-in 0.8s ease-out forwards" }}>
+          <style>{`@keyframes hc-dashboard-fade-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
             {/* Stats Row — spans both columns for edge-to-edge alignment */}
@@ -4828,7 +4923,7 @@ export default function App() {
                 const pf = fillsByPair[pair] || { buys: 0, sells: 0, sell_wins: 0, sell_losses: 0 };
                 const pairSellTotal = (pf.sell_wins || 0) + (pf.sell_losses || 0);
                 const pairFillWR = pairSellTotal > 0 ? ((pf.sell_wins || 0) / pairSellTotal * 100) : 0;
-                const winRate = (perf.total_trades || 0) > 0 ? engineWR : pairFillWR;
+                const winRate = pairSellTotal > 0 ? pairFillWR : engineWR;
                 const pairFills = pf.buys + pf.sells;
                 const pairPnl = (jStats.pnl_by_pair || {})[pair] || {};
                 const pairNetUsd = pairPnl.net_usd || 0;
@@ -4937,7 +5032,12 @@ export default function App() {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {WS_URL}
+          HYDRA v2.17.0 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
+          {jwtToken && (
+            <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
+              [Logout]
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
           Not financial advice. Real money at risk.
@@ -4945,4 +5045,223 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// Auth Surface
+// ═══════════════════════════════════════════════════════════════
+
+function AuthSurface({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    try {
+      const ws = new WebSocket(DEFAULT_WS_URL);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: "login", username, password }));
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "login_ack") {
+          if (msg.success) {
+            onLogin(msg.token);
+          } else {
+            setError(msg.error || "Login failed");
+          }
+          ws.close();
+        }
+      };
+      ws.onerror = () => {
+        setError("WebSocket connection failed. Ensure backend is running.");
+      };
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: "100vh", fontFamily: mono, color: COLORS.text,
+      background: `radial-gradient(circle at 50% 50%, ${COLORS.panel}, ${COLORS.bg})`
+    }}>
+      <div style={{
+        padding: "40px 32px",
+        background: `${COLORS.panel}dd`,
+        backdropFilter: "blur(12px)",
+        border: `1px solid ${COLORS.panelBorder}`,
+        borderRadius: 12,
+        width: 380,
+        boxShadow: `0 8px 32px rgba(0,0,0,0.5), inset 0 0 20px ${COLORS.accent}11`,
+        textAlign: "center"
+      }}>
+        <div style={{ marginBottom: 32 }}>
+          <div style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 94, height: 94,
+            marginBottom: 16
+          }}>
+            <img src="/favicon.png" alt="Hydra" style={{ width: "100%", height: "100%", filter: "drop-shadow(0 0 16px rgba(16, 185, 129, 0.6))" }} />
+          </div>
+          <h1 style={{ 
+            margin: 0, fontSize: 32, fontWeight: 900, fontFamily: heading, letterSpacing: "-0.02em",
+            background: `linear-gradient(135deg, ${COLORS.accent}, #0d9488)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>HYDRA</h1>
+          <div style={{ fontSize: 12, color: COLORS.textMuted, letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 4 }}>
+            Multi-Tenant Protocol
+          </div>
+        </div>
+
+        <form onSubmit={handleLogin} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <input
+            type="text"
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`,
+              background: `${COLORS.bg}88`, color: COLORS.text, fontFamily: mono, fontSize: 14,
+              outline: "none", transition: "border-color 0.2s"
+            }}
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`,
+              background: `${COLORS.bg}88`, color: COLORS.text, fontFamily: mono, fontSize: 14,
+              outline: "none", transition: "border-color 0.2s"
+            }}
+          />
+          {error && <div style={{ color: COLORS.danger, fontSize: 12, marginTop: -4 }}>{error}</div>}
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              padding: "12px 16px", borderRadius: 8, border: "none",
+              background: COLORS.accent, color: COLORS.bg,
+              fontFamily: mono, fontSize: 14, fontWeight: 700,
+              cursor: loading ? "not-allowed" : "pointer",
+              opacity: loading ? 0.7 : 1, transition: "opacity 0.2s",
+              boxShadow: `0 0 16px ${COLORS.accent}44`,
+              marginTop: 8
+            }}
+          >
+            {loading ? "Authenticating..." : "Initialize Session"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function SettingsSurface({ wsSend }) {
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  const handleSave = () => {
+    setSaving(true);
+    setStatus(null);
+    const jwt = localStorage.getItem("hydra_jwt");
+    wsSend(JSON.stringify({ type: "save_keys", jwt, api_key: apiKey, api_secret: apiSecret }));
+    setTimeout(() => {
+      setSaving(false);
+      setStatus({ type: "success", msg: "API Keys Saved Securely" });
+      setApiKey(""); setApiSecret("");
+    }, 1000);
+  };
+
+  const handleStart = () => {
+    setStatus({ type: "info", msg: "Starting isolated engine instance..." });
+    const jwt = localStorage.getItem("hydra_jwt");
+    wsSend(JSON.stringify({ type: "start_agent", jwt }));
+  };
+
+  return (
+    <div style={{
+      padding: "24px", backgroundColor: COLORS.panel, borderRadius: "8px",
+      border: `1px solid ${COLORS.panelBorder}`, maxWidth: "600px", margin: "32px auto"
+    }}>
+      <h2 style={{ fontSize: "24px", fontWeight: "bold", color: COLORS.text, marginBottom: "24px" }}>Engine Settings</h2>
+      
+      <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+        <div style={{ backgroundColor: "#0f0f11", padding: "16px", borderRadius: "6px", border: `1px solid ${COLORS.panelBorder}` }}>
+          <h3 style={{ fontSize: "18px", color: COLORS.accent, fontWeight: "600", marginBottom: "8px" }}>1. Exchange Credentials</h3>
+          <p style={{ fontSize: "14px", color: COLORS.textDim, marginBottom: "16px" }}>Hydra uses symmetric encryption to store your keys. A unique background engine process will be spawned using your keys.</p>
+          
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: "500", color: COLORS.textDim, marginBottom: "4px" }}>Kraken API Key</label>
+              <input type="text" value={apiKey} onChange={e => setApiKey(e.target.value)} style={{ width: "100%", backgroundColor: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`, borderRadius: "4px", padding: "8px 12px", color: COLORS.text, outline: "none" }} placeholder="..." />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", fontWeight: "500", color: COLORS.textDim, marginBottom: "4px" }}>Kraken API Secret</label>
+              <input type="password" value={apiSecret} onChange={e => setApiSecret(e.target.value)} style={{ width: "100%", backgroundColor: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`, borderRadius: "4px", padding: "8px 12px", color: COLORS.text, outline: "none" }} placeholder="..." />
+            </div>
+            <button onClick={handleSave} disabled={saving || !apiKey || !apiSecret} style={{
+              width: "100%", padding: "8px 0", backgroundColor: `${COLORS.accent}33`, color: COLORS.accent,
+              borderRadius: "4px", fontWeight: "500", border: "none", cursor: (saving || !apiKey || !apiSecret) ? "not-allowed" : "pointer", opacity: (saving || !apiKey || !apiSecret) ? 0.5 : 1
+            }}>
+              {saving ? "Encrypting & Saving..." : "Save API Keys"}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: "#0f0f11", padding: "16px", borderRadius: "6px", border: `1px solid ${COLORS.panelBorder}` }}>
+          <h3 style={{ fontSize: "18px", color: COLORS.blue, fontWeight: "600", marginBottom: "8px" }}>2. Launch Engine</h3>
+          <p style={{ fontSize: "14px", color: COLORS.textDim, marginBottom: "16px" }}>Start your isolated background execution engine. The dashboard will automatically reconnect to your engine's live feed.</p>
+          <button onClick={handleStart} style={{
+              width: "100%", padding: "8px 0", backgroundColor: `${COLORS.blue}33`, color: COLORS.blue,
+              borderRadius: "4px", fontWeight: "500", border: "none", cursor: "pointer"
+            }}>Start Hydra Agent</button>
+        </div>
+
+        {status && (
+          <div style={{
+            padding: "12px", borderRadius: "4px", textAlign: "center", fontSize: "14px",
+            backgroundColor: status.type === 'success' ? `${COLORS.accent}1A` : `${COLORS.blue}1A`,
+            color: status.type === 'success' ? COLORS.accent : COLORS.blue,
+            border: `1px solid ${status.type === 'success' ? `${COLORS.accent}33` : `${COLORS.blue}33`}`
+          }}>
+            {status.msg}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [jwtToken, setJwtToken] = useState(() => localStorage.getItem("hydra_jwt") || "");
+
+  const handleLogin = (token) => {
+    setJwtToken(token);
+    localStorage.setItem("hydra_jwt", token);
+  };
+
+  const handleLogout = () => {
+    setJwtToken("");
+    localStorage.removeItem("hydra_jwt");
+  };
+
+  if (!jwtToken) {
+    return <AuthSurface onLogin={handleLogin} />;
+  }
+
+  return <HydraDashboard jwtToken={jwtToken} onLogout={handleLogout} />;
 }

@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  hydra-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./hydra_users.db:/app/hydra_users.db
+      - ./hydra_session_snapshot.json:/app/hydra_session_snapshot.json
+      - ./hydra_order_journal.json:/app/hydra_order_journal.json
+    environment:
+      - HYDRA_PRODUCTION=1
+      - HYDRA_JWT_SECRET=super_secret_production_key_change_me
+    restart: unless-stopped
+
+  hydra-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - hydra-backend
+    restart: unless-stopped

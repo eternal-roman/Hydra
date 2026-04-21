@@ -13,6 +13,7 @@ Usage:
 """
 
 import math
+import statistics
 import sys
 import time
 from enum import Enum
@@ -735,7 +736,11 @@ SIZING_COMPETITION = {
 
 
 class PositionSizer:
-    # Kraken minimum order sizes per base asset (ordermin)
+    # Kraken minimum order sizes per base asset (ordermin). Class-level on
+    # purpose: Kraken's ordermin/costmin are exchange-wide constants (same
+    # value for SOL regardless of which pair loaded it), and hydra_agent.py
+    # + tests access these as a shared registry. Multi-engine "isolation"
+    # does not apply to exchange constants.
     MIN_ORDER_SIZE = {
         "SOL": 0.02,
         "BTC": 0.00005,
@@ -1218,7 +1223,8 @@ class HydraEngine:
                  momentum_rsi_upper: float = 70.0,
                  mean_reversion_rsi_buy: float = 35.0,
                  mean_reversion_rsi_sell: float = 65.0,
-                 tradable: bool = True):
+                 tradable: bool = True,
+                 thesis_state_override: Optional[Dict[str, Any]] = None):
         self.asset = asset
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -1230,6 +1236,14 @@ class HydraEngine:
         # flips this flag per-tick based on real exchange holdings of the
         # quote currency — pairs whose quote we don't hold cannot transact.
         self.tradable = tradable
+        
+        # Build local thesis tracker if override provided
+        from hydra_thesis import ThesisTracker
+        if thesis_state_override is not None:
+            self.thesis = ThesisTracker(state=thesis_state_override, disabled=False)
+        else:
+            self.thesis = ThesisTracker(disabled=True)
+            
         self.position = Position(asset=asset)
         cfg = sizing or SIZING_CONSERVATIVE
         self.sizer = PositionSizer(**cfg)
@@ -1334,7 +1348,6 @@ class HydraEngine:
         if len(diffs) < 8:
             return None
 
-        import statistics
         recent = diffs[-1]
         history = diffs[:-1]
         try:

@@ -47,7 +47,8 @@ from tests.live_harness.stubs import (
     kraken_validate_success, kraken_validate_error,
 )
 
-from hydra_agent import HydraAgent, KrakenCLI
+from hydra_agent import HydraAgent
+from hydra_kraken_cli import KrakenCLI
 
 
 MOCK = frozenset({"mock"})

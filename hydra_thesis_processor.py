@@ -342,8 +342,8 @@ class ThesisProcessorWorker:
 
         try:
             self._broadcast("thesis_proposal_pending", {"data": proposal})
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     # ─── Cost accounting ──────────────────────────────────────────
 
@@ -372,8 +372,8 @@ class ThesisProcessorWorker:
                         "day_key": self.costs.day_key,
                         "enforce_budget": self.enable_budget,
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
 
     def _rollover_day_if_needed(self) -> None:
         today = _utc_day_key()
@@ -415,8 +415,8 @@ class ThesisProcessorWorker:
         }
         try:
             self._on_proposal(stub)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────
@@ -440,8 +440,8 @@ def _force_human_gate_on_big_shift(parsed: Dict[str, Any]) -> bool:
     try:
         if conf is not None and abs(float(conf) - 0.5) > HUMAN_GATE_SHIFT_THRESHOLD:
             return True
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
     return reported
 
 
@@ -462,8 +462,8 @@ def _parse_proposal_json(text: str) -> Optional[Dict[str, Any]]:
         obj = json.loads(t)
         if isinstance(obj, dict):
             return obj
-    except Exception:
-        pass
+    except Exception as e:
+        import logging; logging.warning(f"Ignored exception: {e}")
     # Find first balanced {...}
     start = t.find("{")
     if start < 0:

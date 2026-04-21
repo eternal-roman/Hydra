@@ -92,8 +92,8 @@ class LadderWatcher:
         while not self._stop.is_set():
             try:
                 self._tick()
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             if self._stop.wait(POLL_INTERVAL_S):
                 return
 
@@ -130,11 +130,11 @@ class LadderWatcher:
                             KrakenCLI.cancel_order(userref=int(userref))
                         elif txid:
                             KrakenCLI.cancel_order(txid=txid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging; logging.warning(f"Ignored exception: {e}")
                 cancelled_userrefs.append(userref)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         with self._lock:
             lad.cancelled = True
         try:
@@ -149,5 +149,5 @@ class LadderWatcher:
                     "cancelled_userrefs": cancelled_userrefs,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")

@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.17.0] — 2026-04-21
+
+### Added
+
+- **Live dashboard prototype** — full React/Vite dashboard rewrite landed on this release. New LIVE tab with real-time WebSocket connectivity, balance/equity history, regime badges, and companion orb integration; RESEARCH tab with backtest control panel, latest-run observer, and compare library; THESIS tab scaffolding (Phase A) with posture, posterior, knobs, hard rules, intent prompts, and active ladders.
+- **Multi-tenant agent management** — WS server now supports per-tenant Kraken API key injection, server-side agent start/stop over WS, and graceful connection shutdown.
+- **Execution stream delay + credential/error logging** on Kraken stream subprocess for better observability.
+- **Live-execution harness** — `tests/live_harness/` with 33+ scenarios across smoke/mock/validate/live modes plus a full unit-test suite for execution stream behaviour.
+- **Experimental feature-flag warning banners** — RESEARCH and THESIS tabs now render a top-of-surface banner noting they are prototype-stage and flagged by `HYDRA_BACKTEST_DISABLED` / `HYDRA_THESIS_DISABLED` respectively. UI-only addition; no behaviour change.
+- **Thesis state override** in backtester and engine to replay thesis-dependent decisions deterministically.
+
+### Changed
+
+- **Silent exception suppression replaced with logging** across core modules for improved observability.
+- **Dashboard win-rate source prioritised** — journal fill-derived win rate takes precedence over engine round-trip rate (closer to what a human reads off the trade tape).
+- **Companion scaffolding** — initial infrastructure for companion services.
+
+### Fixed
+
+- **2026-04-21 audit sweep** — WebSocket backoff tightening, bounded backtest dicts, doc + comment corrections.
+
+### Maintenance
+
+- gitignore updates (databases, patch artifacts, temporary dev files, ESLint output).
+- Legacy test files and audit reports removed.
+
+---
+
 ## [2.16.2] — 2026-04-20
 
 ### Fixed

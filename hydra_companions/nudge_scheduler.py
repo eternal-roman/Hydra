@@ -59,8 +59,8 @@ class NudgeScheduler:
         while not self._stop.is_set():
             try:
                 self._tick()
-            except Exception:
-                pass
+            except Exception as e:
+                import logging; logging.warning(f"Ignored exception: {e}")
             if self._stop.wait(POLL_INTERVAL_S):
                 return
 
@@ -118,8 +118,8 @@ class NudgeScheduler:
                 "cost_usd": round(result.cost_usd, 6),
                 "proactive": True,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _check_triggers(self) -> tuple[Optional[str], dict]:
         snap = getattr(self.agent.broadcaster, "latest_state", {}) or {}

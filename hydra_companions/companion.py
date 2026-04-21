@@ -183,8 +183,8 @@ class Companion:
                     self.transcript.append(json.loads(ln))
                 except json.JSONDecodeError:
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _journal(self, role: str, content: str) -> None:
         entry = {"ts": time.time(), "role": role, "content": content}
@@ -192,8 +192,8 @@ class Companion:
         try:
             with self._transcript_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         # Keep in-memory transcript bounded
         if len(self.transcript) > TRANSCRIPT_TAIL_TURNS * 3:
             self.transcript = self.transcript[-TRANSCRIPT_TAIL_TURNS * 2:]
@@ -208,8 +208,8 @@ class Companion:
         try:
             if self._transcript_path.exists():
                 self._transcript_path.unlink()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
         return count
 
     # ----- turn execution -----
@@ -383,8 +383,8 @@ class Companion:
                     "error": resp.error,
                     "serious_mode": self.serious_mode,
                 }) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     def _log_cost(self, resp: ProviderResponse) -> None:
         if resp.cost_usd <= 0:
@@ -400,8 +400,8 @@ class Companion:
                     "tokens_out": resp.tokens_out,
                     "model": f"{resp.provider}:{resp.model_id}",
                 }) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging; logging.warning(f"Ignored exception: {e}")
 
     # ----- UI-surface metadata -----
 
