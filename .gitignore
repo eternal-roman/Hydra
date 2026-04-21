@@ -34,6 +34,9 @@ Desktop.ini
 
 # Logs & runtime
 *.log
+*.db
+*.sqlite
+*.sqlite3
 hydra_order_journal.json
 hydra_order_journal.json.tmp
 hydra_order_journal.json.harness_stash
@@ -73,3 +76,10 @@ hydra_thesis_documents/
 hydra_thesis_processed/
 hydra_thesis_pending/
 hydra_thesis_evidence_archive/
+
+# Temporary / Junk / Scratch
+*.diff
+*.patch
+AUDIT_*.md
+test_ws.*
+fix_host.py
