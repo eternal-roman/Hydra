@@ -3300,7 +3300,7 @@ function LoadingScreen({ connected }) {
     const interval = setInterval(() => {
       setProgress(p => {
         const remaining = 99 - p;
-        const inc = Math.max(0.2, remaining * 0.05); // Ease out
+        const inc = Math.max(0.05, remaining * 0.015); // Slower ease out
         const next = p + inc;
         return next > 99 ? 99 : next;
       });
@@ -3356,6 +3356,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [state, setState] = useState(null);
   const [history, setHistory] = useState([]);
   const [orderJournal, setOrderJournal] = useState([]);
+  const [renderLoading, setRenderLoading] = useState(true);
+  const [loadingOpacity, setLoadingOpacity] = useState(1);
   // Phase 8: tab switcher + backtest message stash
   const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | RESEARCH | THESIS | SETTINGS
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
@@ -4103,6 +4105,18 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
   const pairs = state?.pairs || {};
   const pairNames = Object.keys(pairs);
+  const isLoaded = state && pairNames.length > 0;
+
+  useEffect(() => {
+    if (isLoaded) {
+      setLoadingOpacity(0);
+      const timer = setTimeout(() => setRenderLoading(false), 600);
+      return () => clearTimeout(timer);
+    } else {
+      setRenderLoading(true);
+      setLoadingOpacity(1);
+    }
+  }, [isLoaded]);
   const balance = state?.balance || {};
   const balanceUsd = state?.balance_usd || null;
   const aiBrain = state?.ai_brain || null;
@@ -4356,12 +4370,15 @@ export function HydraDashboard({ jwtToken, onLogout }) {
         );
       })()}
 
-      {activeTab === "LIVE" && (!state || pairNames.length === 0) ? (
-        <LoadingScreen connected={connected} />
+      {activeTab === "LIVE" && renderLoading ? (
+        <div style={{ opacity: loadingOpacity, transition: "opacity 0.6s ease-in-out", position: isLoaded ? "absolute" : "relative", zIndex: 50, top: 0, left: 0, right: 0, bottom: 0, background: isLoaded ? COLORS.bg : "transparent" }}>
+          <LoadingScreen connected={connected} />
+        </div>
       ) : null}
 
-      {activeTab === "LIVE" && state && pairNames.length > 0 && (
-        <div style={{ padding: "16px 24px" }}>
+      {activeTab === "LIVE" && isLoaded && (
+        <div style={{ padding: "16px 24px", animation: "hc-dashboard-fade-in 0.8s ease-out forwards" }}>
+          <style>{`@keyframes hc-dashboard-fade-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
             {/* Stats Row — spans both columns for edge-to-edge alignment */}
