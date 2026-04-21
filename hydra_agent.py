@@ -3296,7 +3296,8 @@ class HydraAgent:
                                 elapsed: float) -> dict:
         """Build the full state dict for the dashboard WebSocket."""
         # Balance: prefer WS stream when healthy (real-time, no API call).
-        # Fall back to REST polling every 5th tick.
+        # When the stream is unhealthy, hold the last cached balance — no REST
+        # fallback (Hydra policy: no REST for market/account polling).
         ws_bal = (
             self.balance_stream.latest_balances()
             if not self.paper and self.balance_stream.healthy

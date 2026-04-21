@@ -13,6 +13,7 @@ Usage:
 """
 
 import math
+import statistics
 import sys
 import time
 from enum import Enum
@@ -735,7 +736,11 @@ SIZING_COMPETITION = {
 
 
 class PositionSizer:
-    # Kraken minimum order sizes per base asset (ordermin)
+    # Kraken minimum order sizes per base asset (ordermin). Class-level on
+    # purpose: Kraken's ordermin/costmin are exchange-wide constants (same
+    # value for SOL regardless of which pair loaded it), and hydra_agent.py
+    # + tests access these as a shared registry. Multi-engine "isolation"
+    # does not apply to exchange constants.
     MIN_ORDER_SIZE = {
         "SOL": 0.02,
         "BTC": 0.00005,
@@ -1343,7 +1348,6 @@ class HydraEngine:
         if len(diffs) < 8:
             return None
 
-        import statistics
         recent = diffs[-1]
         history = diffs[:-1]
         try:

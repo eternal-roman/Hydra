@@ -1,15 +1,14 @@
 """Companion subsystem configuration + env-flag gating.
 
-All flags are opt-in (default OFF) so the subsystem has zero effect on
-v2.10.x behaviour until a user sets HYDRA_COMPANION_ENABLED=1.
+Chat / proposals / nudges are default ON (the orb is visible on launch
+and clicking it IS activation). LIVE_EXECUTION stays explicit-opt-in
+because it places real money at risk.
 
-Flag composition (each phase gates on the previous):
-    HYDRA_COMPANION_ENABLED=1            -> Phase 1 chat available
-    HYDRA_COMPANION_PROPOSALS_ENABLED=1  -> Phase 2+ (trade cards render)
-    HYDRA_COMPANION_LIVE_EXECUTION=1     -> Phase 3+ (real orders placed)
-    HYDRA_COMPANION_NUDGES=1             -> Phase 6+ (proactive messages)
-
+Flag composition:
     HYDRA_COMPANION_DISABLED=1           -> master kill switch (wins over all)
+    HYDRA_COMPANION_PROPOSALS_ENABLED=0  -> opt OUT of trade cards
+    HYDRA_COMPANION_NUDGES=0             -> opt OUT of proactive messages
+    HYDRA_COMPANION_LIVE_EXECUTION=1     -> opt IN to real-order placement
 """
 from __future__ import annotations
 import os

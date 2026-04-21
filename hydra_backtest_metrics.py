@@ -263,12 +263,14 @@ def _block_bootstrap_sample(
     block_len: int,
     rng: random.Random,
 ) -> List[float]:
-    """Non-overlapping, NON-CIRCULAR block resample preserving local
-    temporal structure.
+    """NON-CIRCULAR block resample preserving local temporal structure.
 
     For each block draw, sample a start index uniformly from the set of
     valid starts (0..n-block_len) so every block fits without wrapping.
     Emit block_len consecutive profits; repeat until length ≥ n; truncate.
+    Blocks within a single resample are drawn independently, so two draws
+    can share overlapping ranges — "non-circular" refers to wrap-around,
+    not cross-draw disjointness.
 
     Fix 4: previously used `(start + j) % n` circular indexing, which
     joined tail-of-sequence to head-of-sequence inside a block. For small

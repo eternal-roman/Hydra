@@ -236,6 +236,19 @@ function ConfidenceMeter({ confidence, signal }) {
 // dashboard keeps in memory. A long-running session otherwise leaks ~60
 // floats/tick * pairs * experiments. LRU-ish: newest wins, oldest drop.
 const MAX_EQUITY_HISTORY_EXPERIMENTS = 10;
+// Cap for per-experiment dicts (progress / results / reviews) so long
+// sessions with many backtests don't leak unbounded state.
+const MAX_BACKTEST_DICT_ENTRIES = 50;
+
+function lruCapDict(dict, key, value, cap) {
+  const merged = { ...dict, [key]: value };
+  const keys = Object.keys(merged);
+  if (keys.length <= cap) return merged;
+  const keep = keys.slice(-cap);
+  const trimmed = {};
+  for (const k of keep) trimmed[k] = merged[k];
+  return trimmed;
+}
 
 // Known top-level keys on the legacy raw-state dict (compat_mode=true
 // broadcaster shape, from hydra_agent._build_dashboard_state). Used to
@@ -664,6 +677,12 @@ function CompanionDrawer({
   // Submit lock via ref so double-presses within the same React tick
   // can't slip past the guard (state updates are async; refs are sync).
   const submitLockRef = useRef(false);
+  const submitTimeoutRef = useRef(null);
+  useEffect(() => {
+    return () => {
+      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+    };
+  }, []);
   const submit = () => {
     if (submitLockRef.current) return;
     const text = draft.trim();
@@ -672,7 +691,8 @@ function CompanionDrawer({
     setSending(true);
     onSend(text);
     setDraft("");
-    setTimeout(() => {
+    submitTimeoutRef.current = setTimeout(() => {
+      submitTimeoutRef.current = null;
       submitLockRef.current = false;
       setSending(false);
     }, 350);
@@ -3316,6 +3336,10 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const pendingTimeoutsRef = useRef({});  // { [msgId]: timeoutHandle }
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // Exponential backoff counter for WS reconnect: doubles each failed
+  // attempt up to a cap. Reset to 0 on successful onopen so a transient
+  // blip doesn't push subsequent disconnects into slow retry.
+  const reconnectAttemptsRef = useRef(0);
   // Per-session WS auth token. Fetched lazily on first send (and on
   // auth_required retry); cached across reconnects unless agent
   // restarts rotate it.
@@ -3373,7 +3397,10 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       // companion.connect kickoff — which sent messages with a stale or
       // empty token and got auth_required, hiding the orb permanently.
       await refreshWsToken();
-      if (mountedRef.current) setConnected(true);
+      if (mountedRef.current) {
+        reconnectAttemptsRef.current = 0;
+        setConnected(true);
+      }
     };
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
@@ -3389,7 +3416,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
         if (msg && typeof msg.type === "string") {
           switch (msg.type) {
             case "backtest_progress":
-              setBtProgress((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              setBtProgress((prev) => lruCapDict(prev, msg.experiment_id, msg, MAX_BACKTEST_DICT_ENTRIES));
               // Accumulate per-pair equity for the observer chart. Cap total
               // stored experiments at MAX_EQUITY_HISTORY_EXPERIMENTS (LRU-ish)
               // so long sessions don't leak memory across many runs.
@@ -3416,7 +3443,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               setObserverClosed(false);
               return;
             case "backtest_result":
-              setBtResults((prev) => ({ ...prev, [msg.experiment_id]: msg }));
+              setBtResults((prev) => lruCapDict(prev, msg.experiment_id, msg, MAX_BACKTEST_DICT_ENTRIES));
               // Auto-refresh the library so the freshly-completed run is
               // present when the user next opens the COMPARE tab — without
               // this, the library only refreshes on tab-switch or manual
@@ -3431,7 +3458,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               }
               return;
             case "backtest_review":
-              setBtReviews((prev) => ({ ...prev, [msg.experiment_id]: msg.review }));
+              setBtReviews((prev) => lruCapDict(prev, msg.experiment_id, msg.review, MAX_BACKTEST_DICT_ENTRIES));
               return;
             case "backtest_start_ack":
               setBtLastAck(msg);
@@ -3678,7 +3705,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
     ws.onclose = () => {
       if (!mountedRef.current) return;
       setConnected(false);
-      reconnectRef.current = setTimeout(() => connectRef.current?.(), 3000);
+      // Exponential backoff: 3s, 6s, 12s, 24s, capped at 60s. Jittered
+      // ±15% to avoid thundering herd if many dashboards reconnect in
+      // lockstep after a backend restart.
+      const attempt = reconnectAttemptsRef.current;
+      const base = Math.min(3000 * Math.pow(2, attempt), 60000);
+      const jitter = base * (0.85 + Math.random() * 0.30);
+      reconnectAttemptsRef.current = attempt + 1;
+      reconnectRef.current = setTimeout(() => connectRef.current?.(), jitter);
     };
     ws.onerror = () => {
       if (wsUrl !== DEFAULT_WS_URL) {
