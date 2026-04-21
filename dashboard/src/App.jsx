@@ -849,6 +849,29 @@ function CompanionDrawer({
   );
 }
 
+function FeatureFlagBanner({ flag, note }) {
+  return (
+    <div style={{
+      margin: "12px 24px 0",
+      padding: "8px 12px",
+      background: `${COLORS.warn}12`,
+      border: `1px solid ${COLORS.warn}55`,
+      borderRadius: 4,
+      fontFamily: mono,
+      fontSize: 11,
+      color: COLORS.warn,
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+    }}>
+      <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>EXPERIMENTAL</span>
+      <span style={{ color: COLORS.textDim }}>
+        Feature-flagged — behavior may change. {note} Kill switch: <code>{flag}=1</code>.
+      </span>
+    </div>
+  );
+}
+
 function TabSwitcher({ activeTab, onChange, backtestRunning }) {
   const tabs = [
     { key: "LIVE",     label: "LIVE",     color: COLORS.accent },
@@ -4123,6 +4146,11 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               </div>
             )}
             {activeTab === "RESEARCH" && (
+              <>
+              <FeatureFlagBanner
+                flag="HYDRA_BACKTEST_DISABLED"
+                note="Backtest worker pool and compare library are prototype-stage."
+              />
               <div style={{ padding: "16px 24px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
                 {/* Left Column: Backtest Control Panel */}
                 <div style={{ flex: "0 0 500px" }}>
@@ -4204,8 +4232,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                   )}
                 </div>
               </div>
+              </>
             )}
             {activeTab === "THESIS" && (
+              <>
+              <FeatureFlagBanner
+                flag="HYDRA_THESIS_DISABLED"
+                note="Posture, ladders, and Grok document processor are prototype-stage."
+              />
               <ThesisPanel
                 thesisState={thesisState}
                 sendMessage={sendMessage}
@@ -4216,6 +4250,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                   setResearchTab("LATEST_RUN");
                 }}
               />
+              </>
             )}
             {/* Floating observer on LIVE tab — dual-state view. Appears
                 whenever a backtest is mid-run or just completed; user can
@@ -4906,7 +4941,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.16.2 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.17.0 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]
