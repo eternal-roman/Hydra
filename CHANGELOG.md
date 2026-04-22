@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.18.1] — 2026-04-22
+
+### Fixed
+
+- **`basis_apr_pct` was permanently `None` for BTC and SOL — R10 force-hold
+  was firing continuously.** `SPOT_TO_DERIVATIVES` mapped BTC/USDC and
+  SOL/USDC quarterlies to prefix `PI_XBTUSD` / `PI_SOLUSD`, but Kraken
+  Futures has no `PI_*_YYMMDD` listings for these pairs; the live dated
+  contracts use `FF_*_YYMMDD`. `_find_quarterly` therefore matched zero
+  symbols, `_compute_basis` was never called, and the indicator dict
+  had two structural `None` values (basis + oi_delta_1h during warmup),
+  tripping the R10 staleness rule (≥ 2 null fields) on every tick. Swap
+  to `FF_XBTUSD` / `FF_SOLUSD`, which resolve to the actual live dated
+  contracts (confirmed via `kraken -o json futures tickers`).
+
+### Hardened
+
+- **`_find_quarterly` now filters already-expired suffixes.** Previously
+  it returned the lexicographically earliest symbol matching the prefix.
+  Because `sorted(YYMMDD)[0]` is the *nearest-term* contract, a stale
+  post-expiry entry lingering in Kraken's feed would be picked, and
+  `_compute_basis` would then annualize residual premium over a 1-day
+  clamped tenor — producing nonsense APR. Parse the suffix as a date,
+  skip anything before today (UTC), and malformed suffixes. Accepts an
+  optional `now` override for deterministic tests.
+
 ## [2.18.0] — 2026-04-22
 
 ### Fixed

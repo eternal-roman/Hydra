@@ -284,19 +284,78 @@ def test_funding_normal_range_passes_through(stream):
 
 
 def test_find_quarterly_returns_earliest(stream):
+    """Fixed `now` anchor so test is stable across wall-clock drift.
+    All four FF_XBTUSD_* suffixes resolve to dates after the anchor;
+    the earliest non-expired is 2030-03-28."""
+    import datetime
+    now = datetime.datetime(
+        2030, 1, 1, tzinfo=datetime.timezone.utc
+    ).timestamp()
     by_symbol = {
         "PF_XBTUSD": {},
-        "PI_XBTUSD_260927": {},
-        "PI_XBTUSD_260328": {},   # earliest
-        "PI_XBTUSD_260627": {},
-        "PI_SOLUSD_260328": {},
+        "FF_XBTUSD_300927": {},
+        "FF_XBTUSD_300328": {},   # earliest non-expired
+        "FF_XBTUSD_300627": {},
+        "FF_SOLUSD_300328": {},
     }
-    assert stream._find_quarterly(by_symbol, "PI_XBTUSD") == "PI_XBTUSD_260328"
+    assert stream._find_quarterly(
+        by_symbol, "FF_XBTUSD", now
+    ) == "FF_XBTUSD_300328"
 
 
 def test_find_quarterly_returns_none_when_no_match(stream):
-    assert stream._find_quarterly({"PF_XBTUSD": {}}, "PI_XBTUSD") is None
+    assert stream._find_quarterly({"PF_XBTUSD": {}}, "FF_XBTUSD") is None
     assert stream._find_quarterly({}, None) is None
+
+
+def test_find_quarterly_skips_expired_contracts(stream):
+    """An expired dated contract that lingers in the ticker feed must
+    be skipped; otherwise `_compute_basis` would annualize residual
+    premium over a 1-day clamped tenor (garbage APR)."""
+    import datetime
+    now = datetime.datetime(
+        2026, 6, 1, tzinfo=datetime.timezone.utc
+    ).timestamp()
+    by_symbol = {
+        "FF_XBTUSD_260101": {},  # expired — must be skipped
+        "FF_XBTUSD_260424": {},  # expired — must be skipped
+        "FF_XBTUSD_260927": {},  # first non-expired
+        "FF_XBTUSD_261226": {},
+    }
+    assert stream._find_quarterly(
+        by_symbol, "FF_XBTUSD", now
+    ) == "FF_XBTUSD_260927"
+
+
+def test_find_quarterly_returns_none_when_all_expired(stream):
+    import datetime
+    now = datetime.datetime(
+        2030, 1, 1, tzinfo=datetime.timezone.utc
+    ).timestamp()
+    by_symbol = {
+        "FF_XBTUSD_260101": {},
+        "FF_XBTUSD_260424": {},
+    }
+    assert stream._find_quarterly(by_symbol, "FF_XBTUSD", now) is None
+
+
+def test_find_quarterly_skips_malformed_suffix(stream):
+    """Non-6-digit or non-numeric suffixes must not crash the parser
+    and must be skipped in favor of a well-formed sibling."""
+    import datetime
+    now = datetime.datetime(
+        2030, 1, 1, tzinfo=datetime.timezone.utc
+    ).timestamp()
+    by_symbol = {
+        "FF_XBTUSD_NEXTWK": {},  # non-numeric
+        "FF_XBTUSD_12345": {},   # 5 digits
+        "FF_XBTUSD_9999999": {}, # 7 digits
+        "FF_XBTUSD_301301": {},  # invalid month → ValueError
+        "FF_XBTUSD_300927": {},  # only valid entry
+    }
+    assert stream._find_quarterly(
+        by_symbol, "FF_XBTUSD", now
+    ) == "FF_XBTUSD_300927"
 
 
 def test_compute_basis_annualizes_premium(stream):

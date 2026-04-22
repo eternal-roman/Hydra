@@ -37,8 +37,8 @@ Signals surfaced per spot pair:
   basis_apr_pct             : quarterly futures premium annualized
 
 Spot-pair → derivatives mapping:
-  BTC/USDC → PF_XBTUSD (perp),  PI_XBTUSD_* (quarterly)
-  SOL/USDC → PF_SOLUSD (perp),  PI_SOLUSD_* (quarterly)
+  BTC/USDC → PF_XBTUSD (perp),  FF_XBTUSD_YYMMDD (dated)
+  SOL/USDC → PF_SOLUSD (perp),  FF_SOLUSD_YYMMDD (dated)
   SOL/BTC  → synthetic from SOL/USD and BTC/USD perps (no direct perp)
 """
 
@@ -54,8 +54,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 # Spot pair → derivatives metadata. Do NOT add order-placement endpoints here.
 SPOT_TO_DERIVATIVES: Dict[str, Dict[str, object]] = {
-    "BTC/USDC": {"perp": "PF_XBTUSD", "quarterly_prefix": "PI_XBTUSD"},
-    "SOL/USDC": {"perp": "PF_SOLUSD", "quarterly_prefix": "PI_SOLUSD"},
+    "BTC/USDC": {"perp": "PF_XBTUSD", "quarterly_prefix": "FF_XBTUSD"},
+    "SOL/USDC": {"perp": "PF_SOLUSD", "quarterly_prefix": "FF_SOLUSD"},
     "SOL/BTC":  {"perp": None, "quarterly_prefix": None, "synthetic": True},
 }
 
@@ -350,7 +350,7 @@ class DerivativesStream:
                     continue
                 self._populate_from_ticker(snap, tick, now)
                 q_prefix = SPOT_TO_DERIVATIVES[pair].get("quarterly_prefix")
-                q_symbol = self._find_quarterly(by_symbol, q_prefix)  # type: ignore[arg-type]
+                q_symbol = self._find_quarterly(by_symbol, q_prefix, now)  # type: ignore[arg-type]
                 if q_symbol:
                     self._compute_basis(snap, tick, by_symbol[q_symbol], q_symbol, now)
                 updated = True
@@ -569,13 +569,44 @@ class DerivativesStream:
     # ─── Basis (quarterly) ───────────────────────────────────────
 
     def _find_quarterly(
-        self, by_symbol: Dict[str, Dict], prefix: Optional[str]
+        self, by_symbol: Dict[str, Dict], prefix: Optional[str],
+        now: Optional[float] = None,
     ) -> Optional[str]:
-        """Return earliest-dated quarterly symbol with the given prefix,
-        or None if no quarterly listed."""
+        """Return earliest-dated NOT-YET-EXPIRED dated contract with the
+        given prefix, or None.
+
+        Filters out suffixes whose parsed YYMMDD is already in the past
+        to prevent _compute_basis from annualizing over a clamped 1-day
+        tenor (which would produce nonsense APR from residual premium
+        on a lingering expired contract).
+
+        Malformed suffixes (non-YYMMDD, bad dates) are also skipped."""
         if not prefix:
             return None
-        candidates = [s for s in by_symbol if s.startswith(prefix + "_")]
+        import datetime
+        if now is None:
+            now = time.time()
+        today = datetime.datetime.fromtimestamp(
+            now, tz=datetime.timezone.utc
+        ).date()
+        candidates: List[str] = []
+        for s in by_symbol:
+            if not s.startswith(prefix + "_"):
+                continue
+            suffix = s.rsplit("_", 1)[-1]
+            if len(suffix) != 6 or not suffix.isdigit():
+                continue
+            try:
+                exp = datetime.date(
+                    2000 + int(suffix[0:2]),
+                    int(suffix[2:4]),
+                    int(suffix[4:6]),
+                )
+            except ValueError:
+                continue
+            if exp < today:
+                continue
+            candidates.append(s)
         if not candidates:
             return None
         return sorted(candidates)[0]
