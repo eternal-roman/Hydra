@@ -43,7 +43,7 @@ regression bug, not a style issue.
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
 - **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.17.1
+- **Version pin:** v2.18.0
 
 ## Defaults (inherited)
 
@@ -147,7 +147,7 @@ Persist new learnings: `python $CBP_RUNNER_DIR/bin/memory-write.py --label <slug
 
 | id | path | ownership / notes |
 |---|---|---|
-| snapshot | `hydra_session_snapshot.json` | atomic `.tmp → os.replace`; `--resume` target; embeds `thesis_state` |
+| snapshot | `hydra_session_snapshot.json` | atomic `.tmp → os.replace`; `--resume` target; embeds `thesis_state` + v2.18.0 `derivatives_history` (OI + mark-price deques, rehydrated with 30 min staleness gate) |
 | order_journal | `hydra_order_journal.json` | snapshots immediately on any tick that appends (crash cannot lose since last successful tick); gitignored |
 | params | `hydra_params_<pair>.json` | per-pair learned tuning params; gitignored |
 | errors_log | `hydra_errors.log` | tick try/except writes here with full traceback; loop continues |

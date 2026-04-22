@@ -168,8 +168,9 @@ function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, fill
   if (!data || data.length < 2) return null;
   const min = Math.min(...data);
   const max = Math.max(...data);
-  const range = max - min || 1;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * (height - 4) - 2}`);
+  const flat = max === min;
+  const range = flat ? 1 : (max - min);
+  const pts = data.map((v, i) => `${(i / (data.length - 1)) * width},${flat ? height / 2 : height - ((v - min) / range) * (height - 4) - 2}`);
   const pathD = `M${pts.join(" L")}`;
   const svgStyle = fill
     ? { display: "block", width: "100%", height: "100%" }
@@ -5032,7 +5033,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.17.1 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.18.0 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]
