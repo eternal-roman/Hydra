@@ -392,3 +392,139 @@ def test_fetch_tickers_logs_oserror_distinctly(stream, monkeypatch, capsys):
     assert result == []
     err = capsys.readouterr().err
     assert "oserror" in err.lower() or "wsl" in err.lower()
+
+
+# ─── v2.18.0: snapshot() / restore() round-trip ─────────────
+
+
+def test_snapshot_roundtrip_rehydrates_history(stream):
+    """Round-trip: seed deques, snapshot, restore into fresh stream,
+    assert `_delta_pct` returns the same value either side."""
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    samples_oi = [(now - 3600, 1000.0), (now - 1800, 1100.0), (now - 60, 1200.0)]
+    samples_px = [(now - 3600, 100.0), (now - 1800, 105.0), (now - 60, 110.0)]
+    stream._oi_history[sym] = deque(samples_oi)
+    stream._price_history[sym] = deque(samples_px)
+
+    snap = stream.snapshot()
+    assert "oi_history" in snap and "price_history" in snap
+    assert snap["oi_history"][sym] == [[t, v] for t, v in samples_oi]
+
+    fresh = DerivativesStream(pairs=["BTC/USDC"])
+    fresh.restore(snap, now=now)
+    # _delta_pct over the 1h window should match pre-snapshot
+    before = _delta_pct(stream._oi_history[sym], now - 3600, 1200.0)
+    after = _delta_pct(fresh._oi_history[sym], now - 3600, 1200.0)
+    assert before == after
+    assert after is not None and after > 0
+
+
+def test_restore_skips_when_history_stale(stream):
+    """Gate: newest persisted sample older than MAX_RESTORE_GAP_S →
+    drop the history for that symbol, preserving the "don't lie"
+    invariant after long downtime."""
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    stale_newest = now - (stream.MAX_RESTORE_GAP_S + 60)
+    snap = {
+        "oi_history": {sym: [[stale_newest - 600, 1000.0], [stale_newest, 1100.0]]},
+        "price_history": {},
+    }
+    stream.restore(snap, now=now)
+    assert sym not in stream._oi_history or len(stream._oi_history[sym]) == 0
+
+
+def test_restore_merges_without_duplicating_concurrent_samples(stream):
+    """Merge semantics: a sample the polling thread collected at the
+    same timestamp as a persisted sample must appear exactly once."""
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    shared_ts = now - 120
+    stream._oi_history[sym] = deque([(shared_ts, 999.0), (now - 30, 1300.0)])
+    snap = {
+        "oi_history": {sym: [[now - 600, 800.0], [shared_ts, 1000.0]]},
+        "price_history": {},
+    }
+    stream.restore(snap, now=now)
+    timestamps = [t for t, _ in stream._oi_history[sym]]
+    assert timestamps == sorted(timestamps)
+    assert timestamps.count(shared_ts) == 1
+    # New (older) sample from the snapshot merged in
+    assert any(t == now - 600 for t, _ in stream._oi_history[sym])
+    # Newer live sample preserved
+    assert any(t == now - 30 for t, _ in stream._oi_history[sym])
+
+
+def test_restore_handles_missing_and_malformed_inputs(stream):
+    """Fail-soft: None, empty dict, wrong field types, non-numeric
+    sample values must all be silently ignored without raising."""
+    stream.restore(None)
+    stream.restore({})
+    stream.restore({"oi_history": "not a dict", "price_history": None})
+    stream.restore({"oi_history": {"PF_XBTUSD": [["bad", "values"]]}})
+    # All no-ops; no exceptions, deques remain untouched
+    assert stream._oi_history == {} or all(
+        len(dq) == 0 for dq in stream._oi_history.values()
+    )
+
+
+def test_snapshot_json_roundtrip_preserves_floats(stream):
+    """Exercise the real persistence path: snapshot() → json.dumps →
+    json.loads → restore(). Catches any future regression where floats
+    accidentally become strings via `default=str` fallbacks."""
+    import json
+
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    stream._oi_history[sym] = deque([(now - 120, 1000.5), (now - 60, 1050.25)])
+    stream._price_history[sym] = deque([(now - 120, 99.9), (now - 60, 100.1)])
+
+    raw = json.dumps(stream.snapshot())
+    revived = json.loads(raw)
+
+    fresh = DerivativesStream(pairs=["BTC/USDC"])
+    fresh.restore(revived, now=now)
+    assert list(fresh._oi_history[sym]) == list(stream._oi_history[sym])
+    assert list(fresh._price_history[sym]) == list(stream._price_history[sym])
+
+
+def test_restore_salvages_partially_malformed_sample_list(stream):
+    """Per-element parsing: a single bad tuple inside an otherwise valid
+    sample list must not discard the symbol's entire history."""
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    snap = {
+        "oi_history": {
+            sym: [
+                [now - 300, 1000.0],
+                ["not-a-number", 1050.0],   # malformed
+                [now - 60, 1100.0],
+            ],
+        },
+        "price_history": {},
+    }
+    stream.restore(snap, now=now)
+    timestamps = [t for t, _ in stream._oi_history[sym]]
+    assert now - 300 in timestamps
+    assert now - 60 in timestamps
+    assert len(timestamps) == 2  # one bad entry dropped, two survive
+
+
+def test_restore_respects_history_window_prune_on_load(stream):
+    """Pruning: samples older than HISTORY_WINDOW_S on the merged
+    result must be dropped so a pathological snapshot cannot balloon
+    the deque past its normal cap."""
+    sym = "PF_XBTUSD"
+    now = 1_000_000.0
+    # Persisted samples span just inside the window; fresh-enough to
+    # pass the MAX_RESTORE_GAP_S gate on the newest sample.
+    very_old = now - (stream.HISTORY_WINDOW_S + 100)
+    snap = {
+        "oi_history": {sym: [[very_old, 500.0], [now - 300, 1200.0]]},
+        "price_history": {},
+    }
+    stream.restore(snap, now=now)
+    timestamps = [t for t, _ in stream._oi_history[sym]]
+    assert all(t >= now - stream.HISTORY_WINDOW_S for t in timestamps)
+    assert very_old not in timestamps

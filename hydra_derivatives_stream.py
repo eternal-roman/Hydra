@@ -150,6 +150,15 @@ class DerivativesStream:
     HISTORY_WINDOW_S = 24 * 3600
     HTTP_TIMEOUT_S = 10
 
+    # v2.18.0: restore gate. If the newest persisted sample is older
+    # than this on `--resume`, the entire history for that symbol is
+    # dropped and the native 1 H warmup kicks in instead. 30 min chosen
+    # because the shortest consumer (`oi_delta_1h_pct`) tolerates a
+    # half-window gap before the delta would bias meaningfully against
+    # a stale baseline. The 24 H delta is a weaker consumer and is
+    # accepted to be blunter on long restarts by design.
+    MAX_RESTORE_GAP_S = 1800
+
     # OI/price thresholds for regime classification. Tunable but
     # deliberately conservative — a classifier that fires "squeeze"
     # on noise produces false signals the Quant must reason around.
@@ -192,6 +201,89 @@ class DerivativesStream:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+
+    # ─── Persistence (v2.18.0) ───────────────────────────────────
+    #
+    # Shortens the 1 H / 24 H OI-delta warmup after `--resume` by letting
+    # the agent snapshot persist `_oi_history` / `_price_history` across
+    # restarts. Read-only by design: no new CLI paths, no auth surface.
+
+    def snapshot(self) -> Dict[str, Dict[str, List[List[float]]]]:
+        """Return JSON-serialisable OI + mark-price history per perp
+        symbol. Sizes are bounded by the existing `HISTORY_WINDOW_S`
+        prune (~8.6 k tuples per symbol at 30 s cadence × 24 h)."""
+        with self._lock:
+            return {
+                "oi_history": {
+                    sym: [[t, v] for (t, v) in dq]
+                    for sym, dq in self._oi_history.items()
+                },
+                "price_history": {
+                    sym: [[t, v] for (t, v) in dq]
+                    for sym, dq in self._price_history.items()
+                },
+            }
+
+    def restore(
+        self, snapshot: Optional[Dict], now: Optional[float] = None
+    ) -> None:
+        """Rehydrate OI + price history from a snapshot dict.
+
+        Safety gates applied per symbol, independently:
+          - Drop if the newest sample is older than MAX_RESTORE_GAP_S —
+            the 1 H delta would otherwise report against a stale
+            baseline (preserves the "don't lie" invariant).
+          - Prune to HISTORY_WINDOW_S on load so replaying a
+            pathological snapshot cannot grow the deque past its cap.
+          - Merge (don't replace): any samples already collected by the
+            polling thread are preserved; result is sorted by timestamp
+            and deduped.
+          - Lock-protected to race safely with `_run_loop.poll_once`.
+        """
+        if not snapshot or not isinstance(snapshot, dict):
+            return
+        if now is None:
+            now = time.time()
+        cutoff = now - self.HISTORY_WINDOW_S
+        for field, target in (
+            ("oi_history", self._oi_history),
+            ("price_history", self._price_history),
+        ):
+            persisted = snapshot.get(field) or {}
+            if not isinstance(persisted, dict):
+                continue
+            with self._lock:
+                for sym, samples in persisted.items():
+                    if not isinstance(samples, list) or not samples:
+                        continue
+                    # Per-element parse so one malformed tuple inside a
+                    # long valid list doesn't invalidate the whole symbol
+                    # history.
+                    parsed: List[Tuple[float, float]] = []
+                    for s in samples:
+                        try:
+                            t, v = s
+                            parsed.append((float(t), float(v)))
+                        except (TypeError, ValueError):
+                            continue
+                    if not parsed:
+                        continue
+                    newest = max(t for t, _ in parsed)
+                    if now - newest > self.MAX_RESTORE_GAP_S:
+                        continue
+                    existing = target.setdefault(sym, deque())
+                    merged = sorted(
+                        list(existing)
+                        + [(t, v) for t, v in parsed if t >= cutoff]
+                    )
+                    seen: set = set()
+                    deduped: List[Tuple[float, float]] = []
+                    for t, v in merged:
+                        if t in seen:
+                            continue
+                        seen.add(t)
+                        deduped.append((t, v))
+                    target[sym] = deque(deduped)
 
     # ─── Public accessor ─────────────────────────────────────────
 

@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.18.0] — 2026-04-22
+
+### Fixed
+
+- **Balance History chart no longer pins flat series to the bottom.**
+  `MiniChart` auto-scales y to `[min, max]`; when the session balance
+  held constant (mostly-USDC wallet, no position P&L movement), `range`
+  collapsed to 0 and every sample mapped to `y = height - 2`, rendering
+  a flat line glued to the floor — visually indistinguishable from "$0".
+  Detect `max === min` and center the line at `height / 2` instead.
+  Applies to both the live Balance History card and the backtest
+  Observer per-pair equity chart; the varying-data path is unchanged.
+
+### Added
+
+- **DerivativesStream OI / mark-price history persists across `--resume`.**
+  The `oi_delta_1h_pct`, `oi_delta_24h_pct`, and `oi_price_regime`
+  fields on the dashboard's Quant band used to sit at `null` / `"unknown"`
+  for a full hour after every restart because `_delta_pct` returned
+  `None` until a baseline sample ≥ 1 h old existed in the in-memory
+  `_oi_history` deque. `DerivativesStream.snapshot()` /
+  `DerivativesStream.restore()` now piggyback on the existing atomic
+  `hydra_session_snapshot.json` write/load. On `--resume` after ≤ 30 min
+  downtime (`MAX_RESTORE_GAP_S`), the 1 H delta is live within one poll
+  cycle (~30 s) instead of after a fresh 1 H warmup; longer downtime
+  falls back to the existing empty-history path so the delta returns
+  `None` rather than against a stale baseline. Additive snapshot key
+  (`derivatives_history`); older snapshots load cleanly and newer code
+  handles missing / malformed entries fail-soft. SPOT-ONLY invariant
+  preserved — no new CLI paths, no auth surface.
+
+---
+
 ## [2.17.1] — 2026-04-21
 
 ### Security

@@ -656,6 +656,16 @@ class HydraAgent:
                 "peak_usd": getattr(self, "_portfolio_peak_usd", 0.0),
                 "max_pct": getattr(self, "_portfolio_max_drawdown_pct", 0.0),
             },
+            # v2.18.0: persist DerivativesStream OI + mark-price history
+            # so `oi_delta_1h_pct` / `oi_price_regime` are live within
+            # one poll cycle on `--resume` rather than after a fresh
+            # 1 H warmup. Fail-soft on load (stale gate + missing key).
+            # getattr guards tests that instantiate via object.__new__
+            # (same pattern as thesis_state above).
+            "derivatives_history": (
+                getattr(self, "derivatives_stream", None).snapshot()
+                if getattr(self, "derivatives_stream", None) else {}
+            ),
         }
         path = self._snapshot_path()
         tmp = path + ".tmp"
@@ -736,6 +746,19 @@ class HydraAgent:
             thesis_attr = getattr(self, "thesis", None)
             if thesis_attr is not None:
                 thesis_attr.restore(snapshot.get("thesis_state"))
+            # v2.18.0: Rehydrate DerivativesStream OI + price history.
+            # Stream already started earlier in __init__; restore is
+            # lock-protected so a poll racing with this call is safe.
+            # Stale-gate drops history when downtime exceeded
+            # MAX_RESTORE_GAP_S so `_delta_pct` can still return None
+            # rather than against a misleading baseline.
+            deriv_attr = getattr(self, "derivatives_stream", None)
+            if deriv_attr is not None:
+                try:
+                    deriv_attr.restore(snapshot.get("derivatives_history") or {})
+                except Exception as e:
+                    print(f"  [SNAPSHOT] derivatives_history restore skipped: "
+                          f"{type(e).__name__}: {e}")
             print(f"  [SNAPSHOT] Restored session from {snapshot.get('timestamp', '?')}")
         except Exception as e:
             print(f"  [SNAPSHOT] Restore failed for {path}: {type(e).__name__}: {e} — starting fresh.")
@@ -3664,7 +3687,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.17.1",
+            "version": "2.18.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
