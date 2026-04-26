@@ -958,9 +958,29 @@ class OrderBookAnalyzer:
 class CrossPairCoordinator:
     """Detects cross-pair regime divergences and generates coordinated signals.
 
-    Monitors regime states across all trading pairs and produces override
-    signals when cross-pair evidence contradicts a single pair's signal.
-    Designed for the SOL/USDC + SOL/BTC + BTC/USDC triangle.
+    Monitors regime states across the active trading triangle and produces
+    override signals when cross-pair evidence contradicts a single pair's
+    signal.
+
+    Hydra's strategy is fundamentally a triangle of three roles:
+      stable_sol  — the SOL pair quoted in the active stable currency
+      stable_btc  — the BTC pair quoted in the active stable currency
+      bridge      — the SOL/BTC cross (quote-independent)
+
+    The literal pair names depend on the active stable quote (USD vs USDC
+    vs USDT), so the coordinator addresses pairs by their TradingTriangle
+    role rather than by name. The override keys returned to consumers
+    remain pair-symbol strings (e.g. "SOL/USD") because downstream code
+    correlates by pair symbol — the role indirection is internal.
+
+    Construction accepts either:
+      - a TradingTriangle (preferred; explicit role binding), or
+      - a List[str] of pair symbols (legacy; the triangle is derived
+        best-effort from the list. If the list doesn't contain a complete
+        triangle, the coordinator becomes a no-op — every rule's role
+        lookup returns None and the guards short-circuit to empty
+        overrides, matching the pre-v2.19 behavior when only one pair
+        was passed.)
     """
 
     HISTORY_SIZE = 10
@@ -976,9 +996,68 @@ class CrossPairCoordinator:
     CONFLUENCE_WINDOW = 60
     CONFLUENCE_MAX_BONUS = 0.10
 
-    def __init__(self, pairs: List[str]):
-        self.pairs = pairs
-        self.regime_history: Dict[str, List[str]] = {p: [] for p in pairs}
+    def __init__(self, triangle_or_pairs):
+        # Lazy-import TradingTriangle to keep the engine importable even
+        # if hydra_config is broken — the coordinator falls back to
+        # pair-list mode in that case.
+        try:
+            from hydra_config import TradingTriangle
+        except Exception:
+            TradingTriangle = None  # type: ignore
+
+        if TradingTriangle is not None and isinstance(triangle_or_pairs, TradingTriangle):
+            self.triangle = triangle_or_pairs
+            self.pairs: List[str] = [p.cli_format for p in triangle_or_pairs.as_tuple()]
+        elif isinstance(triangle_or_pairs, (list, tuple)):
+            self.pairs = list(triangle_or_pairs)
+            self.triangle = self._derive_triangle(self.pairs)
+        else:
+            raise TypeError(
+                "CrossPairCoordinator requires a TradingTriangle or a "
+                f"list of pair symbols; got {type(triangle_or_pairs).__name__}"
+            )
+        self.regime_history: Dict[str, List[str]] = {p: [] for p in self.pairs}
+
+    @staticmethod
+    def _derive_triangle(pairs: List[str]):
+        """Best-effort triangle derivation from a list of pair symbols.
+
+        Scans the list for a SOL-stable pair, a BTC-stable pair (matching
+        quote), and SOL/BTC. Returns a TradingTriangle if all three are
+        present and quotes match, else None.
+        """
+        try:
+            from hydra_pair_registry import default_registry
+            from hydra_config import TradingTriangle
+        except Exception:
+            return None
+        reg = default_registry()
+        sol_stable = None
+        btc_stable = None
+        bridge = None
+        for sym in pairs:
+            p = reg.get(sym)
+            if p is None:
+                continue
+            if p.base == "SOL" and p.is_stable_quoted:
+                sol_stable = p
+            elif p.base == "BTC" and p.is_stable_quoted:
+                btc_stable = p
+            elif p.base == "SOL" and p.quote == "BTC":
+                bridge = p
+        if (sol_stable is not None and btc_stable is not None
+                and bridge is not None
+                and sol_stable.quote == btc_stable.quote):
+            try:
+                return TradingTriangle(
+                    stable_sol=sol_stable,
+                    stable_btc=btc_stable,
+                    bridge=bridge,
+                    quote=sol_stable.quote,
+                )
+            except Exception:
+                return None
+        return None
 
     def update(self, pair: str, regime: str):
         """Record regime state for a pair. Keeps last HISTORY_SIZE entries."""
@@ -992,22 +1071,28 @@ class CrossPairCoordinator:
                       ) -> Dict[str, dict]:
         """Return signal overrides where cross-pair evidence contradicts single-pair signals.
 
-        Rules:
-        1. BTC leads SOL down: If BTC/USDC is TREND_DOWN and SOL/USDC is
-           still TREND_UP or RANGING → override SOL/USDC to DEFENSIVE.
-        2. BTC recovery boost: If BTC/USDC is TREND_UP and SOL/USDC is
-           TREND_DOWN → boost SOL/USDC confidence (recovery likely).
-        3. Coordinated swap: If SOL/USDC is TREND_DOWN and SOL/BTC is
-           TREND_UP → suggest selling SOL/USDC and buying SOL/BTC.
-        4. Signal confluence: If SOL/BTC and SOL/USDC emit same-direction
+        Rules (all defined in role terms; literal pair names depend on
+        the active triangle's stable quote — e.g. SOL/USD when quote=USD,
+        SOL/USDC when quote=USDC):
+
+        1. BTC leads SOL down: If stable_btc is TREND_DOWN and stable_sol is
+           still TREND_UP or RANGING → override stable_sol to DEFENSIVE.
+        2. BTC recovery boost: If stable_btc is TREND_UP and stable_sol is
+           TREND_DOWN → boost stable_sol confidence (recovery likely).
+        3. Coordinated swap: If stable_sol is TREND_DOWN and bridge is
+           TREND_UP → suggest selling stable_sol and buying bridge.
+        4. Signal confluence: If bridge and stable_sol emit same-direction
            BUY or SELL AND their log-return correlation over the last
            CONFLUENCE_WINDOW candles exceeds CO_MOVE_THRESHOLD, boost the
-           SOL/USDC confidence by a bounded covariance-weighted amount.
+           stable_sol confidence by a bounded covariance-weighted amount.
            Requires `price_series` to be supplied for both pairs — without
            it Rule 4 is a no-op (safe fallback).
 
         Args:
-            all_states: per-pair state dicts from HydraEngine.tick()
+            all_states: per-pair state dicts from HydraEngine.tick(),
+                keyed by pair cli_format ("SOL/USD", "BTC/USD", "SOL/BTC"
+                — the registry canonicalizes upstream so legacy XBT/USDC
+                forms are no longer expected here).
             price_series: optional per-pair close-price history. Only
                 consumed by Rule 4. Keys match `all_states`.
 
@@ -1018,18 +1103,28 @@ class CrossPairCoordinator:
         """
         overrides: Dict[str, dict] = {}
 
-        btc_usdc = all_states.get("BTC/USDC") or all_states.get("XBT/USDC")
-        sol_usdc = all_states.get("SOL/USDC")
-        sol_btc = all_states.get("SOL/BTC") or all_states.get("SOL/XBT")
+        if self.triangle is None:
+            # Incomplete triangle — coordinator is a no-op. Pre-v2.19 the
+            # equivalent was each lookup returning None and every rule
+            # short-circuiting; we just exit early here for clarity.
+            return overrides
 
-        btc_regime = btc_usdc.get("regime") if btc_usdc else None
-        sol_regime = sol_usdc.get("regime") if sol_usdc else None
-        sol_btc_regime = sol_btc.get("regime") if sol_btc else None
+        sol_key = self.triangle.stable_sol.cli_format
+        btc_key = self.triangle.stable_btc.cli_format
+        bridge_key = self.triangle.bridge.cli_format
+
+        btc_state = all_states.get(btc_key)
+        sol_state = all_states.get(sol_key)
+        bridge_state = all_states.get(bridge_key)
+
+        btc_regime = btc_state.get("regime") if btc_state else None
+        sol_regime = sol_state.get("regime") if sol_state else None
+        bridge_regime = bridge_state.get("regime") if bridge_state else None
 
         # Rule 1: BTC leads SOL down
-        # BTC/USDC trending down while SOL/USDC hasn't reacted yet
+        # stable_btc trending down while stable_sol hasn't reacted yet
         if btc_regime == "TREND_DOWN" and sol_regime in ("TREND_UP", "RANGING"):
-            overrides["SOL/USDC"] = {
+            overrides[sol_key] = {
                 "action": "OVERRIDE",
                 "signal": "SELL",
                 "confidence_adj": 0.8,
@@ -1037,12 +1132,12 @@ class CrossPairCoordinator:
             }
 
         # Rule 2: BTC recovery boost
-        # BTC/USDC trending up while SOL/USDC is still down — recovery likely
+        # stable_btc trending up while stable_sol is still down — recovery likely
         if btc_regime == "TREND_UP" and sol_regime == "TREND_DOWN":
             sol_conf = 0.5
-            if sol_usdc and sol_usdc.get("signal"):
-                sol_conf = sol_usdc["signal"].get("confidence", 0.5)
-            overrides["SOL/USDC"] = {
+            if sol_state and sol_state.get("signal"):
+                sol_conf = sol_state["signal"].get("confidence", 0.5)
+            overrides[sol_key] = {
                 "action": "ADJUST",
                 "signal": "BUY",
                 "confidence_adj": min(0.95, sol_conf + 0.15),
@@ -1050,83 +1145,87 @@ class CrossPairCoordinator:
             }
 
         # Rule 3: Coordinated swap
-        # SOL weakening vs USDC but strengthening vs BTC — rotate into BTC
-        if sol_regime == "TREND_DOWN" and sol_btc_regime == "TREND_UP":
+        # SOL weakening vs stable but strengthening vs BTC — rotate into BTC
+        if sol_regime == "TREND_DOWN" and bridge_regime == "TREND_UP":
             sol_pos = 0.0
-            if sol_usdc and sol_usdc.get("position"):
-                sol_pos = sol_usdc["position"].get("size", 0.0)
-            # Only suggest swap if we actually hold SOL via SOL/USDC
+            if sol_state and sol_state.get("position"):
+                sol_pos = sol_state["position"].get("size", 0.0)
+            # Only suggest swap if we actually hold SOL via stable_sol
             if sol_pos > 0:
-                overrides["SOL/USDC"] = {
+                overrides[sol_key] = {
                     "action": "OVERRIDE",
                     "signal": "SELL",
                     "confidence_adj": 0.85,
-                    "reason": "Cross-pair swap: SOL weakening vs USDC but strong vs BTC — rotate to BTC",
+                    "reason": (
+                        f"Cross-pair swap: SOL weakening vs {self.triangle.quote} "
+                        "but strong vs BTC — rotate to BTC"
+                    ),
                     "swap": {
-                        "sell_pair": "SOL/USDC",
-                        "buy_pair": "SOL/BTC",
-                        "reason": "SOL/USDC TREND_DOWN + SOL/BTC TREND_UP — coordinated rotation",
+                        "sell_pair": sol_key,
+                        "buy_pair": bridge_key,
+                        "reason": (
+                            f"{sol_key} TREND_DOWN + {bridge_key} TREND_UP "
+                            "— coordinated rotation"
+                        ),
                     },
                 }
 
-        # Rule 4: SOL/BTC ↔ SOL/USDC signal confluence.
+        # Rule 4: bridge ↔ stable_sol signal confluence.
         # When both same-direction signals fire AND the two pairs are
         # behaving as co-movers (ρ > CO_MOVE_THRESHOLD over the last
-        # CONFLUENCE_WINDOW candles of log-returns), boost SOL/USDC
-        # confidence. This converts SOL/BTC from "dead informational
-        # signal for a USDC-only portfolio" into a second-order confidence
-        # source on SOL/USDC, without triggering any independent SOL/BTC
-        # trade (which is blocked at the engine level by tradable=False
-        # whenever we hold no BTC). Rule 4 does not override an action —
-        # it only ADJUSTs an existing BUY/SELL confidence upward.
-        rule3_active = "SOL/USDC" in overrides and overrides["SOL/USDC"].get("action") == "OVERRIDE"
-        if not rule3_active and sol_usdc and sol_btc and price_series:
-            sol_usdc_sig = (sol_usdc.get("signal") or {})
-            sol_btc_sig = (sol_btc.get("signal") or {})
-            usdc_action = sol_usdc_sig.get("action")
-            btc_action = sol_btc_sig.get("action")
-            if usdc_action in ("BUY", "SELL") and usdc_action == btc_action:
+        # CONFLUENCE_WINDOW candles of log-returns), boost stable_sol
+        # confidence. This converts the bridge from "dead informational
+        # signal for a stable-only portfolio" into a second-order
+        # confidence source on stable_sol, without triggering any
+        # independent bridge trade (which is blocked at the engine level
+        # by tradable=False whenever we hold no BTC). Rule 4 does not
+        # override an action — it only ADJUSTs an existing BUY/SELL
+        # confidence upward.
+        rule3_active = (sol_key in overrides
+                        and overrides[sol_key].get("action") == "OVERRIDE")
+        if (not rule3_active and sol_state and bridge_state and price_series):
+            sol_sig = (sol_state.get("signal") or {})
+            bridge_sig = (bridge_state.get("signal") or {})
+            sol_action = sol_sig.get("action")
+            bridge_action = bridge_sig.get("action")
+            if sol_action in ("BUY", "SELL") and sol_action == bridge_action:
                 # Gate SELL confluence on actually holding SOL — same guard
                 # as Rule 3 so we don't boost an exit signal we can't act on.
                 sell_gate_ok = True
-                if usdc_action == "SELL":
-                    pos = sol_usdc.get("position") or {}
+                if sol_action == "SELL":
+                    pos = sol_state.get("position") or {}
                     sol_pos = pos.get("size", 0.0)
                     sell_gate_ok = sol_pos > 0
                 if sell_gate_ok:
-                    # Look up price histories under both canonical and
-                    # legacy XBT aliases — matches the state-dict lookup above.
-                    prices_usdc = (price_series.get("SOL/USDC")
-                                   or price_series.get("SOL/USD")
-                                   or [])
-                    prices_btc = (price_series.get("SOL/BTC")
-                                  or price_series.get("SOL/XBT")
-                                  or [])
+                    prices_stable = price_series.get(sol_key) or []
+                    prices_bridge = price_series.get(bridge_key) or []
                     rho = CrossPairCoordinator.pair_correlation(
-                        prices_usdc, prices_btc, window=self.CONFLUENCE_WINDOW,
+                        prices_stable, prices_bridge,
+                        window=self.CONFLUENCE_WINDOW,
                     )
                     if rho > self.CO_MOVE_THRESHOLD:
-                        btc_conf = float(sol_btc_sig.get("confidence") or 0.0)
-                        usdc_conf = float(sol_usdc_sig.get("confidence") or 0.0)
+                        bridge_conf = float(bridge_sig.get("confidence") or 0.0)
+                        sol_conf = float(sol_sig.get("confidence") or 0.0)
                         bonus = CrossPairCoordinator.confluence_bonus(
-                            rho, btc_conf,
+                            rho, bridge_conf,
                             max_bonus=self.CONFLUENCE_MAX_BONUS,
                         )
                         if bonus > 0.0:
-                            boosted = min(0.95, usdc_conf + bonus)
-                            overrides["SOL/USDC"] = {
+                            boosted = min(0.95, sol_conf + bonus)
+                            overrides[sol_key] = {
                                 "action": "ADJUST",
-                                "signal": usdc_action,
+                                "signal": sol_action,
                                 "confidence_adj": boosted,
                                 "reason": (
-                                    f"Rule 4 confluence: SOL/BTC {usdc_action} (conf {btc_conf:.2f}) "
-                                    f"co-moves with SOL/USDC (ρ={rho:.2f}) — +{bonus:.3f} boost"
+                                    f"Rule 4 confluence: {bridge_key} {sol_action} "
+                                    f"(conf {bridge_conf:.2f}) co-moves with {sol_key} "
+                                    f"(ρ={rho:.2f}) — +{bonus:.3f} boost"
                                 ),
                                 "confluence_source": {
-                                    "source_pair": "SOL/BTC",
+                                    "source_pair": bridge_key,
                                     "rho": round(rho, 4),
                                     "bonus": round(bonus, 4),
-                                    "other_conf": round(btc_conf, 4),
+                                    "other_conf": round(bridge_conf, 4),
                                     "window": self.CONFLUENCE_WINDOW,
                                 },
                             }
