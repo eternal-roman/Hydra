@@ -6,6 +6,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.19.1] — 2026-04-26
+
+### Fixed
+
+- **Registry now recognizes `XXBTZUSD` and other Z-prefix Kraken
+  dialects.** Production warning `[FEE-TIER] Unrecognized Kraken
+  fee-key 'XXBTZUSD'` fired immediately on the BTC/USD pair under the
+  live agent. Investigation: `kraken volume --pair BTC/USD,SOL/USD`
+  returns the BTC entry as `"XXBTZUSD"` (legacy double-prefix internal
+  form combining `XXBT` for Bitcoin + `ZUSD` for USD fiat) but the SOL
+  entry as `"SOLUSD"` (clean altname). Kraken is asymmetric: older
+  fiat pairs on older crypto bases get the legacy form, newer assets
+  get the altname.
+
+  The v2.19.0 registry's `_index_aliases` only generated `BTC ↔ XBT`
+  substitutions and never combined a base prefix with a quote prefix.
+  Result: `XXBTZUSD` fell through `registry.get()`, triggering the
+  warning AND silently mis-keying BTC/USD fee-tier data (the fee dict
+  ended up with `XXBTZUSD` keys instead of `BTC/USD`).
+
+  Fix: data-driven cross-product alias generation.
+    - `_alias_variants(canonical)` derives every form an asset code
+      can appear in by reverse-lookup of `ASSET_ALIASES`. `BTC →
+      {BTC, XBT, XXBT, XBTC}`; `USD → {USD, ZUSD}`; etc.
+    - `_index_aliases(pair)` produces the cross product of base and
+      quote variants in both slashed and slashless form. For BTC/USD
+      that's 4 base × 2 quote × 2 forms = 16 alias entries, including
+      `XXBTZUSD`.
+    - Generation is fully derived from `ASSET_ALIASES`. Adding a new
+      Z-prefix asset code there automatically extends every pair's
+      alias set without touching `_index_aliases`.
+
+  Tests: 5 new (XXBTZUSD/XXBTUSD/XBTZUSD direct resolution; ZUSDC
+  completeness; data-driven derivation enforcement; unknown-asset
+  graceful fallback). Full suite 1329/1329 (+5 over v2.19.0). Live
+  harness mock: 35/35.
+
+### Footer
+
+- Footer `HYDRA v2.19.0` → `HYDRA v2.19.1`;
+  `hydra_backtest.HYDRA_VERSION` → `2.19.1`.
+
+---
+
 ## [2.19.0] — 2026-04-26
 
 Quote-currency abstraction. The default stable quote flips USDC → USD;
