@@ -85,3 +85,8 @@ hydra_thesis_evidence_archive/
 AUDIT_*.md
 test_ws.*
 fix_host.py
+
+# Canonical historical OHLC store (rebuild via tools/bootstrap_history.py)
+hydra_history.sqlite
+hydra_history.sqlite-shm
+hydra_history.sqlite-wal
