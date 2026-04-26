@@ -9,9 +9,10 @@ See docs/superpowers/specs/2026-04-26-research-tab-redesign-design.md §4.6.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from typing import List, Sequence
 
 
 @dataclass(frozen=True)
@@ -96,3 +97,68 @@ def _exact_p(ranks: Sequence[float], w_observed: float) -> float:
 def _norm_cdf(x: float) -> float:
     """Standard normal CDF via erf."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward fold construction
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class WalkForwardSpec:
+    fold_kind: str = "quarterly"
+    is_lookback_quarters: int = 8
+    min_oos_trades: int = 5
+
+
+@dataclass(frozen=True)
+class Fold:
+    idx: int
+    is_start: int
+    is_end: int
+    oos_start: int
+    oos_end: int
+
+
+def _add_months(d: _dt.datetime, months: int) -> _dt.datetime:
+    m = d.month - 1 + months
+    y = d.year + m // 12
+    return d.replace(year=y, month=(m % 12) + 1)
+
+
+def _quarter_starts_between(start_ts: int, end_ts: int) -> List[int]:
+    """Return a list of UTC unix-second timestamps at each quarter start
+    (Jan/Apr/Jul/Oct, day 1, 00:00 UTC) within [start_ts, end_ts]."""
+    starts: List[int] = []
+    d = _dt.datetime.fromtimestamp(start_ts, tz=_dt.timezone.utc)
+    # Round up to next quarter start.
+    next_q_month = ((d.month - 1) // 3) * 3 + 1
+    cursor = _dt.datetime(d.year, next_q_month, 1, tzinfo=_dt.timezone.utc)
+    if cursor.timestamp() < start_ts:
+        cursor = _add_months(cursor, 3)
+    end_d = _dt.datetime.fromtimestamp(end_ts, tz=_dt.timezone.utc)
+    while cursor <= end_d:
+        starts.append(int(cursor.timestamp()))
+        cursor = _add_months(cursor, 3)
+    return starts
+
+
+def build_quarterly_folds(history_start_ts: int, history_end_ts: int,
+                          spec: WalkForwardSpec) -> List[Fold]:
+    boundaries = _quarter_starts_between(history_start_ts, history_end_ts)
+    if len(boundaries) < 2:
+        return []
+    folds: List[Fold] = []
+    for i in range(1, len(boundaries) - 1):
+        oos_start = boundaries[i]
+        oos_end = boundaries[i + 1]
+        is_end = oos_start
+        is_start_idx = max(0, i - spec.is_lookback_quarters)
+        is_start = boundaries[is_start_idx]
+        if is_start == is_end:
+            continue
+        folds.append(Fold(
+            idx=len(folds),
+            is_start=is_start, is_end=is_end,
+            oos_start=oos_start, oos_end=oos_end,
+        ))
+    return folds
