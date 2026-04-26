@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Callable, Dict, List, Sequence
 
 
 @dataclass(frozen=True)
@@ -162,3 +162,71 @@ def build_quarterly_folds(history_start_ts: int, history_end_ts: int,
             oos_start=oos_start, oos_end=oos_end,
         ))
     return folds
+
+
+# ---------------------------------------------------------------------------
+# Runner + result types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FoldMetrics:
+    sharpe: float
+    total_return_pct: float
+    max_dd_pct: float
+    fee_adj_return_pct: float
+    n_trades: int
+
+
+@dataclass
+class FoldResult:
+    fold: Fold
+    baseline: FoldMetrics
+    candidate: FoldMetrics
+    deltas: Dict[str, float]
+
+
+@dataclass
+class WalkForwardResult:
+    pair: str
+    folds: List[FoldResult]
+    wilcoxon: Dict[str, WilcoxonVerdict]
+    skipped_folds: int
+
+
+_HEADLINE_METRICS = ("sharpe", "total_return_pct", "max_dd_pct", "fee_adj_return_pct")
+
+
+RunnerFn = Callable[[str, Dict, Fold], FoldMetrics]
+
+
+def run_walk_forward(
+    pair: str,
+    history_start_ts: int,
+    history_end_ts: int,
+    baseline_params: Dict,
+    candidate_params: Dict,
+    spec: WalkForwardSpec,
+    runner: RunnerFn,
+) -> WalkForwardResult:
+    folds = build_quarterly_folds(history_start_ts, history_end_ts, spec)
+    fold_results: List[FoldResult] = []
+    skipped = 0
+    for fold in folds:
+        baseline = runner(pair, baseline_params, fold)
+        candidate = runner(pair, candidate_params, fold)
+        if (baseline.n_trades < spec.min_oos_trades or
+                candidate.n_trades < spec.min_oos_trades):
+            skipped += 1
+            continue
+        # max_dd_pct: lower is better → flip sign so positive = candidate-better.
+        deltas = {
+            "sharpe": candidate.sharpe - baseline.sharpe,
+            "total_return_pct": candidate.total_return_pct - baseline.total_return_pct,
+            "max_dd_pct": baseline.max_dd_pct - candidate.max_dd_pct,
+            "fee_adj_return_pct": candidate.fee_adj_return_pct - baseline.fee_adj_return_pct,
+        }
+        fold_results.append(FoldResult(fold, baseline, candidate, deltas))
+    wilcoxon = {}
+    for m in _HEADLINE_METRICS:
+        wilcoxon[m] = wilcoxon_signed_rank([fr.deltas[m] for fr in fold_results])
+    return WalkForwardResult(pair, fold_results, wilcoxon, skipped)
