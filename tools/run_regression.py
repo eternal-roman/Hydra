@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 from hydra_history_store import HistoryStore
 
