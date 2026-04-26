@@ -429,9 +429,40 @@ class KrakenHistoricalSource(CandleSource):
         return {"source": "kraken", "interval": self.interval, "cache_dir": self.cache_dir}
 
 
+class SqliteSource(CandleSource):
+    """Reads candles from the canonical hydra_history.sqlite store.
+    Default source as of v2.20.0."""
+
+    def __init__(self, db_path: str, grain_sec: int,
+                 start_ts: int, end_ts: int):
+        self.db_path = db_path
+        self.grain_sec = grain_sec
+        self.start_ts = start_ts
+        self.end_ts = end_ts
+
+    def iter_candles(self, pair: str) -> Iterator[Candle]:
+        from hydra_history_store import HistoryStore
+        store = HistoryStore(self.db_path)
+        for r in store.fetch(pair, self.grain_sec, self.start_ts, self.end_ts):
+            yield Candle(open=r.open, high=r.high, low=r.low, close=r.close,
+                         volume=r.volume, timestamp=float(r.ts))
+
+    def describe(self) -> Dict[str, Any]:
+        return {"source": "sqlite", "db_path": self.db_path,
+                "grain_sec": self.grain_sec,
+                "start_ts": self.start_ts, "end_ts": self.end_ts}
+
+
 def make_candle_source(cfg: BacktestConfig) -> CandleSource:
     """Factory: build the right CandleSource from a BacktestConfig."""
     params = cfg.data_source_params
+    if cfg.data_source == "sqlite":
+        return SqliteSource(
+            db_path=params["db_path"],
+            grain_sec=params["grain_sec"],
+            start_ts=int(params["start_ts"]),
+            end_ts=int(params["end_ts"]),
+        )
     if cfg.data_source == "synthetic":
         return SyntheticSource(
             kind=params.get("kind", "gbm"),
