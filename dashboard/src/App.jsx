@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
+import ResearchTab from "./components/ResearchTab";
 
 // ═══════════════════════════════════════════════════════════════
 // HYDRA Live Dashboard — Connects to hydra_agent.py WebSocket
@@ -3376,6 +3377,11 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [loadingOpacity, setLoadingOpacity] = useState(1);
   // Phase 8: tab switcher + backtest message stash
   const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | RESEARCH | THESIS | SETTINGS
+  // v2.20.0 Research tab state — populated by ws.onmessage cases below.
+  const [researchCoverage, setResearchCoverage] = useState(null);
+  const [researchLabResult, setResearchLabResult] = useState(null);
+  const [researchReleasesList, setResearchReleasesList] = useState(null);
+  const [researchReleasesDiff, setResearchReleasesDiff] = useState(null);
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -3815,6 +3821,18 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 localStorage.setItem("hydra_ws_url", newUrl);
                 setWsUrl(newUrl);
               }
+              return;
+            case "research_dataset_coverage_ack":
+              setResearchCoverage(msg);
+              return;
+            case "research_releases_list_ack":
+              setResearchReleasesList(msg);
+              return;
+            case "research_releases_diff_ack":
+              setResearchReleasesDiff(msg);
+              return;
+            case "research_lab_run_ack":
+              setResearchLabResult(msg);
               return;
             default:
               // Unknown typed message → drop silently. Do NOT fall through
@@ -4261,93 +4279,13 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               </div>
             )}
             {activeTab === "RESEARCH" && (
-              <>
-              <FeatureFlagBanner
-                flag="HYDRA_BACKTEST_DISABLED"
-                note="Backtest worker pool and compare library are prototype-stage."
+              <ResearchTab
+                sendMessage={sendMessage}
+                coverageData={researchCoverage}
+                labResult={researchLabResult}
+                releasesList={researchReleasesList}
+                releasesDiff={researchReleasesDiff}
               />
-              <div style={{ padding: "16px 24px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
-                {/* Left Column: Backtest Control Panel */}
-                <div style={{ flex: "0 0 500px" }}>
-                  <BacktestControlPanel
-                    onSubmit={sendMessage}
-                    connected={connected}
-                    disabled={false}
-                    stagedProposal={stagedProposal}
-                  />
-                </div>
-                
-                {/* Right Column: Backtest Results or Compare Library */}
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                  <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-                    <button onClick={() => setResearchTab("LATEST_RUN")}
-                            style={{ padding: "6px 16px", background: researchTab === "LATEST_RUN" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LATEST_RUN" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LATEST_RUN" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
-                      Latest Run
-                    </button>
-                    <button onClick={() => setResearchTab("LIBRARY")}
-                            style={{ padding: "6px 16px", background: researchTab === "LIBRARY" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LIBRARY" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LIBRARY" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
-                      Compare Library
-                    </button>
-                  </div>
-
-                  {researchTab === "LATEST_RUN" ? (
-                    <BacktestResults
-                      ackMsg={btLastAck}
-                      observerProgress={observerClosed ? null : obsProgress}
-                      observerResult={observerClosed ? null : obsResult}
-                      observerReview={observerClosed ? null : obsReview}
-                      observerEquity={obsEquity}
-                      observerTotalTicks={totalTicks}
-                      completedCount={Object.keys(btResults).length}
-                      onObserverClose={() => setObserverClosed(true)}
-                      onCompareThisRun={(expId) => {
-                        setCompareSelected((prev) =>
-                          prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
-                        );
-                        setResearchTab("LIBRARY");
-                        fetchLibrary();
-                      }}
-                    />
-                  ) : (
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                      {viewingExpId && (
-                        <div style={{ marginBottom: 12, padding: "10px 16px",
-                                      background: `${COLORS.blue}10`,
-                                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                      fontFamily: mono, fontSize: 12, color: COLORS.blue,
-                                      display: "flex", justifyContent: "space-between",
-                                      alignItems: "center" }}>
-                          <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
-                          <button onClick={() => setViewingExpId(null)}
-                                  style={{ background: "transparent", border: "none",
-                                           color: COLORS.blue, cursor: "pointer",
-                                           fontFamily: mono, fontSize: 12 }}>
-                            dismiss
-                          </button>
-                        </div>
-                      )}
-                      <CompareView
-                        experiments={filteredExperiments}
-                        selectedIds={compareSelected}
-                        onToggleSelect={toggleSelectExperiment}
-                        onClearSelection={clearSelection}
-                        onRefresh={fetchLibrary}
-                        onView={viewExperiment}
-                        onCompare={runCompare}
-                        compareReport={compareReport}
-                        loading={libLoading}
-                        compareInFlight={compareInFlight}
-                        onGoToBacktest={() => { /* No-op */ }}
-                        totalInStore={libExperiments.length}
-                        onDismissReport={() => {
-                          setCompareReport(null);
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-              </>
             )}
             {activeTab === "THESIS" && (
               <>
