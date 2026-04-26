@@ -801,9 +801,21 @@ class ThesisTracker:
         enforcement; even then, only true ledger-shield violations BLOCK."""
         rules = self._state.get("hard_rules") or {}
         warnings: List[str] = []
-        if pair == "BTC/USDC" and signal and signal.get("action") == "SELL":
-            shield = rules.get("ledger_shield_btc", DEFAULT_LEDGER_SHIELD_BTC)
-            warnings.append(f"ledger_shield: {shield} BTC is long-term hold (untouchable)")
+        # Ledger-shield is a BTC long-term-hold guard. It fires on a SELL
+        # of any stable-quoted BTC pair (BTC/USD, BTC/USDC, BTC/USDT, ...);
+        # it does NOT fire on the SOL/BTC bridge because selling SOL for
+        # BTC INCREASES BTC holdings.
+        if signal and signal.get("action") == "SELL" and "/" in pair:
+            base, quote = pair.split("/", 1)
+            try:
+                from hydra_pair_registry import STABLE_QUOTES
+                is_btc_stable = (base.upper() == "BTC"
+                                 and quote.upper() in STABLE_QUOTES)
+            except Exception:
+                is_btc_stable = pair == "BTC/USDC"  # conservative fallback
+            if is_btc_stable:
+                shield = rules.get("ledger_shield_btc", DEFAULT_LEDGER_SHIELD_BTC)
+                warnings.append(f"ledger_shield: {shield} BTC is long-term hold (untouchable)")
         tax_floor = rules.get("tax_friction_min_realized_pnl_usd")
         if tax_floor and signal and signal.get("action") == "SELL":
             warnings.append(f"tax_friction: realized gains below ${tax_floor} are not worth the tax")

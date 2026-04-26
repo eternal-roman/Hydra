@@ -86,7 +86,7 @@ DEFAULT_STORE_FILENAME = "shadow_state.json"
 class ShadowCandidate:
     """One candidate going through shadow validation.
 
-    `pair` is either a specific pair (e.g., "SOL/USDC") when the proposed
+    `pair` is either a specific pair (e.g., "SOL/USD") when the proposed
     change is pair-scoped, or "*" for global scope (each live pair gets
     its own shadow engine). `proposed_overrides` carries the JSON-safe
     copy of {param: value} so we can serialize/restore without needing
@@ -94,7 +94,7 @@ class ShadowCandidate:
     """
     id: str
     experiment_id: str
-    pair: str                                  # "SOL/USDC" | "*" (global)
+    pair: str                                  # "SOL/USD" | "*" (global)
     proposed_overrides: Dict[str, float]
     created_at: str
     status: str = "pending"                    # pending | active | approved
@@ -186,7 +186,7 @@ class ShadowValidator:
             raise ValueError("proposed change missing target or proposed_value")
 
         # Resolve pair scope: explicit `pair` arg > proposed.scope (e.g.
-        # "pair:SOL/USDC") > "*".
+        # "pair:SOL/USD") > "*".
         if pair is None:
             if proposed.scope.startswith("pair:"):
                 pair = proposed.scope.split(":", 1)[1]
@@ -467,13 +467,13 @@ class ShadowValidator:
 
         Pair scope handling:
           * "*": one engine per known pair (via tuner_registry keys),
-                 or fall back to ["SOL/USDC"] if registry empty.
-          * "SOL/USDC": single-engine scope.
+                 or fall back to ["SOL/USD"] if registry empty.
+          * "SOL/USD" / "SOL/USD" / etc: single-engine scope.
         """
         self._shadow_engines.clear()
         pairs: List[str]
         if cand.pair == "*":
-            pairs = list(self.tuner_registry.keys()) or ["SOL/USDC"]
+            pairs = list(self.tuner_registry.keys()) or ["SOL/USD"]
         else:
             pairs = [cand.pair]
 
@@ -711,16 +711,16 @@ if __name__ == "__main__":  # pragma: no cover
     tmp = Path(_tempfile.mkdtemp(prefix="hydra-shadow-smoke-"))
     print(f"[shadow smoke] store: {tmp}")
 
-    tracker = ParameterTracker(pair="SOL/USDC", save_dir=str(tmp))
+    tracker = ParameterTracker(pair="SOL/USD", save_dir=str(tmp))
     v = ShadowValidator(
-        tuner_registry={"SOL/USDC": tracker},
+        tuner_registry={"SOL/USD": tracker},
         min_trades=3,
         store_root=tmp,
     )
 
     proposed = _PC(
         change_type="param",
-        scope="pair:SOL/USDC",
+        scope="pair:SOL/USD",
         target="momentum_rsi_upper",
         current_value=70.0,
         proposed_value=75.0,
@@ -730,9 +730,9 @@ if __name__ == "__main__":  # pragma: no cover
     print(f"[shadow smoke] submitted: {cid}")
     print(f"[shadow smoke] active: {v.current().id if v.current() else None}")
     # Simulate 3 live closes, alternating live win / big loss so shadow wins
-    v.record_live_close("SOL/USDC", {"side": "SELL", "profit": 1.0})
-    v.record_live_close("SOL/USDC", {"side": "SELL", "profit": -5.0})
-    v.record_live_close("SOL/USDC", {"side": "SELL", "profit": 0.5})
+    v.record_live_close("SOL/USD", {"side": "SELL", "profit": 1.0})
+    v.record_live_close("SOL/USD", {"side": "SELL", "profit": -5.0})
+    v.record_live_close("SOL/USD", {"side": "SELL", "profit": 0.5})
     res = v.poll_complete()
     print(f"[shadow smoke] poll_complete: {res}")
     if res and res.verdict == "approve_eligible":

@@ -237,7 +237,7 @@ class CandleStream(BaseStream):
     WS connection, stores the latest candle per pair, and exposes it via
     latest_candle(pair). Falls back to REST ohlc() when unhealthy."""
 
-    # Reverse map: WS symbol (e.g. "SOL/USDC", "SOL/BTC") → friendly pair.
+    # Reverse map: WS symbol (e.g. "SOL/USD", "SOL/BTC") → friendly pair.
     # Built dynamically from the pairs list at init.
 
     def __init__(self, pairs: List[str], interval: int = 5, paper: bool = False):
@@ -246,7 +246,7 @@ class CandleStream(BaseStream):
         self._interval = interval
         self._latest: Dict[str, dict] = {}
         # Build symbol → friendly pair reverse map.
-        # WS v2 returns symbols like "SOL/BTC", "BTC/USDC" (canonical names).
+        # WS v2 returns symbols like "SOL/BTC", "BTC/USD" (canonical names).
         self._symbol_map: Dict[str, str] = {}
         for p in pairs:
             ws_name = KrakenCLI._resolve_ws_pair(p)

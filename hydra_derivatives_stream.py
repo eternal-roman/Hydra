@@ -6,7 +6,7 @@ HYDRA Derivatives Stream — Kraken Futures read-only poller via kraken CLI.
 HARD INVARIANT — SPOT-ONLY EXECUTION
 ════════════════════════════════════════════════════════════════════════
 Hydra trades ONLY these Kraken SPOT pairs:
-    SOL/USDC, SOL/BTC, BTC/USDC
+    SOL/<stable>, SOL/BTC, BTC/<stable> (where stable ∈ {USD, USDC, USDT})
 This module reads derivatives data (funding rates, open interest,
 mark prices, quarterly basis) via the kraken CLI's PUBLIC
 `futures tickers` subcommand. No authentication. No order placement.
@@ -37,9 +37,17 @@ Signals surfaced per spot pair:
   basis_apr_pct             : quarterly futures premium annualized
 
 Spot-pair → derivatives mapping:
-  BTC/USDC → PF_XBTUSD (perp),  FF_XBTUSD_YYMMDD (dated)
-  SOL/USDC → PF_SOLUSD (perp),  FF_SOLUSD_YYMMDD (dated)
-  SOL/BTC  → synthetic from SOL/USD and BTC/USD perps (no direct perp)
+  BTC/<stable> → PF_XBTUSD (perp),  FF_XBTUSD_YYMMDD (dated)
+  SOL/<stable> → PF_SOLUSD (perp),  FF_SOLUSD_YYMMDD (dated)
+  SOL/BTC      → synthetic from SOL/USD and BTC/USD perps (no direct perp)
+
+Kraken Futures perp symbols (PF_*) are denominated in USD regardless of
+which spot stable quote the operator is using on the spot side. So
+BTC/USD, BTC/USDC, and BTC/USDT all share the same PF_XBTUSD perp for
+funding/OI signals — the SPOT_TO_DERIVATIVES map below registers every
+stable variant explicitly so the lookup is O(1) and deliberate (no
+implicit "any stable will work" — adding USDT support means adding the
+USDT entries here).
 """
 
 import json
@@ -53,9 +61,18 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
 # Spot pair → derivatives metadata. Do NOT add order-placement endpoints here.
+# Kraken Futures has one perp per (base, USD-side) — PF_XBTUSD covers BTC
+# regardless of which stable the spot pair uses, etc. We register every
+# stable variant explicitly so the map stays O(1) and the supported
+# universe is deliberate (adding USDT means adding USDT rows below).
 SPOT_TO_DERIVATIVES: Dict[str, Dict[str, object]] = {
+    # USD-quoted spot pairs (v2.19+ default)
+    "BTC/USD":  {"perp": "PF_XBTUSD", "quarterly_prefix": "FF_XBTUSD"},
+    "SOL/USD":  {"perp": "PF_SOLUSD", "quarterly_prefix": "FF_SOLUSD"},
+    # USDC-quoted spot pairs (pre-v2.19 default; still supported as opt-in)
     "BTC/USDC": {"perp": "PF_XBTUSD", "quarterly_prefix": "FF_XBTUSD"},
     "SOL/USDC": {"perp": "PF_SOLUSD", "quarterly_prefix": "FF_SOLUSD"},
+    # Bridge — no direct perp, synthetic from SOL/USD ÷ BTC/USD
     "SOL/BTC":  {"perp": None, "quarterly_prefix": None, "synthetic": True},
 }
 
