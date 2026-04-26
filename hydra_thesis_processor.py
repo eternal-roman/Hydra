@@ -113,7 +113,7 @@ Respond ONLY with this JSON (no other text):
   "posterior_shift": {"regime": "<MacroRegime>", "confidence": 0.0-1.0} or null,
   "checklist_updates": {"<key>": {"status": "NOT_MET|PARTIAL|MET", "notes": "1 line"}},
   "proposed_intents": [
-    {"prompt_text": "...", "pair_scope": ["BTC/USDC"], "priority": 1-5,
+    {"prompt_text": "...", "pair_scope": ["BTC/USD"], "priority": 1-5,
      "expires_at": "ISO-8601 or null"}
   ],
   "new_evidence": [

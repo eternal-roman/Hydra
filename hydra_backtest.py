@@ -14,8 +14,8 @@ Public API:
 
     config = BacktestConfig(
         name="tight-rsi-in-vol",
-        pairs=("SOL/USDC",),
-        param_overrides={"SOL/USDC": {"momentum_rsi_upper": 75}},
+        pairs=("SOL/USD",),
+        param_overrides={"SOL/USD": {"momentum_rsi_upper": 75}},
         data_source="synthetic",
         data_source_params={"kind": "mean_reverting", "n_candles": 2000},
     )
@@ -48,7 +48,7 @@ from hydra_engine import (
     SignalAction,
 )
 
-HYDRA_VERSION = "2.18.1"
+HYDRA_VERSION = "2.19.0"
 
 # Reasonable defaults; enforced at config construction and runtime.
 DEFAULT_MAX_TICKS = 200_000
@@ -71,7 +71,7 @@ class BacktestConfig:
     description: str = ""
     hypothesis: str = ""
 
-    pairs: Tuple[str, ...] = ("SOL/USDC",)
+    pairs: Tuple[str, ...] = ("SOL/USD",)
     initial_balance_per_pair: float = 100.0
     candle_interval: int = 15  # minutes
 
@@ -1085,7 +1085,7 @@ def new_experiment_id() -> str:
 def make_quick_config(
     *,
     name: str = "quick",
-    pairs: Tuple[str, ...] = ("SOL/USDC",),
+    pairs: Tuple[str, ...] = ("SOL/USD",),
     n_candles: int = 500,
     kind: str = "gbm",
     seed: int = 42,

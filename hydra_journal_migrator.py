@@ -10,7 +10,7 @@ New shape — one entry per placed order:
 
     {
       "placed_at":       ISO-8601 with microseconds,
-      "pair":            "SOL/USDC",
+      "pair":            "SOL/USD",
       "side":            "BUY" | "SELL",
       "intent":          {amount, limit_price, post_only, order_type, paper},
       "decision":        {strategy, regime, reason, confidence, params_at_entry,

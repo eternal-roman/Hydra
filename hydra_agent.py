@@ -3,12 +3,15 @@
 HYDRA Agent — Kraken CLI Integration Layer (Live Trading)
 
 Connects the HYDRA engine to live Kraken market data via kraken-cli (WSL).
-Supports live trading on SOL/USDC, SOL/BTC, and BTC/USDC.
+Supports live trading on SOL/USD, SOL/BTC, and BTC/USD by default; the
+active triangle's stable quote (USD / USDC / USDT) is selected by
+--pairs at agent boot.
 Broadcasts state over WebSocket for the React dashboard.
 
 Usage:
-    python hydra_agent.py --pairs SOL/USDC,SOL/BTC --balance 100 --duration 600
-    python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60
+    python hydra_agent.py --pairs SOL/USD,SOL/BTC --balance 100 --duration 600
+    python hydra_agent.py --pairs SOL/USD,SOL/BTC,BTC/USD --interval 60
+    python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60   # opt back into USDC
 """
 
 import subprocess
@@ -69,6 +72,8 @@ except ImportError:
     HAS_BRAIN = False
 
 from hydra_kraken_cli import KrakenCLI
+from hydra_pair_registry import STABLE_QUOTES
+from hydra_config import TradingTriangle
 from hydra_ws_server import DashboardBroadcaster
 from hydra_streams import BaseStream, CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
 
@@ -82,10 +87,10 @@ class HydraAgent:
     engine, executes real trades, and broadcasts state to the dashboard.
     """
 
-    # Pair configuration
-    PRIMARY_PAIR = "SOL/USDC"       # Main trading pair
-    CROSS_PAIR = "SOL/BTC"          # Opportunistic regime-driven swaps
-    BTC_PAIR = "BTC/USDC"           # BTC priced in stablecoin
+    # Pair configuration. Pre-v2.19 these were hardcoded class constants
+    # ("SOL/USDC", "BTC/USDC"); they're now derived per-instance from
+    # the active TradingTriangle (`self.triangle.stable_sol`, .stable_btc,
+    # .bridge) so a quote-currency change is a one-line config flip.
     ORDER_JOURNAL_CAP = 2000        # Bound in-memory order journal
     SNAPSHOT_EVERY_N_TICKS = 120    # ~10h at 300s ticks (also triggers immediately on journal writes)
 
@@ -104,6 +109,11 @@ class HydraAgent:
         json_stream: bool = False,
     ):
         self.pairs = pairs
+        # Derive the active TradingTriangle from the pair list. None when
+        # the pair list doesn't form a complete triangle (e.g. tests that
+        # spin up a single-pair agent for resume reconciliation). Code
+        # paths that require role-based lookup must guard on `self.triangle`.
+        self.triangle: Optional[TradingTriangle] = self._derive_triangle(pairs)
         self.initial_balance = initial_balance
         self._competition_start_balance = None  # Set once on first start, persisted across resumes
         # Portfolio-level drawdown (v2.16.2): per-pair engine.max_drawdown is a
@@ -578,20 +588,24 @@ class HydraAgent:
         except Exception:
             qi["minutes_since_last_trade"] = None
 
-        # Cross-pair correlation: SOL/USDC <-> BTC/USDC, symmetric on both pairs.
+        # Cross-pair correlation: stable_sol <-> stable_btc, symmetric on both pairs.
         try:
             qi["cross_pair_corr_24h"] = self._compute_cross_pair_corr_24h()
         except Exception:
             qi["cross_pair_corr_24h"] = None
 
     def _compute_cross_pair_corr_24h(self) -> Optional[float]:
-        """Derive 15m-candle log-returns for BTC/USDC and SOL/USDC, align
+        """Derive 15m-candle log-returns for stable_btc and stable_sol, align
         by index, compute Pearson. Returns None if either engine missing
-        or insufficient samples."""
+        or insufficient samples (also when self.triangle is None — partial
+        triangles can't compute cross-pair stats)."""
         import math
         from hydra_rm_features import cross_pair_corr
-        btc = self.engines.get("BTC/USDC")
-        sol = self.engines.get("SOL/USDC")
+        triangle = getattr(self, "triangle", None)
+        if triangle is None:
+            return None
+        btc = self.engines.get(triangle.stable_btc.cli_format)
+        sol = self.engines.get(triangle.stable_sol.cli_format)
         if btc is None or sol is None:
             return None
         btc_c = self._engine_candles_as_dicts(btc)
@@ -677,14 +691,74 @@ class HydraAgent:
             print(f"  [SNAPSHOT] Save failed: {e}")
 
     @staticmethod
+    def _detect_snapshot_stable_quote(snapshot: dict) -> Optional[str]:
+        """Detect the stable quote a persisted snapshot was written under.
+
+        Scans `pairs` for the first stable-quoted entry; returns the
+        uppercased quote ("USDC", "USD", "USDT") or None when the
+        snapshot has no stable-quoted pairs (e.g. a SOL/BTC-only
+        backtest). Used by `_load_snapshot` to decide whether to
+        invoke the state migrator.
+        """
+        pairs = snapshot.get("pairs") or []
+        if not isinstance(pairs, list):
+            return None
+        for p in pairs:
+            if not isinstance(p, str) or "/" not in p:
+                continue
+            quote = p.split("/", 1)[1].strip().upper()
+            if quote in STABLE_QUOTES:
+                return quote
+        return None
+
+    @staticmethod
+    def _derive_triangle(pairs: List[str]) -> Optional[TradingTriangle]:
+        """Best-effort triangle derivation from a pair-symbol list.
+
+        Used internally by `__init__` so role-based lookups
+        (`self.triangle.stable_sol`, etc.) work without the caller having
+        to construct a TradingTriangle explicitly. Returns None when the
+        list doesn't contain a complete triangle (tests with a single
+        pair, partial-triangle backtests). Callers must guard on None.
+        """
+        sol_stable = None
+        btc_stable = None
+        bridge = None
+        for sym in pairs:
+            p = KrakenCLI.registry.get(sym)
+            if p is None:
+                continue
+            if p.base == "SOL" and p.is_stable_quoted:
+                sol_stable = p
+            elif p.base == "BTC" and p.is_stable_quoted:
+                btc_stable = p
+            elif p.base == "SOL" and p.quote == "BTC":
+                bridge = p
+        if (sol_stable is not None and btc_stable is not None
+                and bridge is not None
+                and sol_stable.quote == btc_stable.quote):
+            try:
+                return TradingTriangle(
+                    stable_sol=sol_stable,
+                    stable_btc=btc_stable,
+                    bridge=bridge,
+                    quote=sol_stable.quote,
+                )
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
     def _normalize_pair_name(pair: str) -> str:
         """Normalize legacy XBT pair names to BTC canonical form.
 
         Handles snapshot/journal data written before the XBT→BTC migration.
+        Delegates to the PairRegistry, which knows every alias dialect.
         """
-        if "XBT" not in pair:
+        if not pair:
             return pair
-        return pair.replace("XBT/USDC", "BTC/USDC").replace("SOL/XBT", "SOL/BTC").replace("XBT/", "BTC/")
+        p = KrakenCLI.registry.get(pair)
+        return p.cli_format if p else pair
 
     @staticmethod
     def _normalize_journal_pairs(journal: list):
@@ -709,6 +783,50 @@ class HydraAgent:
             if snapshot.get("version") != 1:
                 print(f"  [SNAPSHOT] Unknown version {snapshot.get('version')}, skipping.")
                 return
+            # v2.19: quote-currency migration. If the snapshot's recorded
+            # pairs use a different stable quote than the active triangle
+            # (e.g. USDC snapshot, USD-default agent), rewrite the pair-
+            # keyed fields so engine state, regime history, and OI deques
+            # are preserved across the quote flip.
+            #
+            # Pattern: migrate a deep copy, persist the copy, only
+            # rebind `snapshot` once the disk write succeeded. If
+            # persist fails we still proceed with the migrated copy in
+            # memory (otherwise the engines wouldn't restore — their
+            # keys are already on the active-quote side); but the log
+            # makes the desync window explicit so the operator sees it.
+            # The next regular `_save_snapshot` tick reconciles disk
+            # from `self.engines`, so the window is at most one save
+            # cycle.
+            triangle = getattr(self, "triangle", None)
+            if triangle is not None:
+                target_quote = triangle.quote
+                source_quote = self._detect_snapshot_stable_quote(snapshot)
+                if source_quote and source_quote != target_quote:
+                    import copy as _copy
+                    from hydra_state_migrator import migrate_snapshot
+                    candidate = _copy.deepcopy(snapshot)
+                    migrate_snapshot(
+                        candidate,
+                        source_quote=source_quote,
+                        target_quote=target_quote,
+                    )
+                    persist_ok = False
+                    try:
+                        tmp = path + ".tmp"
+                        with open(tmp, "w") as f:
+                            json.dump(candidate, f, default=str)
+                        os.replace(tmp, path)
+                        persist_ok = True
+                    except OSError as e:
+                        print(f"  [SNAPSHOT] Post-migration write failed: {e}; "
+                              f"in-memory state will be used this session "
+                              f"and disk will reconcile on next save tick.")
+                    snapshot = candidate
+                    if persist_ok:
+                        print(f"  [SNAPSHOT] Migrated pair keys "
+                              f"{source_quote} → {target_quote} "
+                              f"(engine state preserved).")
             # Normalize legacy XBT pair names in engine keys
             engines_raw = snapshot.get("engines", {})
             engines = {self._normalize_pair_name(k): v for k, v in engines_raw.items()}
@@ -1108,7 +1226,7 @@ class HydraAgent:
             else:
                 print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
 
-        # Load dynamic pair constants from Kraken (PRICE_DECIMALS, ordermin, costmin).
+        # Load dynamic pair constants from Kraken (overlays the PairRegistry).
         # Hardcoded constants remain as fallbacks for any pair not returned.
         if not self.paper:
             print("\n  [HYDRA] Loading pair constants from Kraken...")
@@ -1282,7 +1400,7 @@ class HydraAgent:
                 # Phase 0.5: Re-evaluate per-engine `tradable` flags from the
                 # latest balance snapshot. Flips an engine to informational-
                 # only when its quote currency is depleted, or re-activates
-                # it when the operator (or a BTC/USDC fill) tops it back up.
+                # it when the operator (or a stable_btc fill) tops it back up.
                 # Cheap dict lookup; transition logging only, no tick spam.
                 if not self.paper:
                     self._refresh_tradable_flags()
@@ -1585,7 +1703,7 @@ class HydraAgent:
                                   f"size_mult={ai.get('size_multiplier', 1.0):.2f}, "
                                   f"brain={ai.get('action', '?')})")
                         if trade:
-                            is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
+                            is_usd_pair = (pair.split("/")[1].upper() if "/" in pair else "") in STABLE_QUOTES
                             value_decimals = 2 if is_usd_pair else 8
                             state["last_trade"] = {
                                 "action": trade.action,
@@ -1658,7 +1776,7 @@ class HydraAgent:
                     engine = self.engines[pair]
                     current_price = engine.prices[-1] if engine.prices else 0
                     equity = engine.balance + (engine.position.size * current_price)
-                    is_usd_pair = pair.endswith("USDC") or pair.endswith("USD")
+                    is_usd_pair = (pair.split("/")[1].upper() if "/" in pair else "") in STABLE_QUOTES
                     vd = 2 if is_usd_pair else 8
                     pnl_pct = ((equity - engine.initial_balance) / engine.initial_balance * 100) if engine.initial_balance > 0 else 0
                     wl = engine.win_count + engine.loss_count
@@ -2093,17 +2211,18 @@ class HydraAgent:
             price = state.get("price", 0)
 
             # Net asset exposure across the triangle.
-            # Spot positions: holding SOL (whether purchased via USDC or BTC)
-            # only adds SOL exposure. The BTC spent on a SOL/BTC buy is
-            # already reflected in the account's BTC balance, not a
-            # synthetic "short BTC" obligation — this is spot trading, not
-            # margin. BTC exposure comes exclusively from BTC/USDC holdings.
-            if pair == "SOL/USDC":
-                sol_exposure += pos
-            elif pair == "SOL/BTC":
-                sol_exposure += pos
-            elif pair == "BTC/USDC":
-                btc_exposure += pos
+            # Spot positions: holding SOL (whether purchased via stable
+            # quote or BTC) only adds SOL exposure. The BTC spent on a
+            # SOL/BTC buy is already reflected in the account's BTC
+            # balance, not a synthetic "short BTC" obligation — this is
+            # spot trading, not margin. BTC exposure comes exclusively
+            # from the stable_btc pair.
+            pair_obj = KrakenCLI.registry.get(pair)
+            if pair_obj is not None:
+                if pair_obj.base == "SOL":
+                    sol_exposure += pos
+                elif pair_obj.base == "BTC" and pair_obj.is_stable_quoted:
+                    btc_exposure += pos
 
             # Sibling pair summaries (exclude current pair)
             if pair != current_pair:
@@ -2401,17 +2520,17 @@ class HydraAgent:
                 cost_estimate = amount * (trade.get("price", 0) or 0)
                 costmin = PositionSizer.MIN_COST.get(quote, 0.5)
                 if real_bal < costmin or (cost_estimate > 0 and real_bal < cost_estimate):
-                    is_usd = quote in ("USDC", "USD")
+                    is_usd = quote in STABLE_QUOTES
                     fmt = f"${real_bal:,.2f}" if is_usd else f"{real_bal:.8f}"
                     cost_fmt = f"${cost_estimate:,.2f}" if is_usd else f"{cost_estimate:.8f}"
                     engine = self.engines.get(pair)
                     # Post-v2.11.0 this path should be unreachable for non-
-                    # USD-quoted pairs — the engine's `tradable` flag and
+                    # stable-quoted pairs — the engine's `tradable` flag and
                     # _refresh_tradable_flags() combine to prevent sizing
                     # against a phantom balance. If we're here with
                     # tradable=True, it's a race with BalanceStream or a
                     # regression; surface sharply so it's easy to spot.
-                    if engine is not None and getattr(engine, "tradable", True) and quote not in ("USDC", "USD"):
+                    if engine is not None and getattr(engine, "tradable", True) and quote not in STABLE_QUOTES:
                         print(f"  [TRADE] Unexpected insufficient {quote} balance on "
                               f"tradable=True engine {pair} — likely BalanceStream race "
                               f"or regression. real={fmt} cost={cost_fmt}")
@@ -3030,25 +3149,34 @@ class HydraAgent:
             if prev_regime and prev_regime != current_regime:
                 print(f"  [REGIME] {pair}: {prev_regime} -> {current_regime}")
 
-                # Opportunistic cross-pair logic:
-                # If SOL/USDC shifts to TREND_DOWN and we hold SOL, consider selling SOL for BTC
-                if pair == "SOL/USDC" and current_regime == "TREND_DOWN":
-                    if "SOL/BTC" in all_states:
-                        btc_regime = all_states["SOL/BTC"].get("regime")
-                        if btc_regime in ("TREND_UP", "RANGING"):
-                            print(f"  [REGIME] Cross-pair opportunity: SOL weakening vs USDC but "
-                                  f"SOL/BTC is {btc_regime} — consider selling SOL for BTC")
-
-                # If SOL/USDC shifts to TREND_UP, consider buying SOL with USDC
-                if pair == "SOL/USDC" and current_regime == "TREND_UP":
-                    print(f"  [REGIME] SOL trending up — MOMENTUM strategy active")
+                # Opportunistic cross-pair logic. Both rules key off the
+                # stable-quoted SOL pair and reference the bridge — exactly
+                # the roles bound by `self.triangle`. Skip when triangle
+                # is partial (single-pair tests, partial backtests) or
+                # missing (object.__new__-bypass tests).
+                triangle = getattr(self, "triangle", None)
+                if triangle is not None:
+                    sol_stable_key = triangle.stable_sol.cli_format
+                    bridge_key = triangle.bridge.cli_format
+                    quote_label = triangle.quote
+                    # If stable_sol shifts to TREND_DOWN and we hold SOL,
+                    # consider selling SOL for BTC.
+                    if pair == sol_stable_key and current_regime == "TREND_DOWN":
+                        if bridge_key in all_states:
+                            btc_regime = all_states[bridge_key].get("regime")
+                            if btc_regime in ("TREND_UP", "RANGING"):
+                                print(f"  [REGIME] Cross-pair opportunity: SOL weakening vs {quote_label} but "
+                                      f"{bridge_key} is {btc_regime} — consider selling SOL for BTC")
+                    # If stable_sol shifts to TREND_UP, MOMENTUM is active.
+                    if pair == sol_stable_key and current_regime == "TREND_UP":
+                        print(f"  [REGIME] SOL trending up — MOMENTUM strategy active")
 
             self.prev_regimes[pair] = current_regime
 
     def _set_engine_balances(self, per_pair_usd: float):
         """Set engine balances and the per-engine `tradable` flag.
 
-        USDC/USD-quoted pairs get a 1/N slice of the tradable USD balance.
+        Stable-quoted pairs (USD/USDC/USDT) get a 1/N slice of the tradable USD balance.
 
         Non-USD-quoted pairs (e.g. SOL/BTC) previously received a USD→quote
         converted slice, which produced a "phantom" balance when the account
@@ -3074,7 +3202,7 @@ class HydraAgent:
             engine = self.engines[pair]
             quote = pair.split("/")[1]
             current_price = engine.prices[-1] if engine.prices else 0
-            if quote in ("USDC", "USD"):
+            if quote in STABLE_QUOTES:
                 equity = per_pair_usd + engine.position.size * current_price
                 engine.balance = per_pair_usd
                 engine.initial_balance = equity
@@ -3128,22 +3256,22 @@ class HydraAgent:
 
         Cheap: reads the latest BalanceStream snapshot (push-based, no
         REST call). Transitions are logged exactly once (False→True and
-        True→False). When a pair flips False→True — e.g. a BTC/USDC BUY
+        True→False). When a pair flips False→True — e.g. a stable_btc BUY
         just filled, so we now hold BTC — the engine's balance and equity
         baseline are re-seeded from the real holding so its circuit
         breaker and P&L calculations start clean from that point.
 
-        USDC/USD-quoted pairs are skipped because their tradability
-        depends on the shared tradable USD pool, not on holding a
-        specific currency.
+        Stable-quoted pairs (USD/USDC/USDT) are skipped because their
+        tradability depends on the shared tradable USD pool, not on
+        holding a specific currency.
         """
         for pair in self.pairs:
             engine = self.engines[pair]
             quote = pair.split("/")[1]
-            if quote in ("USDC", "USD"):
+            if quote in STABLE_QUOTES:
                 if not engine.tradable:
-                    # USD pairs should never be informational-only; if they
-                    # somehow are, re-enable them. Balance unchanged.
+                    # Stable-quoted pairs should never be informational-only;
+                    # if they somehow are, re-enable them. Balance unchanged.
                     engine.tradable = True
                 continue
             real_quote = self._get_real_quote_balance(quote) or 0.0
@@ -3169,17 +3297,24 @@ class HydraAgent:
     def _get_asset_prices(self) -> dict:
         """Get current USD prices for known assets from engine state.
         Returns {canonical_asset: usd_price}."""
-        prices = {"USDC": 1.0, "USD": 1.0}
+        # Seed unit-prices for every supported stable quote (any unit value
+        # in STABLE_QUOTES is by definition $1 for portfolio valuation).
+        prices = {q: 1.0 for q in STABLE_QUOTES}
         for pair, engine in self.engines.items():
             if engine.prices:
                 base, quote = pair.split("/")
-                if quote in ("USDC", "USD"):
+                if quote in STABLE_QUOTES:
                     prices[base] = engine.prices[-1]
-        # Derive BTC price from SOL/BTC if BTC/USDC not available
+        # Derive BTC price from the bridge if no stable_btc pair available.
+        # getattr guards tests that instantiate via object.__new__(HydraAgent)
+        # (bypasses __init__ and therefore never sets self.triangle).
+        triangle = getattr(self, "triangle", None)
         if "BTC" not in prices and "SOL" in prices:
-            sol_btc_engine = self.engines.get("SOL/BTC")
-            if sol_btc_engine and sol_btc_engine.prices:
-                sol_per_btc = sol_btc_engine.prices[-1]
+            bridge_key = (triangle.bridge.cli_format if triangle is not None
+                          else "SOL/BTC")  # static fallback for triangle-less tests
+            bridge_engine = self.engines.get(bridge_key)
+            if bridge_engine and bridge_engine.prices:
+                sol_per_btc = bridge_engine.prices[-1]
                 if sol_per_btc > 0:
                     prices["BTC"] = prices["SOL"] / sol_per_btc
         return prices
@@ -3229,26 +3364,27 @@ class HydraAgent:
             fees_taker = {}
         if not isinstance(fees_maker, dict):
             fees_maker = {}
-        # Kraken may return fee keys in several forms ("SOLUSDC", "SOL/USDC", "BTCUSDC",
-        # "XXBTZUSD" historically). Build a forgiving reverse map that accepts both the
-        # PAIR_MAP-resolved form and the slashless form of the original friendly pair.
-        pair_reverse = {}
-        for p in getattr(self, "pairs", []):
-            resolved = KrakenCLI._resolve_pair(p)
-            pair_reverse[resolved] = p
-            pair_reverse[p.replace("/", "")] = p  # slashless fallback ("SOLUSDC" → "SOL/USDC")
-            pair_reverse[p] = p                   # passthrough
-        # Add legacy XBT alias forms so Kraken fee keys like "XBTUSDC", "SOLXBT" resolve
-        for alias, target in KrakenCLI.PAIR_MAP.items():
-            if alias != target:
-                for p in getattr(self, "pairs", []):
-                    if KrakenCLI._resolve_pair(p) == target:
-                        pair_reverse[alias] = p
-                        pair_reverse[alias.replace("/", "")] = p
-                        break
+        # Kraken may return fee keys in several forms ("SOLUSD", "SOL/USD", "BTCUSD",
+        # "XXBTZUSD" historically). The PairRegistry already knows every alias
+        # dialect, so we just resolve raw_key → friendly via the registry,
+        # falling back to raw_key for unknown pairs. A None resolution is
+        # logged once per raw_key per session to surface API drift early
+        # (e.g. Kraken adds a new pair format, or our registry is stale).
         seen_keys = set(fees_taker.keys()) | set(fees_maker.keys())
+        unresolved_seen = getattr(self, "_unresolved_fee_keys_logged", None)
+        if unresolved_seen is None:
+            unresolved_seen = set()
+            try:
+                self._unresolved_fee_keys_logged = unresolved_seen
+            except Exception:
+                pass  # object.__new__() bypass test path; non-fatal
         for raw_key in seen_keys:
-            friendly = pair_reverse.get(raw_key, raw_key)
+            resolved = KrakenCLI.registry.get(raw_key)
+            if resolved is None and raw_key not in unresolved_seen:
+                unresolved_seen.add(raw_key)
+                print(f"  [FEE-TIER] Unrecognized Kraken fee-key {raw_key!r} — "
+                      f"registry alias dictionary may be stale.")
+            friendly = resolved.cli_format if resolved else raw_key
             taker_entry = fees_taker.get(raw_key) or {}
             maker_entry = fees_maker.get(raw_key) or {}
             taker_pct = None
@@ -3484,11 +3620,12 @@ class HydraAgent:
         s = state["signal"]
         p = state["portfolio"]
         pos = state["position"]
-        is_usd = pair.endswith("USDC") or pair.endswith("USD")
+        quote = pair.split("/")[1].upper() if "/" in pair else ""
+        is_usd = quote in STABLE_QUOTES
         cur = "$" if is_usd else ""
         # BTC-quoted pairs trade at ~0.001–0.01; 4 decimals loses precision
         # (SOL/BTC ~0.00148 would render as "0.0015"). Use 8 decimals for
-        # crypto-quoted pairs, 4 for USD/USDC pairs.
+        # crypto-quoted pairs, 4 for stable-quoted pairs.
         pd = 4 if is_usd else 8
 
         signal_icon = {"BUY": "^", "SELL": "v", "HOLD": "-"}.get(s["action"], "?")
@@ -3556,7 +3693,7 @@ class HydraAgent:
                 state = lifecycle.get("state", "?")
                 status_icon = "OK" if state == "FILLED" else ("~~" if state == "PARTIALLY_FILLED" else "XX")
                 t_pair = entry.get("pair", "?")
-                t_cur = "$" if t_pair.endswith("USDC") or t_pair.endswith("USD") else ""
+                t_cur = "$" if (t_pair.split("/")[1].upper() if "/" in t_pair else "") in STABLE_QUOTES else ""
                 intent = entry.get("intent") or {}
                 amount = intent.get("amount", 0)
                 price = lifecycle.get("avg_fill_price") or intent.get("limit_price") or 0
@@ -3687,7 +3824,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.18.1",
+            "version": "2.19.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
@@ -3721,8 +3858,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="HYDRA — Live Regime-Adaptive Trading Agent for Kraken CLI",
     )
-    parser.add_argument("--pairs", type=str, default="SOL/USDC,SOL/BTC,BTC/USDC",
-                        help="Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)")
+    parser.add_argument("--pairs", type=str, default="SOL/USD,SOL/BTC,BTC/USD",
+                        help="Comma-separated trading pairs (default: SOL/USD,SOL/BTC,BTC/USD; v2.19+ flipped from USDC to USD)")
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,

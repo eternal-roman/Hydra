@@ -79,8 +79,17 @@ const fmtPrice = (p, prefix = "$") => {
   return `${prefix}${p.toFixed(2)}`;
 };
 
-// Determine currency prefix for a pair — "$" for USD-quoted, "" for BTC-quoted
-const pairPrefix = (pair) => (pair && (pair.endsWith("USDC") || pair.endsWith("USD"))) ? "$" : "";
+// Stable-quote membership — mirrors hydra_pair_registry.STABLE_QUOTES.
+// Adding a new dollar-equivalent stable quote (e.g. PYUSD) is a one-line
+// edit here AND in the engine's STABLE_QUOTES set, in lockstep.
+const STABLE_QUOTES = new Set(["USD", "USDC", "USDT"]);
+
+// Determine currency prefix for a pair — "$" for stable-quoted, "" for crypto-quoted.
+const pairPrefix = (pair) => {
+  if (!pair || !pair.includes("/")) return "";
+  const quote = pair.split("/")[1].toUpperCase();
+  return STABLE_QUOTES.has(quote) ? "$" : "";
+};
 
 const fmtInd = (v) => {
   if (v === undefined || v === null) return "—";
@@ -2680,8 +2689,12 @@ function PendingProposalsPanel({ proposals, sendMessage, onBacktest }) {
   );
 }
 
-function LaddersPanel({ ladders, sendMessage }) {
-  const [pair, setPair] = useState("BTC/USDC");
+function LaddersPanel({ ladders, sendMessage, livePairs = [] }) {
+  // Default selected pair: first BTC-quoted-stable in livePairs (matches
+  // the pre-v2.19 hardcoded "BTC/USDC" intent), falling back to the first
+  // available pair, falling back to "BTC/USD" (v2.19+ default).
+  const defaultPair = livePairs.find((p) => p.startsWith("BTC/")) || livePairs[0] || "BTC/USD";
+  const [pair, setPair] = useState(defaultPair);
   const [side, setSide] = useState("BUY");
   const [total, setTotal] = useState("");
   const [nRungs, setNRungs] = useState(5);
@@ -2799,7 +2812,7 @@ function LaddersPanel({ ladders, sendMessage }) {
             <FieldLabel labelSize={9}>Pair</FieldLabel>
             <StyledSelect
               value={pair} onChange={setPair}
-              options={["BTC/USDC", "SOL/USDC", "SOL/BTC"].map((v) => ({ value: v, label: v }))}
+              options={(livePairs.length ? livePairs : ["BTC/USD", "SOL/USD", "SOL/BTC"]).map((v) => ({ value: v, label: v }))}
             />
           </div>
           <div>
@@ -2866,7 +2879,7 @@ function LaddersPanel({ ladders, sendMessage }) {
   );
 }
 
-function IntentPromptsPanel({ intents, max, sendMessage }) {
+function IntentPromptsPanel({ intents, max, sendMessage, livePairs = [] }) {
   const [draft, setDraft] = useState("");
   const [scope, setScope] = useState("*");
   const [priority, setPriority] = useState(3);
@@ -2949,9 +2962,9 @@ function IntentPromptsPanel({ intents, max, sendMessage }) {
             onChange={setScope}
             options={[
               { value: "*", label: "all pairs" },
-              { value: "BTC/USDC", label: "BTC/USDC only" },
-              { value: "SOL/USDC", label: "SOL/USDC only" },
-              { value: "SOL/BTC", label: "SOL/BTC only" },
+              ...(livePairs.length ? livePairs : ["BTC/USD", "SOL/USD", "SOL/BTC"]).map(
+                (p) => ({ value: p, label: `${p} only` })
+              ),
             ]}
           />
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2980,7 +2993,7 @@ function IntentPromptsPanel({ intents, max, sendMessage }) {
   );
 }
 
-function ThesisPanel({ thesisState, sendMessage, pendingProposals, onBacktest }) {
+function ThesisPanel({ thesisState, sendMessage, pendingProposals, onBacktest, livePairs = [] }) {
   // Before the first thesis_state response, show a loading shell.
   if (thesisState == null) {
     return (
@@ -3229,11 +3242,13 @@ function ThesisPanel({ thesisState, sendMessage, pendingProposals, onBacktest })
           intents={thesisState.active_intents || []}
           max={knobs.intent_prompt_max_active ?? 5}
           sendMessage={sendMessage}
+          livePairs={livePairs}
         />
         <LaddersPanel
           ladders={thesisState.active_ladders || []}
           max={knobs.max_active_ladders_per_pair ?? 3}
           sendMessage={sendMessage}
+          livePairs={livePairs}
         />
         <ThesisCard title="Thesis Timeline (Phase B)" muted>
           <div style={{ fontSize: 12, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.6 }}>
@@ -4344,6 +4359,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 thesisState={thesisState}
                 sendMessage={sendMessage}
                 pendingProposals={pendingProposals}
+                livePairs={Object.keys(state?.pairs || {})}
                 onBacktest={(p) => {
                   setStagedProposal(p);
                   setActiveTab("RESEARCH");
@@ -5033,7 +5049,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.18.1 | kraken-cli v0.2.3 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.19.0 | kraken-cli v0.3.2 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]

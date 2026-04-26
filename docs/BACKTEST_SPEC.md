@@ -156,7 +156,7 @@ class BacktestConfig:
     hypothesis: str = ""                              # freeform human/agent text
 
     # Universe
-    pairs: Tuple[str, ...] = ("SOL/USDC", "SOL/BTC", "BTC/USDC")
+    pairs: Tuple[str, ...] = ("SOL/USD", "SOL/BTC", "BTC/USD")
     initial_balance_per_pair: float = 100.0
     candle_interval: int = 15                          # minutes
 
@@ -345,7 +345,7 @@ class ReviewDecision:
 @dataclass
 class ProposedChange:
     change_type: str                                   # "param" | "code"
-    scope: str                                         # "global" | "pair:SOL/USDC" | "regime:VOLATILE"
+    scope: str                                         # "global" | "pair:SOL/USD" | "regime:VOLATILE"
     target: str                                        # param name or file:line
     current_value: Any
     proposed_value: Any
@@ -848,11 +848,11 @@ Summoned automatically when a backtest starts. Slides in from right, takes right
 │  LIVE AGENT          │ │ BACKTEST OBSERVER          │
 │  (pinned top)        │ │ Experiment: brain-analyst  │
 │                      │ │ "Tight RSI in VOL"         │
-│  SOL/USDC  TREND_UP  │ │ Hypothesis: ...            │
+│  SOL/USD  TREND_UP  │ │ Hypothesis: ...            │
 │  BUY 0.72            │ │ Progress: 67% (t=4821/7200)│
 │  +$4.20/+1.2%        │ │ Speed: 60x  [▶ PAUSE]      │
 │                      │ │                            │
-│  BTC/USDC  RANGING   │ │ SOL/USDC  TREND_UP (sim)   │
+│  BTC/USD  RANGING   │ │ SOL/USD  TREND_UP (sim)   │
 │  HOLD                │ │ BUY 0.81 (sim)             │
 │                      │ │ +$12.40/+4.7% (sim)        │
 │                      │ │                            │
@@ -974,7 +974,7 @@ If improvement is concentrated in one regime (gate 7 fails), the reviewer may NO
 
 ### 8.3 Scope downgrade: single-pair concentration
 
-Similar: if `pairs_improved == 1` out of 3, reviewer recommends `pair:SOL/USDC` (or whichever) scope, logged as `CODE_REVIEW`.
+Similar: if `pairs_improved == 1` out of 3, reviewer recommends `pair:SOL/USD` (or whichever) scope, logged as `CODE_REVIEW`.
 
 ### 8.4 Self-consistency
 

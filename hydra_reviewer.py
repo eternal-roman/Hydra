@@ -233,7 +233,7 @@ Respond ONLY with this JSON (no other text):
   "proposed_changes": [
     {
       "change_type": "param" | "code",
-      "scope": "global" | "pair:SOL/USDC" | "regime:VOLATILE",
+      "scope": "global" | "pair:SOL/USD" | "regime:VOLATILE",
       "target": "param_name or file.py:line",
       "current_value": <number or null>,
       "proposed_value": <number or null>,

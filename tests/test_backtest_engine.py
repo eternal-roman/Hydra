@@ -54,23 +54,23 @@ class TestBacktestConfig(unittest.TestCase):
         self.assertNotEqual(a.param_hash, b.param_hash)
 
     def test_param_overrides_json_roundtrip(self):
-        overrides = {"SOL/USDC": {"momentum_rsi_upper": 75.0}}
+        overrides = {"SOL/USD": {"momentum_rsi_upper": 75.0}}
         cfg = make_quick_config(name="o", overrides=overrides)
         self.assertEqual(cfg.param_overrides, overrides)
 
 
 class TestSyntheticSource(unittest.TestCase):
     def test_synthetic_is_deterministic(self):
-        a = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USDC"))
-        b = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USDC"))
+        a = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USD"))
+        b = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USD"))
         self.assertEqual(len(a), 50)
         for ca, cb in zip(a, b):
             self.assertEqual(ca.close, cb.close)
             self.assertEqual(ca.high, cb.high)
 
     def test_synthetic_different_pairs_different_series(self):
-        a = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USDC"))
-        b = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("BTC/USDC"))
+        a = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("SOL/USD"))
+        b = list(SyntheticSource(kind="gbm", n_candles=50, seed=42).iter_candles("BTC/USD"))
         closes_a = [c.close for c in a]
         closes_b = [c.close for c in b]
         self.assertNotEqual(closes_a, closes_b)
@@ -88,7 +88,7 @@ class TestSyntheticSource(unittest.TestCase):
 class TestSimulatedFiller(unittest.TestCase):
     def _order(self, side="BUY", limit_price=100.0, size=1.0):
         return PendingOrder(
-            pair="SOL/USDC",
+            pair="SOL/USD",
             side=side,
             limit_price=limit_price,
             size=size,
@@ -154,7 +154,7 @@ class TestBacktestRunner(unittest.TestCase):
         result = BacktestRunner(cfg).run()
         self.assertEqual(result.status, "complete")
         self.assertEqual(result.candles_processed, 400)
-        self.assertGreater(len(result.equity_curve["SOL/USDC"]), 100)
+        self.assertGreater(len(result.equity_curve["SOL/USD"]), 100)
         # Metrics are populated (even if trade count is low)
         self.assertIsNotNone(result.metrics)
         self.assertGreaterEqual(result.metrics.total_trades, 0)
@@ -192,7 +192,7 @@ class TestBacktestRunner(unittest.TestCase):
     def test_multi_pair_runs_without_error(self):
         cfg = BacktestConfig(
             name="multi",
-            pairs=("SOL/USDC", "BTC/USDC"),
+            pairs=("SOL/USD", "BTC/USD"),
             data_source="synthetic",
             data_source_params_json=json.dumps({
                 "kind": "gbm", "n_candles": 200, "seed": 5, "volatility": 0.02,
@@ -202,30 +202,30 @@ class TestBacktestRunner(unittest.TestCase):
         cfg = finalize_stamps(cfg)
         result = BacktestRunner(cfg).run()
         self.assertEqual(result.status, "complete")
-        self.assertIn("SOL/USDC", result.equity_curve)
-        self.assertIn("BTC/USDC", result.equity_curve)
+        self.assertIn("SOL/USD", result.equity_curve)
+        self.assertIn("BTC/USD", result.equity_curve)
 
     def test_param_overrides_applied_to_engine(self):
         cfg = make_quick_config(
             name="po",
             n_candles=100,
             seed=1,
-            overrides={"SOL/USDC": {"momentum_rsi_upper": 78.0}},
+            overrides={"SOL/USD": {"momentum_rsi_upper": 78.0}},
         )
         runner = BacktestRunner(cfg)
-        self.assertAlmostEqual(runner.engines["SOL/USDC"].momentum_rsi_upper, 78.0)
+        self.assertAlmostEqual(runner.engines["SOL/USD"].momentum_rsi_upper, 78.0)
 
     def test_competition_mode_uses_competition_sizing(self):
         cfg = finalize_stamps(BacktestConfig(
             name="comp",
-            pairs=("SOL/USDC",),
+            pairs=("SOL/USD",),
             mode="competition",
             data_source="synthetic",
             data_source_params_json=json.dumps({"kind": "gbm", "n_candles": 50, "seed": 1, "volatility": 0.02}),
         ))
         runner = BacktestRunner(cfg)
         # Competition preset: kelly_multiplier=0.50
-        self.assertAlmostEqual(runner.engines["SOL/USDC"].sizer.kelly_multiplier, 0.50)
+        self.assertAlmostEqual(runner.engines["SOL/USD"].sizer.kelly_multiplier, 0.50)
 
     def test_live_engine_not_mutated(self):
         """I2 sanity: BacktestRunner constructs its own engines; does not take external refs."""
@@ -235,7 +235,7 @@ class TestBacktestRunner(unittest.TestCase):
         self.assertTrue(hasattr(runner, "engines"))
         # Fresh runner with same config still gets its own engine (different object)
         runner2 = BacktestRunner(cfg)
-        self.assertIsNot(runner.engines["SOL/USDC"], runner2.engines["SOL/USDC"])
+        self.assertIsNot(runner.engines["SOL/USD"], runner2.engines["SOL/USD"])
 
 
 class TestMetricHelpers(unittest.TestCase):
@@ -292,8 +292,8 @@ class TestParamHash(unittest.TestCase):
         self.assertEqual(len(h1), 64)  # SHA256 hex
 
     def test_hash_sensitive_to_overrides(self):
-        a = make_quick_config(name="a", n_candles=50, seed=1, overrides={"SOL/USDC": {"momentum_rsi_upper": 70.0}})
-        b = make_quick_config(name="b", n_candles=50, seed=1, overrides={"SOL/USDC": {"momentum_rsi_upper": 75.0}})
+        a = make_quick_config(name="a", n_candles=50, seed=1, overrides={"SOL/USD": {"momentum_rsi_upper": 70.0}})
+        b = make_quick_config(name="b", n_candles=50, seed=1, overrides={"SOL/USD": {"momentum_rsi_upper": 75.0}})
         self.assertNotEqual(a.param_hash, b.param_hash)
 
 

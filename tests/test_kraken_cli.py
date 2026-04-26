@@ -73,7 +73,7 @@ class TestVolumeArgsAndParsing:
 
     def test_volume_with_pair_list(self):
         _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/USDC", "BTC/USDC"]))
-        # BTC/USDC is resolved to BTC/USDC via PAIR_MAP
+        # BTC/USDC resolves to BTC/USDC (canonical) via the PairRegistry
         assert stub.calls == [["volume", "--pair", "SOL/USDC,BTC/USDC"]]
 
     def test_volume_resolves_pair_map(self):
@@ -106,8 +106,8 @@ class TestPriceFormat:
 
     Kraken rejects orders whose price has more meaningful decimals than
     the pair's native precision. _format_price rounds to the correct
-    number of decimals per pair before the .8f format. See
-    hydra_agent.py PRICE_DECIMALS dict."""
+    number of decimals per pair before the .8f format. The precision
+    table now lives on the PairRegistry (`Pair.price_decimals`)."""
 
     def test_solusdc_rounds_to_2_decimals(self):
         # 80.4745 would fail live Kraken with "price can only be specified up to 2 decimals"
@@ -370,11 +370,19 @@ class TestFeeTierExtraction:
         assert result["pair_fees"]["SOL/USDC"]["taker_pct"] == 0.26
 
     def test_extract_fee_tier_missing_pairs_attr(self):
-        """Agent without `pairs` set should still return a valid dict."""
+        """Agent without `pairs` set should still return a valid dict.
+
+        v2.19+ improvement: the registry-based resolution canonicalizes
+        the key regardless of whether the agent's `pairs` attr is set.
+        Pre-v2.19 the key passed through unchanged when pairs was missing,
+        leaking Kraken's slashless dialect into downstream consumers.
+        """
         agent = object.__new__(HydraAgent)
         # deliberately no pairs attr
         result = agent._extract_fee_tier({"fees": {"SOLUSDC": {"fee": "0.26"}}})
-        assert "SOLUSDC" in result["pair_fees"]  # unmapped key passthrough
+        # Canonicalized via registry — SOLUSDC is a known alias for SOL/USDC.
+        assert "SOL/USDC" in result["pair_fees"]
+        assert result["pair_fees"]["SOL/USDC"]["taker_pct"] == 0.26
 
 
 # ═══════════════════════════════════════════════════════════════

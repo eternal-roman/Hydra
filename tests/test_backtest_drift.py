@@ -70,7 +70,7 @@ class TestZeroDrift(unittest.TestCase):
         """
         engine = HydraEngine(
             initial_balance=100.0,
-            asset="SOL/USDC",
+            asset="SOL/USD",
             sizing=SIZING_CONSERVATIVE,
             candle_interval=candle_interval,
         )
@@ -91,7 +91,7 @@ class TestZeroDrift(unittest.TestCase):
 
     def test_signal_layer_matches_direct_engine_single_pair(self):
         source = SyntheticSource(kind="gbm", n_candles=250, seed=17)
-        candles = list(source.iter_candles("SOL/USDC"))
+        candles = list(source.iter_candles("SOL/USD"))
 
         direct_states = self._collect_direct(candles)
 
@@ -134,7 +134,7 @@ class TestZeroDrift(unittest.TestCase):
         from dataclasses import replace
         for seed in (1, 7, 123):
             source = SyntheticSource(kind="gbm", n_candles=150, seed=seed)
-            candles = list(source.iter_candles("SOL/USDC"))
+            candles = list(source.iter_candles("SOL/USD"))
             direct = self._collect_direct(candles)
 
             cfg = make_quick_config(name=f"drift_{seed}", n_candles=150, seed=seed)

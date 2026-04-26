@@ -45,6 +45,53 @@ class TestInit:
         coord = CrossPairCoordinator(PAIRS)
         assert coord.pairs == PAIRS
 
+    def test_legacy_list_api_derives_triangle(self):
+        """Legacy List[str] API should auto-derive a TradingTriangle when
+        the list contains a complete triangle. Audit P7-8."""
+        coord = CrossPairCoordinator(PAIRS)
+        assert coord.triangle is not None
+        assert coord.triangle.stable_sol.cli_format == "SOL/USDC"
+        assert coord.triangle.stable_btc.cli_format == "BTC/USDC"
+        assert coord.triangle.bridge.cli_format == "SOL/BTC"
+        assert coord.triangle.quote == "USDC"
+
+    def test_usd_pair_list_derives_usd_triangle(self):
+        """USD-default pair list should derive a USD triangle."""
+        coord = CrossPairCoordinator(["SOL/USD", "SOL/BTC", "BTC/USD"])
+        assert coord.triangle is not None
+        assert coord.triangle.quote == "USD"
+
+    def test_incomplete_triangle_returns_none(self):
+        """Single-pair construction (resume reconciliation) yields no
+        triangle. Audit P7-1, P7-3."""
+        coord = CrossPairCoordinator(["SOL/USDC"])
+        assert coord.triangle is None
+
+    def test_get_overrides_with_none_triangle_is_noop(self):
+        """When triangle is None (incomplete pair list), get_overrides
+        must return {} without crashing on missing role attributes.
+        Audit P7-3."""
+        coord = CrossPairCoordinator(["SOL/USDC"])
+        states = {
+            "SOL/USDC": make_state("TREND_DOWN", signal_action="SELL", position_size=1.0),
+        }
+        # Even with state that would normally trigger Rule 3, no
+        # overrides emit because the bridge/btc roles are unbound.
+        overrides = coord.get_overrides(states)
+        assert overrides == {}
+
+    def test_get_overrides_empty_pairs_is_noop(self):
+        """Pathological: empty pair list. Triangle None, overrides empty."""
+        coord = CrossPairCoordinator([])
+        assert coord.triangle is None
+        assert coord.get_overrides({}) == {}
+
+    def test_mismatched_quotes_in_pair_list_yields_no_triangle(self):
+        """Pair list with mixed stable quotes (SOL/USD + BTC/USDC) cannot
+        form a coherent triangle — the two stable legs must share quote."""
+        coord = CrossPairCoordinator(["SOL/USD", "BTC/USDC", "SOL/BTC"])
+        assert coord.triangle is None
+
 
 # ═══════════════════════════════════════════════════════════════
 # 2. REGIME HISTORY TRACKING

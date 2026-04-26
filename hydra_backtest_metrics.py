@@ -146,7 +146,7 @@ class OutOfSampleReport:
 @dataclass
 class ParamSensitivity:
     param: str
-    scope: str                    # "global" | "pair:SOL/USDC" | ...
+    scope: str                    # "global" | "pair:SOL/USD" | ...
     values: List[float]
     sharpes: List[float]
     sensitivity: float            # |slope| * (max - min) — normalized

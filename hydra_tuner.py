@@ -8,7 +8,7 @@ Conservative shift per update cycle prevents overfitting.
 
 Usage:
     from hydra_tuner import ParameterTracker
-    tracker = ParameterTracker(pair="SOL/USDC")
+    tracker = ParameterTracker(pair="SOL/USD")
     tracker.record_trade(params, "BUY", "win", profit=12.50)
     updated = tracker.update()  # returns new params if >= 20 observations
 """
@@ -69,7 +69,7 @@ class ParameterTracker:
     value observed in winning trades.
 
     Args:
-        pair: Trading pair (e.g. "SOL/USDC")
+        pair: Trading pair (e.g. "SOL/USD")
         save_dir: Directory to persist params JSON (default: cwd)
         defaults: Override default parameter values
     """

@@ -6,6 +6,159 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.19.0] — 2026-04-26
+
+Quote-currency abstraction. The default stable quote flips USDC → USD;
+the underlying refactor introduces a single source of truth for pair
+metadata, a role-based binding for the trading triangle, and a
+non-destructive snapshot migrator so existing operators preserve every
+learned engine indicator across the flip.
+
+### Why
+
+Pre-v2.19, `"USDC"` appeared **1048 times across 70 files**. Pair
+identity was bare string literals scattered across the engine, agent,
+brain, coordinator, dashboard, and every test fixture. There was no
+single place that owned "what is a pair." Switching the default quote
+or adding USDT support was a 70-file edit.
+
+After data-driven analysis (140 engine occurrences across 16 files;
+~58% mechanical / ~31% domain triangle / ~10% boundary), the
+architecture introduces three composable primitives instead of the
+config-mapping or abstract-class patterns first considered:
+
+  1. **`PairRegistry`** — runtime catalog of `Pair` value objects.
+     Bootstraps from a static fallback for offline / tests; live
+     agents overlay authoritative metadata from `kraken pairs` at
+     boot. Owns ALL alias resolution (XBT↔BTC, ZUSD↔USD, USDC.F→USDC,
+     slashed↔slashless, case-insensitive). Eliminates the four-table
+     hand-rolled alias machinery in `hydra_kraken_cli.py`.
+
+  2. **`TradingTriangle` + `HydraConfig`** — role binding. The
+     coordinator's logic ("BTC leads SOL down → defend SOL", "rotate
+     SOL→BTC when SOL/USD weakens", etc.) is written in terms of
+     ROLES — `stable_sol`, `stable_btc`, `bridge` — not literal pair
+     names. Switching the default quote is a one-line config flip,
+     not a refactor.
+
+  3. **`STABLE_QUOTES = {USD, USDC, USDT}`** — membership set replaces
+     scattered `endswith("USDC") or endswith("USD")` checks. Adding
+     USDT support is a one-line edit.
+
+The 1048 USDC references collapse to ~25 deliberate occurrences (the
+registry itself, the `BTC/USD` ↔ `BTC/USDC` perp parity in
+`SPOT_TO_DERIVATIVES`, and the legacy USDC alias path used by the
+state migrator).
+
+### Added
+
+- **`hydra_pair_registry.py`** — `Pair` frozen dataclass (cli/api/ws
+  formats, base, quote, precision, ordermin, costmin, tick_size),
+  `PairRegistry` (resolves any input form to canonical Pair),
+  `STABLE_QUOTES` set, `normalize_asset()` (handles ZUSD, XXBT,
+  USDC.F earn-flex, .B/.S/.M staked suffixes), `default_registry()`
+  static fallback. 26 unit tests.
+- **`hydra_config.py`** — `TradingTriangle(stable_sol, stable_btc,
+  bridge, quote)` role binding with `__post_init__` integrity checks;
+  `HydraConfig.from_quote(quote)` + `from_args(argparse.Namespace)`;
+  `add_config_args(parser)` registers `--quote {USD,USDC,USDT}` with
+  `HYDRA_QUOTE` env override; `DEFAULT_QUOTE = "USD"`. 19 unit tests.
+- **`hydra_state_migrator.py`** — `migrate_pair_key`,
+  `migrate_snapshot`, `migrate_snapshot_file` for one-shot quote-
+  currency migration of `hydra_session_snapshot.json`. Atomic writes,
+  idempotent (`_migrated_quote` marker), fail-soft on missing path /
+  corrupt JSON, symmetric (USDC↔USD). Preserves order_journal pair
+  fields verbatim (audit trail). 20 unit tests.
+
+### Changed
+
+- **`hydra_kraken_cli.KrakenCLI`** — pair tables (PAIR_MAP,
+  WS_PAIR_MAP, PRICE_DECIMALS, ASSET_NORMALIZE) removed; class-level
+  `registry: PairRegistry` is the single source. Public API surface
+  unchanged (_resolve_pair, _format_price, load_pair_constants,
+  apply_pair_constants still work) but internally delegates to the
+  registry. Pin bumped to kraken-cli v0.3.2 (no breaking schema
+  changes; `--asset-class` flag is canonical, `--aclass` is hidden
+  alias not used by Hydra; `relativeFundingRate` rename was internal
+  to kraken-cli's paper-trading futures, not the public `futures
+  tickers` endpoint Hydra reads).
+- **`hydra_engine.HydraEngine`** — three `is_usd_pair = endswith(...)`
+  checks collapse to `quote in STABLE_QUOTES`. PositionSizer fallback
+  default quote: `"USDC"` → `"USD"` (only triggers when caller passes
+  asset without slash; non-load-bearing).
+- **`hydra_engine.CrossPairCoordinator`** — accepts `TradingTriangle`
+  or legacy `List[str]` (auto-derives triangle). All literal pair
+  names in rule logic become `triangle.stable_sol/stable_btc/bridge`.
+  Override map keys remain pair-symbol strings (downstream
+  compatibility). 65 cross-pair tests pass unchanged via auto-derive.
+- **`hydra_agent.HydraAgent`** — derives `self.triangle` from
+  `self.pairs` at `__init__`; cross-pair correlation, exposure
+  bookkeeping, regime opportunity logging, and asset-price seeding
+  all use triangle roles + `STABLE_QUOTES` membership. The
+  `_normalize_pair_name` open-coded XBT chain becomes a registry
+  lookup. `_load_snapshot` invokes the state migrator when the
+  snapshot's stable quote differs from the active triangle's,
+  preserving engine state, regime history, derivatives deques, and
+  thesis intent scopes across the flip.
+- **`hydra_brain.py`** — Quant + Risk Manager + Strategist system
+  prompts describe the universe in terms of roles ("stable-quoted
+  SOL pair") rather than literal pair names. The AI sees actual pair
+  names per-tick in the user message; system prompts are quote-
+  agnostic.
+- **`hydra_derivatives_stream.SPOT_TO_DERIVATIVES`** — registers BOTH
+  USD and USDC entries for BTC and SOL. Kraken Futures has one perp
+  per (base, USD-side) regardless of which spot stable is used;
+  adding USDT support is two rows.
+- **`hydra_thesis.py`** — ledger-shield warning fires for ANY stable-
+  quoted BTC pair (was hardcoded `"BTC/USDC"`). Bridge SELL
+  correctly excluded.
+
+### Default flipped
+
+- `--pairs` default: `SOL/USDC,SOL/BTC,BTC/USDC` →
+  `SOL/USD,SOL/BTC,BTC/USD`
+- `BacktestConfig.pairs`: `("SOL/USDC",)` → `("SOL/USD",)`
+- `make_quick_config`, `build_config_from_preset`, backtest-tool
+  fallbacks: same flip.
+- `start_hydra.bat` (production watchdog) and
+  `start_hydra_companion.bat` (paper companion) updated.
+- Module docstrings updated.
+
+USDC remains a first-class supported quote — `--pairs SOL/USDC,SOL/BTC,
+BTC/USDC` continues to work end-to-end. The registry knows both stable
+families; `HydraConfig.from_quote("USDC")` produces a coherent USDC
+triangle.
+
+### Migration
+
+- `--resume` from a USDC-era snapshot under a USD-default agent
+  triggers an automatic, one-time, idempotent migration:
+  `[SNAPSHOT] Migrated pair keys USDC → USD (engine state preserved)`.
+  Engine indicators, regime history, derivatives OI deques, and
+  thesis intent pair_scope arrays move from `SOL/USDC` → `SOL/USD`
+  keys intact. The order_journal is NOT rewritten (audit trail).
+  The `_migrated_quote: "USD"` marker prevents re-migration.
+- Operators must convert their on-exchange USDC token balance to USD
+  fiat on Kraken (or reconvert) before live-running the migrated
+  agent — the engine reads real balances and will see $0 quote
+  balance until the conversion happens. This is a one-time manual
+  step on the exchange side; the agent itself is non-destructive.
+
+### Tests
+
+- 1301 unit tests pass (was 1281 pre-v2.19; +65 from new modules).
+- Live harness mock mode: 35/35 pass.
+- Full release alignment script (when run at tag time): unaffected
+  by this commit's surface; verifies all 7 version sites match.
+
+### Footer
+
+- Footer `HYDRA v2.18.1` → `HYDRA v2.19.0`;
+  `kraken-cli v0.2.3` → `v0.3.2`;
+  `hydra_backtest.HYDRA_VERSION` → `2.19.0`.
+
+---
+
 ## [2.18.1] — 2026-04-22
 
 ### Fixed

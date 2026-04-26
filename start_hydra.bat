@@ -18,7 +18,7 @@ if exist "%CBP_RUNNER_DIR%\supervisor.py" (
 
 :loop
 echo [%date% %time%] Starting HYDRA agent...
-python -u hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --mode competition --resume
+python -u hydra_agent.py --pairs SOL/USD,SOL/BTC,BTC/USD --mode competition --resume
 echo.
 echo [%date% %time%] HYDRA exited (code %errorlevel%). Restarting in 10 seconds...
 echo Press Ctrl+C to stop.

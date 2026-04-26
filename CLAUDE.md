@@ -42,8 +42,12 @@ regression bug, not a style issue.
 - **HYDRA** — regime-adaptive crypto trading agent for Kraken. Detects
   regime (trending/ranging/volatile), switches between 4 strategies
   (Momentum, MeanReversion, Grid, Defensive), executes limit post-only.
-- **Pairs:** SOL/USDC, SOL/BTC, BTC/USDC
-- **Version pin:** v2.18.1
+- **Pairs (default v2.19+):** SOL/USD, SOL/BTC, BTC/USD. The active
+  triangle's stable quote is selected by the agent's `--pairs` flag;
+  `STABLE_QUOTES = {USD, USDC, USDT}` are first-class. v2.19 flipped
+  the default from USDC → USD; opt back into USDC by passing
+  `--pairs SOL/USDC,SOL/BTC,BTC/USDC`.
+- **Version pin:** v2.19.0
 
 ## Defaults (inherited)
 
@@ -61,7 +65,7 @@ regression bug, not a style issue.
 
 ## Cross-cutting invariants (HIGH severity if violated)
 
-- **SPOT-ONLY execution** — Hydra places orders ONLY on Kraken spot pairs (SOL/USDC, SOL/BTC, BTC/USDC). Derivatives data (Kraken Futures funding/OI via `kraken futures tickers` CLI) is SIGNAL INPUT ONLY. No futures, no options, no margin orders placed. `hydra_derivatives_stream.py` is read-only by construction; its test suite greps for authenticated subcommand names and fails if any appear.
+- **SPOT-ONLY execution** — Hydra places orders ONLY on Kraken spot pairs (the active triangle: stable-quoted SOL, stable-quoted BTC, and SOL/BTC; default v2.19+ is SOL/USD, SOL/BTC, BTC/USD). Derivatives data (Kraken Futures funding/OI via `kraken futures tickers` CLI) is SIGNAL INPUT ONLY. No futures, no options, no margin orders placed. `hydra_derivatives_stream.py` is read-only by construction; its test suite greps for authenticated subcommand names and fails if any appear.
 - **Limit post-only, never market** — deliberate design choice
 - **No REST for market data** — all Kraken market data flows through the WebSocket streams or the `kraken` CLI (WSL Ubuntu). Only the CBP sidecar (localhost IPC) uses REST. New data sources must use CLI or WS.
 - **2s REST floor** — Kraken throttles or bans below this
@@ -73,7 +77,9 @@ regression bug, not a style issue.
 - **Funding is markPrice-relative, never absolute** — Kraken Futures `PF_*` returns `fundingRate` as absolute USD-per-contract-per-period. Convert to bps via `(fundingRate / markPrice) * 10000`, never `fundingRate * 10000`. The `_absolute_to_relative_bps` helper in `hydra_derivatives_stream.py` enforces this, including a ±500 bps clamp against future API drift. Pre-v2.15.2 values were wrong by ~70000x (BTC) and ~80x (SOL); R1/R2 fires from that period are not authoritative.
 - **Synthetic pairs declare themselves to R10** — `DerivativesSnapshot.synthetic=True` propagates to `quant_indicators["synthetic_pair"]`; R10 then tracks only funding/cvd/regime (the fields the synthetic path actually populates). Adding a new pair without a direct Kraken Futures perp requires this flag, otherwise R10 will structurally force-hold every tick.
 - **`hydra_rm_features.py` is pure** — no I/O, subprocess, network, or file access; every function returns `Optional[float]` (or `Optional[dict]`) from input alone, returning `None` on insufficient data. A future contributor adding side effects breaks the "fails-silent with None" contract that lets R10 and RM reason over missing vs corrupted data and that lets `HYDRA_RM_FEATURES_DISABLED` work as an instant rollback.
-- **`PLACEMENT_FAILED` entries are session-only** — pre-exchange diagnostics (`insufficient_USDC_balance`, `placement_error:api`) live in the in-memory `HydraAgent.order_journal` for live debugging but MUST NOT persist to `hydra_session_snapshot.json` or the rolling `hydra_order_journal.json`. The `_journal_for_persistence()` helper is the single chokepoint; both write paths (`_save_snapshot` and the per-tick rolling write) go through it. If you add a third write path, route it through the helper too.
+- **`PLACEMENT_FAILED` entries are session-only** — pre-exchange diagnostics (`insufficient_USD_balance`, `placement_error:api`) live in the in-memory `HydraAgent.order_journal` for live debugging but MUST NOT persist to `hydra_session_snapshot.json` or the rolling `hydra_order_journal.json`. The `_journal_for_persistence()` helper is the single chokepoint; both write paths (`_save_snapshot` and the per-tick rolling write) go through it. If you add a third write path, route it through the helper too.
+- **Pair identity has one source of truth** — `hydra_pair_registry.PairRegistry` owns alias resolution (XBT↔BTC, ZUSD↔USD, USDC.F→USDC, slashed↔slashless, case-insensitive) and per-pair metadata (price decimals, ordermin, costmin, tick size). `hydra_kraken_cli.KrakenCLI` delegates to the class-level `registry`. New pair-handling code must consume the registry — never re-implement an alias dict. v2.19 absorbed 1048 USDC literals into a single registry + role binding.
+- **Roles, not literal pair names, in coordinator/agent logic** — CrossPairCoordinator and HydraAgent address pairs by their `TradingTriangle` role (`stable_sol`, `stable_btc`, `bridge`), not by hardcoded `"SOL/USDC"` etc. `STABLE_QUOTES = {USD, USDC, USDT}`; the engine treats every member as $1. Switching the default quote is a config flip, not a refactor — see `hydra_config.HydraConfig.from_quote`.
 
 Subsystem detail (indicators, regime, Kelly sizing, price precision,
 execution stream lifecycle, resume reconciliation, forex modifier,
@@ -103,6 +109,9 @@ shutdown) → `cbp --label hydra.engine_invariants` + `hydra.trading_invariants`
 | journal_maintenance | `journal_maintenance.py` | order journal compaction/rotation |
 | journal_migrator | `hydra_journal_migrator.py` | one-shot legacy journal migration (auto on first start) |
 | dashboard | `dashboard/src/App.jsx` | single-file React, inline styles; tabs LIVE/BACKTEST/COMPARE/THESIS |
+| pair_registry | `hydra_pair_registry.py` | single source of truth for pair metadata; `Pair` value object + `PairRegistry` (alias resolution, kraken-pairs bootstrap); `STABLE_QUOTES`, `normalize_asset` |
+| config | `hydra_config.py` | `TradingTriangle` role-binding + `HydraConfig` boot-time facade; `add_config_args()` registers `--quote` (env `HYDRA_QUOTE`); `DEFAULT_QUOTE = "USD"` |
+| state_migrator | `hydra_state_migrator.py` | one-shot quote-currency migration of `hydra_session_snapshot.json` (engines, regime history, derivatives, thesis intents); preserves `order_journal` audit trail |
 
 ## Deep specs
 
@@ -179,11 +188,13 @@ every call (tokens rotate).
 | `CBP_RUNNER_DIR` | memory | override sibling `cbp-runner` checkout location |
 | `HYDRA_POSTEDIT_HOOK_DISABLED` | tooling | silence hook during heavy refactors |
 | `HYDRA_RM_FEATURES_DISABLED` | rm_features | `=1` skips engine-internal feature computation in `_build_quant_indicators`; instant rollback without redeploy. Default off (features enabled). |
+| `HYDRA_QUOTE` | config | Default stable quote when `--quote` is not passed and no `--pairs` override. Choices: `USD` (v2.19+ default), `USDC`, `USDT`. Resolution order: explicit `--quote` > `HYDRA_QUOTE` env > `DEFAULT_QUOTE` (USD). |
 
 ## Build / run
 
 - Dashboard dev: `cd dashboard && npm install && npm run dev`
-- Agent default: `python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100`
+- Agent default: `python hydra_agent.py --pairs SOL/USD,SOL/BTC,BTC/USD --balance 100`
+- Agent USDC opt-in: `python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC` (registry handles both transparently; engine/coordinator/agent quote-agnostic)
 - Agent competition: `python hydra_agent.py --mode competition`
 - Agent paper: `python hydra_agent.py --mode competition --paper`
 - Agent resume: `python hydra_agent.py --mode competition --resume`

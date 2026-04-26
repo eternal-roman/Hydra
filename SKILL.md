@@ -8,8 +8,9 @@ name: hydra-regime-trader
 description: >
   HYDRA (Hyper-adaptive Dynamic Regime-switching Universal Agent) is an autonomous
   crypto trading agent for Kraken CLI that detects market regimes and switches between
-  four strategies: Momentum, Mean Reversion, Grid, and Defensive. Trades SOL/USDC,
-  SOL/BTC, and BTC/USDC using limit post-only orders. Use when: (1) running a live
+  four strategies: Momentum, Mean Reversion, Grid, and Defensive. Trades SOL/USD,
+  SOL/BTC, and BTC/USD by default (v2.19+; USDC variants opt-in via --pairs)
+  using limit post-only orders. Use when: (1) running a live
   trading session via Kraken CLI (WSL), (2) analyzing current market regime from OHLC
   data, (3) generating trade signals with quarter-Kelly position sizing, (4) monitoring
   performance via the React dashboard. Requires kraken-cli installed in WSL. NOT for:
@@ -122,12 +123,12 @@ kraken order cancel-after 60
 
 # Limit post-only orders (maker, sit on book, never cross spread):
 # BUY at bid price:
-kraken order buy SOL/USDC 0.02 --type limit --price 78.50 --oflags post --yes
+kraken order buy SOL/USD 0.02 --type limit --price 78.50 --oflags post --yes
 # SELL at ask price:
-kraken order sell SOL/USDC 0.02 --type limit --price 78.80 --oflags post --yes
+kraken order sell SOL/USD 0.02 --type limit --price 78.80 --oflags post --yes
 
 # Validate without executing:
-kraken order buy SOL/USDC 0.02 --type limit --price 78.50 --oflags post --validate
+kraken order buy SOL/USD 0.02 --type limit --price 78.50 --oflags post --validate
 
 # Cancel all open orders:
 kraken order cancel-all --yes
@@ -153,7 +154,7 @@ kraken closed-orders -o json
 
 ```
 INITIALIZE paper session
-SET assets = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
+SET assets = ["SOL/USD", "SOL/BTC", "BTC/USD"]
 SET interval = 300 seconds  # 5 minutes
 SET max_position_pct = 0.30   # 0.40 in competition mode
 SET min_confidence = 0.65     # quality filter — only ≥15% Kelly edge
