@@ -84,11 +84,36 @@ def migrate_pair_key(pair: str, source_quote: str, target_quote: str) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def _remap_keys(d: Dict[str, Any], src: str, tgt: str) -> Dict[str, Any]:
-    """Return a new dict with pair keys rewritten. Preserves insertion order."""
+    """Return a new dict with pair keys rewritten. Preserves insertion order.
+
+    Raises ValueError on a *real* collision — i.e. two distinct input
+    keys map to the same output key. This means the snapshot contains
+    both quote variants for the same base pair (e.g. both `SOL/USDC`
+    AND `SOL/USD`); silently letting the second overwrite the first
+    would lose data. Such a collision can only happen via manual edit
+    of the snapshot file.
+
+    Implementation: track provenance (output key → first input key
+    that produced it). A second input key landing on a known output
+    key with a different provenance is the collision signal. Same
+    input key reused (impossible in a Python dict, but guarded for
+    safety) is not a collision.
+    """
     out: Dict[str, Any] = {}
+    provenance: Dict[str, Any] = {}
+    collisions: list = []
     for k, v in d.items():
         new_k = migrate_pair_key(k, src, tgt) if isinstance(k, str) else k
+        if new_k in out and provenance.get(new_k) != k:
+            collisions.append((provenance[new_k], k, new_k))
         out[new_k] = v
+        provenance[new_k] = k
+    if collisions:
+        raise ValueError(
+            f"Pair-key migration collision: cannot remap "
+            f"{collisions} — both source and target keys present in "
+            f"the same dict. Manual snapshot edit required."
+        )
     return out
 
 

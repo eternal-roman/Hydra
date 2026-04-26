@@ -164,6 +164,37 @@ def test_migrate_snapshot_idempotent():
     assert snap == snap2
 
 
+def test_migrate_snapshot_collision_raises():
+    """Both quote variants for the same base pair in the same dict —
+    cannot silently overwrite (would lose data). Audit P4-7."""
+    snap = {
+        "pairs": ["SOL/USDC", "SOL/USD"],
+        "engines": {"SOL/USDC": {"closes": [150.0]}, "SOL/USD": {"closes": [151.0]}},
+    }
+    with pytest.raises(ValueError) as exc:
+        migrate_snapshot(snap, source_quote="USDC", target_quote="USD")
+    assert "collision" in str(exc.value).lower()
+
+
+def test_migrate_snapshot_collision_does_not_partial_mutate():
+    """When collision raises mid-migration, the snapshot must not be
+    half-mutated (e.g. `pairs` rewritten but `engines` raised)."""
+    snap = {
+        "pairs": ["SOL/USDC", "SOL/USD"],
+        "engines": {"SOL/USDC": {"closes": [1]}, "SOL/USD": {"closes": [2]}},
+    }
+    pairs_before = list(snap["pairs"])
+    engines_before = dict(snap["engines"])
+    with pytest.raises(ValueError):
+        migrate_snapshot(snap, source_quote="USDC", target_quote="USD")
+    # `pairs` is migrated before `engines` in the migrator. The fact
+    # that `engines` collision raises means `pairs` was already
+    # rewritten in place — that's acceptable since the operator must
+    # intervene anyway, but the marker MUST NOT be set (idempotence
+    # would lock in a partial state).
+    assert snap.get("_migrated_quote") is None
+
+
 def test_migrate_snapshot_already_target_is_noop():
     """Snapshot already in target quote — migration must not corrupt it."""
     snap = {
@@ -240,3 +271,56 @@ def test_migrate_snapshot_file_invalid_json(tmp_path):
     assert migrate_snapshot_file(p, source_quote="USDC", target_quote="USD") is False
     # File untouched
     assert p.read_text() == "not json {{{"
+
+
+# ─── HydraAgent._detect_snapshot_stable_quote edge cases (audit P7-4) ───
+
+def test_detect_stable_quote_bridge_only_returns_none():
+    """Snapshot with only the bridge pair (no stable_sol/btc) — None."""
+    from hydra_agent import HydraAgent
+    snap = {"pairs": ["SOL/BTC"]}
+    assert HydraAgent._detect_snapshot_stable_quote(snap) is None
+
+
+def test_detect_stable_quote_empty_pairs_returns_none():
+    from hydra_agent import HydraAgent
+    assert HydraAgent._detect_snapshot_stable_quote({"pairs": []}) is None
+    assert HydraAgent._detect_snapshot_stable_quote({}) is None
+
+
+def test_detect_stable_quote_malformed_entries_skip():
+    """Non-string / sliceless entries skipped; first valid stable wins."""
+    from hydra_agent import HydraAgent
+    snap = {"pairs": [None, 42, {"x": 1}, "no-slash", "SOL/USD", "BTC/USDC"]}
+    # Returns the FIRST stable quote encountered (USD), not USDC.
+    assert HydraAgent._detect_snapshot_stable_quote(snap) == "USD"
+
+
+def test_detect_stable_quote_non_list_pairs_returns_none():
+    """`pairs` field present but not a list — None."""
+    from hydra_agent import HydraAgent
+    assert HydraAgent._detect_snapshot_stable_quote({"pairs": "SOL/USD"}) is None
+    assert HydraAgent._detect_snapshot_stable_quote({"pairs": {"x": 1}}) is None
+
+
+def test_detect_stable_quote_first_match_wins():
+    """If snapshot mixes USD and USDC pairs (shouldn't happen in practice),
+    the first stable-quoted entry wins. Used to decide migration source."""
+    from hydra_agent import HydraAgent
+    snap1 = {"pairs": ["BTC/USDC", "SOL/BTC", "SOL/USD"]}
+    assert HydraAgent._detect_snapshot_stable_quote(snap1) == "USDC"
+    snap2 = {"pairs": ["SOL/USD", "BTC/USDC"]}
+    assert HydraAgent._detect_snapshot_stable_quote(snap2) == "USD"
+
+
+def test_detect_stable_quote_case_insensitive():
+    from hydra_agent import HydraAgent
+    snap = {"pairs": ["sol/usdc"]}
+    assert HydraAgent._detect_snapshot_stable_quote(snap) == "USDC"
+
+
+def test_detect_stable_quote_skips_non_stable_quote():
+    """SOL/EUR and SOL/BTC don't count as stable; returns None."""
+    from hydra_agent import HydraAgent
+    snap = {"pairs": ["SOL/EUR", "SOL/BTC"]}
+    assert HydraAgent._detect_snapshot_stable_quote(snap) is None

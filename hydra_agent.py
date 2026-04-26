@@ -786,31 +786,47 @@ class HydraAgent:
             # v2.19: quote-currency migration. If the snapshot's recorded
             # pairs use a different stable quote than the active triangle
             # (e.g. USDC snapshot, USD-default agent), rewrite the pair-
-            # keyed fields in place so engine state, regime history, and
-            # OI deques are preserved across the quote flip.
+            # keyed fields so engine state, regime history, and OI deques
+            # are preserved across the quote flip.
+            #
+            # Pattern: migrate a deep copy, persist the copy, only
+            # rebind `snapshot` once the disk write succeeded. If
+            # persist fails we still proceed with the migrated copy in
+            # memory (otherwise the engines wouldn't restore — their
+            # keys are already on the active-quote side); but the log
+            # makes the desync window explicit so the operator sees it.
+            # The next regular `_save_snapshot` tick reconciles disk
+            # from `self.engines`, so the window is at most one save
+            # cycle.
             triangle = getattr(self, "triangle", None)
             if triangle is not None:
                 target_quote = triangle.quote
                 source_quote = self._detect_snapshot_stable_quote(snapshot)
                 if source_quote and source_quote != target_quote:
+                    import copy as _copy
                     from hydra_state_migrator import migrate_snapshot
+                    candidate = _copy.deepcopy(snapshot)
                     migrate_snapshot(
-                        snapshot,
+                        candidate,
                         source_quote=source_quote,
                         target_quote=target_quote,
                     )
-                    print(f"  [SNAPSHOT] Migrated pair keys {source_quote} → "
-                          f"{target_quote} (engine state preserved).")
-                    # Persist the migrated snapshot back to disk so the
-                    # marker survives subsequent boots even if migration
-                    # is otherwise idempotent.
+                    persist_ok = False
                     try:
                         tmp = path + ".tmp"
                         with open(tmp, "w") as f:
-                            json.dump(snapshot, f, default=str)
+                            json.dump(candidate, f, default=str)
                         os.replace(tmp, path)
+                        persist_ok = True
                     except OSError as e:
-                        print(f"  [SNAPSHOT] Post-migration write failed: {e}")
+                        print(f"  [SNAPSHOT] Post-migration write failed: {e}; "
+                              f"in-memory state will be used this session "
+                              f"and disk will reconcile on next save tick.")
+                    snapshot = candidate
+                    if persist_ok:
+                        print(f"  [SNAPSHOT] Migrated pair keys "
+                              f"{source_quote} → {target_quote} "
+                              f"(engine state preserved).")
             # Normalize legacy XBT pair names in engine keys
             engines_raw = snapshot.get("engines", {})
             engines = {self._normalize_pair_name(k): v for k, v in engines_raw.items()}
@@ -3351,10 +3367,23 @@ class HydraAgent:
         # Kraken may return fee keys in several forms ("SOLUSD", "SOL/USD", "BTCUSD",
         # "XXBTZUSD" historically). The PairRegistry already knows every alias
         # dialect, so we just resolve raw_key → friendly via the registry,
-        # falling back to raw_key for unknown pairs.
+        # falling back to raw_key for unknown pairs. A None resolution is
+        # logged once per raw_key per session to surface API drift early
+        # (e.g. Kraken adds a new pair format, or our registry is stale).
         seen_keys = set(fees_taker.keys()) | set(fees_maker.keys())
+        unresolved_seen = getattr(self, "_unresolved_fee_keys_logged", None)
+        if unresolved_seen is None:
+            unresolved_seen = set()
+            try:
+                self._unresolved_fee_keys_logged = unresolved_seen
+            except Exception:
+                pass  # object.__new__() bypass test path; non-fatal
         for raw_key in seen_keys:
             resolved = KrakenCLI.registry.get(raw_key)
+            if resolved is None and raw_key not in unresolved_seen:
+                unresolved_seen.add(raw_key)
+                print(f"  [FEE-TIER] Unrecognized Kraken fee-key {raw_key!r} — "
+                      f"registry alias dictionary may be stale.")
             friendly = resolved.cli_format if resolved else raw_key
             taker_entry = fees_taker.get(raw_key) or {}
             maker_entry = fees_maker.get(raw_key) or {}
