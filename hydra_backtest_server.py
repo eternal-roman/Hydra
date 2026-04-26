@@ -591,6 +591,148 @@ def mount_backtest_routes(
     broadcaster.register_handler("experiment_delete", _deny_delete)
     broadcaster.register_handler("review_request", _review_request)
 
+    # ── v2.20.0 — Research tab WS routes ──────────────────────────────
+    # Read-only handlers backed by the canonical hydra_history.sqlite store.
+    # Lab (Mode B) is deferred: walk-forward in-handler would block the WS
+    # thread for minutes per pair, and Mode C (releases) carries the user's
+    # operational priority. Lab gets a clear "deferred" error so the UI can
+    # render the same way today and tomorrow.
+
+    def _research_dataset_coverage(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only: per (pair, grain_sec) coverage of the canonical store."""
+        try:
+            from hydra_history_store import HistoryStore
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            store = HistoryStore(db_path)
+            rows = []
+            for pair, grain_sec in store.list_pairs():
+                c = store.coverage(pair, grain_sec)
+                rows.append({
+                    "pair": pair,
+                    "grain_sec": grain_sec,
+                    "candle_count": c.candle_count,
+                    "first_ts": c.first_ts,
+                    "last_ts": c.last_ts,
+                    "gap_count": c.gap_count,
+                    "max_gap_sec": c.max_gap_sec,
+                })
+            return {"success": True, "data": rows}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_releases_list(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only: list every regression_run row with a per-pair verdict
+        summary derived from aggregate Wilcoxon p-values."""
+        try:
+            import sqlite3 as _sql3
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            # Just connect — HistoryStore() would re-init schema; we already know it's there.
+            conn = _sql3.connect(db_path, timeout=10.0)
+            try:
+                runs = conn.execute(
+                    """SELECT run_id, hydra_version, pair, grain_sec, created_at,
+                              override_reason
+                       FROM regression_run
+                       ORDER BY created_at DESC"""
+                ).fetchall()
+                # Build verdict summary per run from aggregate (fold_idx=-1) Wilcoxon p-values.
+                # If any p<0.05 with median<0 -> "worse"; with median>0 -> "better"; else "equivocal".
+                # We don't have median stored separately, so summary just reports the smallest p.
+                summaries = {}
+                for run_id, *_ in runs:
+                    ps = [
+                        v for (v,) in conn.execute(
+                            """SELECT value FROM regression_metrics
+                               WHERE run_id=? AND fold_idx=-1 AND metric LIKE 'wilcoxon_p_%'""",
+                            (run_id,),
+                        )
+                    ]
+                    if not ps:
+                        summaries[run_id] = "no folds"
+                    else:
+                        min_p = min(ps)
+                        summaries[run_id] = "equivocal" if min_p >= 0.05 else "significant"
+            finally:
+                conn.close()
+            data = [
+                {
+                    "run_id": r[0],
+                    "hydra_version": r[1],
+                    "pair": r[2],
+                    "grain_sec": r[3],
+                    "created_at": r[4],
+                    "override_reason": r[5],
+                    "verdict_summary": summaries.get(r[0], "?"),
+                }
+                for r in runs
+            ]
+            return {"success": True, "data": data}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_releases_diff(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare two regression runs side-by-side. Returns aggregate metrics
+        for both run_ids and the per-fold metric rows (if any)."""
+        a_id = payload.get("a_run_id")
+        b_id = payload.get("b_run_id")
+        if not (a_id and b_id):
+            return {"success": False, "error": "a_run_id and b_run_id required"}
+        try:
+            import sqlite3 as _sql3
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            conn = _sql3.connect(db_path, timeout=10.0)
+            try:
+                def _load(run_id):
+                    row = conn.execute(
+                        """SELECT hydra_version, pair, grain_sec, created_at, override_reason
+                           FROM regression_run WHERE run_id=?""",
+                        (run_id,),
+                    ).fetchone()
+                    if not row:
+                        return None
+                    metrics = [
+                        {"fold_idx": fi, "metric": m, "value": v}
+                        for (fi, m, v) in conn.execute(
+                            """SELECT fold_idx, metric, value FROM regression_metrics
+                               WHERE run_id=? ORDER BY fold_idx, metric""",
+                            (run_id,),
+                        )
+                    ]
+                    return {
+                        "run_id": run_id,
+                        "hydra_version": row[0],
+                        "pair": row[1],
+                        "grain_sec": row[2],
+                        "created_at": row[3],
+                        "override_reason": row[4],
+                        "metrics": metrics,
+                    }
+                a = _load(a_id)
+                b = _load(b_id)
+            finally:
+                conn.close()
+            if a is None or b is None:
+                return {"success": False, "error": "one or both run_ids not found"}
+            return {"success": True, "a": a, "b": b}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_lab_run(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Deferred — Mode B walk-forward needs param injection that v2.20.0
+        doesn't have wired (the BacktestRunner doesn't read arbitrary param
+        overrides per fold). Returns a structured error so the UI can render
+        a clear pending state without crashing."""
+        return {
+            "success": False,
+            "error": "Lab Mode B is deferred to a follow-up release. Mode C "
+                     "(release regression) is fully wired — see the Releases pane.",
+        }
+
+    broadcaster.register_handler("research_dataset_coverage", _research_dataset_coverage)
+    broadcaster.register_handler("research_releases_list", _research_releases_list)
+    broadcaster.register_handler("research_releases_diff", _research_releases_diff)
+    broadcaster.register_handler("research_lab_run", _research_lab_run)
+
 
 def _compact(exp: Experiment) -> Dict[str, Any]:
     """Minimal experiment summary for WS payloads."""
