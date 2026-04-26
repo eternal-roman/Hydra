@@ -108,7 +108,7 @@ def bootstrap_zip(
             member = f"TimeAndSales_Combined/{kraken_pair}.csv"
             if member not in names:
                 raise FileNotFoundError(f"{kraken_pair} not in archive")
-            print(f"  [BOOTSTRAP] rolling {kraken_pair} → {canonical} @ {grain_sec}s")
+            print(f"  [BOOTSTRAP] rolling {kraken_pair} -> {canonical} @ {grain_sec}s")
             t0 = time.time()
             buf: List[CandleRow] = []
             n = 0
