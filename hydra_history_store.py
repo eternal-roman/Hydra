@@ -131,12 +131,11 @@ class HistoryStore:
     def fetch(self, pair: str, grain_sec: int,
               start_ts: int, end_ts: int) -> Iterator[CandleOut]:
         with self._conn() as conn:
-            cur = conn.execute(
+            rows = conn.execute(
                 """SELECT pair, grain_sec, ts, open, high, low, close, volume, source
                    FROM ohlc
                    WHERE pair=? AND grain_sec=? AND ts>=? AND ts<=?
                    ORDER BY ts ASC""",
                 (pair, grain_sec, start_ts, end_ts),
-            )
-            for row in cur:
-                yield CandleOut(*row)
+            ).fetchall()
+        yield from (CandleOut(*row) for row in rows)
