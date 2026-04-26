@@ -46,9 +46,14 @@ HYDRA Agent Loop (15-min candles, 300s tick)
 
 | Pair | Description |
 |------|-------------|
-| **SOL/USDC** | Primary — SOL priced in stablecoin |
+| **SOL/USD** | Primary — SOL priced in stable (default v2.19+) |
 | **SOL/BTC** | Cross — SOL priced in BTC, enables regime-driven rotation |
-| **BTC/USDC** | BTC priced in stablecoin, completes the triangle |
+| **BTC/USD** | BTC priced in stable, completes the triangle (default v2.19+) |
+
+> v2.19 flipped the default stable quote from USDC to USD. Both are
+> first-class supported quotes — pass `--pairs SOL/USDC,SOL/BTC,BTC/USDC`
+> to opt back into USDC. The active triangle's stable quote is selected
+> at agent boot via `--pairs` (or `HYDRA_QUOTE` env / `--quote` flag).
 
 ## Technical Indicators
 
@@ -242,7 +247,7 @@ cd ..
 cd dashboard && npm run dev
 
 # Terminal 2: Start the trading agent (15-min candles, runs forever)
-python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --balance 100
+python hydra_agent.py --pairs SOL/USD,SOL/BTC,BTC/USD --balance 100
 
 # Open http://localhost:3000 in your browser
 ```
@@ -257,7 +262,7 @@ start_all.bat
 ### CLI Options
 
 ```
---pairs            Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)
+--pairs            Comma-separated trading pairs (default v2.19+: SOL/USD,SOL/BTC,BTC/USD)
 --balance          Reference balance for position sizing in USD (default: 100)
 --candle-interval  OHLC candle period in minutes: 1, 5, 15, 30, 60 (default: 15)
 --interval         Seconds between ticks (default: 300)
@@ -402,7 +407,7 @@ HYDRA tracks and reports per pair:
 
 7. **Dead man's switch** — If the agent crashes, all open orders cancel within 60 seconds. Refreshed every tick.
 
-8. **SPOT-ONLY execution (v2.14)** — Hydra places orders ONLY on Kraken spot (SOL/USDC, SOL/BTC, BTC/USDC). Derivatives data (Kraken Futures funding/OI/basis) is read-only signal input — the Market Quant reasons about positioning with it, the engine still trades spot limits. `hydra_derivatives_stream.py` and `hydra_quant_rules.py` both include meta-tests that grep for any authenticated order-placement patterns and fail at lint time.
+8. **SPOT-ONLY execution (v2.14)** — Hydra places orders ONLY on Kraken spot pairs (the active triangle: stable-quoted SOL, stable-quoted BTC, and SOL/BTC; default v2.19+ is SOL/USD, SOL/BTC, BTC/USD). Derivatives data (Kraken Futures funding/OI/basis) is read-only signal input — the Market Quant reasons about positioning with it, the engine still trades spot limits. `hydra_derivatives_stream.py` and `hydra_quant_rules.py` both include meta-tests that grep for any authenticated order-placement patterns and fail at lint time.
 
 9. **No REST for market data (v2.14)** — all Kraken market data flows through WebSocket streams or the `kraken` CLI (WSL Ubuntu). Only the CBP sidecar (localhost IPC) uses REST. Keeps the integration surface narrow and consistent.
 
@@ -460,7 +465,7 @@ version-by-version history.
 | Port 3000 in use | `strictPort: true` in `vite.config.js` — Vite will fail instead of auto-picking. Kill the blocking process: `npx kill-port 3000` or change the port in vite.config.js |
 | Port 8765 in use | Stop any running agent, or change port: `--ws-port 8766` |
 | `websockets` not installed | `pip install websockets` |
-| Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USDC -o json"` |
+| Agent shows `Empty response` | Verify kraken-cli works: `wsl -d Ubuntu -- bash -c "source ~/.cargo/env && kraken ticker SOL/USD -o json"` |
 | Dashboard shows "DISCONNECTED" | Ensure agent is running — it hosts the WebSocket server on port 8765 |
 | Dashboard hosted on a different machine | Set `VITE_HYDRA_WS_URL=ws://agent-host:8765` before `npm run build` or `npm run dev`. Default is `ws://localhost:8765`. |
 | No trades executing | Normal if market is ranging with low confidence. Check signal confidence in dashboard — needs to exceed 65% |

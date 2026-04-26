@@ -1042,7 +1042,7 @@ if __name__ == "__main__":  # pragma: no cover
     store = ExperimentStore(root=Path(tmp))
 
     # Preset-driven run
-    cfg, ov = build_config_from_preset("divergent", pairs=("SOL/USDC",), n_candles=300, seed=1)
+    cfg, ov = build_config_from_preset("divergent", pairs=("SOL/USD",), n_candles=300, seed=1)
     exp = new_experiment(
         name="smoke-divergent",
         config=cfg,

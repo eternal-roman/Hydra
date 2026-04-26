@@ -1210,7 +1210,7 @@ class HydraAgent:
             else:
                 print(f"  [WARN] Dead man's switch: {result.get('error', 'unknown')}")
 
-        # Load dynamic pair constants from Kraken (PRICE_DECIMALS, ordermin, costmin).
+        # Load dynamic pair constants from Kraken (overlays the PairRegistry).
         # Hardcoded constants remain as fallbacks for any pair not returned.
         if not self.paper:
             print("\n  [HYDRA] Loading pair constants from Kraken...")

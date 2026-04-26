@@ -73,7 +73,7 @@ class TestVolumeArgsAndParsing:
 
     def test_volume_with_pair_list(self):
         _, stub = _with_stub({}, lambda: KrakenCLI.volume(["SOL/USDC", "BTC/USDC"]))
-        # BTC/USDC is resolved to BTC/USDC via PAIR_MAP
+        # BTC/USDC resolves to BTC/USDC (canonical) via the PairRegistry
         assert stub.calls == [["volume", "--pair", "SOL/USDC,BTC/USDC"]]
 
     def test_volume_resolves_pair_map(self):
@@ -106,8 +106,8 @@ class TestPriceFormat:
 
     Kraken rejects orders whose price has more meaningful decimals than
     the pair's native precision. _format_price rounds to the correct
-    number of decimals per pair before the .8f format. See
-    hydra_agent.py PRICE_DECIMALS dict."""
+    number of decimals per pair before the .8f format. The precision
+    table now lives on the PairRegistry (`Pair.price_decimals`)."""
 
     def test_solusdc_rounds_to_2_decimals(self):
         # 80.4745 would fail live Kraken with "price can only be specified up to 2 decimals"

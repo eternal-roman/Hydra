@@ -55,8 +55,8 @@ opt-in flag is identical to v2.9.x.
 python -c "
 from hydra_backtest import BacktestConfig, BacktestRunner, SyntheticSource
 from hydra_engine import HydraEngine
-cfg = BacktestConfig(pair='SOL/USDC', start_ts=0, end_ts=86400*30, seed=42)
-runner = BacktestRunner(cfg, engine_factory=HydraEngine, sources_override={'SOL/USDC': SyntheticSource(seed=42)})
+cfg = BacktestConfig(pair='SOL/USD', start_ts=0, end_ts=86400*30, seed=42)
+runner = BacktestRunner(cfg, engine_factory=HydraEngine, sources_override={'SOL/USD': SyntheticSource(seed=42)})
 result = runner.run()
 print(f'trades={result.metrics.total_trades} sharpe={result.metrics.sharpe_ratio:.2f}')
 "
@@ -71,7 +71,7 @@ For real historical data, swap `SyntheticSource` for `KrakenHistoricalSource`
 from hydra_experiments import PRESET_LIBRARY, run_experiment
 
 preset = PRESET_LIBRARY["regime_volatile"]
-experiment = run_experiment(preset, pair="SOL/USDC", start_ts=0, end_ts=86400*7)
+experiment = run_experiment(preset, pair="SOL/USD", start_ts=0, end_ts=86400*7)
 print(experiment.result.metrics.sharpe_ratio)
 ```
 
