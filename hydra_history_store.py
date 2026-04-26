@@ -102,6 +102,23 @@ class HistoryStore:
 
     def _init_schema(self) -> None:
         with self._lock, self._conn() as conn:
+            # Detect existing DB before applying schema script.
+            existing = None
+            try:
+                cur = conn.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    existing = int(row[0])
+            except sqlite3.OperationalError:
+                existing = None  # fresh DB, meta table not created yet
+            if existing is not None and existing != SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"hydra_history_store: schema_version={existing} on disk, "
+                    f"code expects {SCHEMA_VERSION}. Run a migration or delete "
+                    f"the DB to rebuild from archive."
+                )
             conn.executescript(_SCHEMA)
             conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
