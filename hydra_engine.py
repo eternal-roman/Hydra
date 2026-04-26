@@ -20,6 +20,10 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
+# pair_registry is pure stdlib (dataclasses/typing only); importing it
+# does NOT violate the engine's "no numpy/pandas" isolation rule.
+from hydra_pair_registry import STABLE_QUOTES
+
 
 # ═══════════════════════════════════════════════════════════════
 # ENUMS
@@ -415,7 +419,7 @@ class SignalGenerator:
     - vol_bonus = volume confirmation (small, confirmatory)
 
     All normalizations use dimensionless ratios so confidence is identical
-    across SOL/USDC (~$150), SOL/BTC (~0.0012), and BTC/USDC (~$95k).
+    across the active triangle (e.g. SOL/USD ~$150, SOL/BTC ~0.0012, BTC/USD ~$95k).
     """
 
     # Signal generation floor — signals start at BASE and build upward.
@@ -779,8 +783,10 @@ class PositionSizer:
     def calculate(self, confidence: float, balance: float, price: float,
                   asset: str = "") -> float:
         """Returns position size in asset units using Kelly criterion."""
-        # Pair-aware costmin: use quote currency's minimum (e.g. 0.5 USDC, 0.00002 BTC)
-        quote = asset.split("/")[1] if "/" in asset else "USDC"
+        # Pair-aware costmin: use quote currency's minimum (e.g. 0.5 USD, 0.00002 BTC).
+        # The fallback "USD" applies only when an asset is passed without
+        # "/" — in normal use every asset is a triangle pair like "SOL/USD".
+        quote = asset.split("/")[1] if "/" in asset else "USD"
         costmin = self.MIN_COST.get(quote, 0.5)
 
         if confidence < self.min_confidence or balance < costmin or price <= 0:
@@ -863,7 +869,7 @@ class OrderBookAnalyzer:
                 bids_raw = depth_data["bids"]
                 asks_raw = depth_data["asks"]
             else:
-                # Nested format: {"BTCUSDC": {"bids": [...], "asks": [...]}}
+                # Nested format: {"BTCUSD": {"bids": [...], "asks": [...]}}
                 for key, val in depth_data.items():
                     if isinstance(val, dict) and "bids" in val and "asks" in val:
                         bids_raw = val["bids"]
@@ -1987,8 +1993,10 @@ class HydraEngine:
         """Build complete state dictionary for reporting."""
         current_price = self.prices[-1] if self.prices else 0
         equity = self.balance + (self.position.size * current_price)
-        # USD/USDC pairs report dollar values to 2 decimals; crypto pairs need full 8
-        is_usd_pair = self.asset.endswith("USDC") or self.asset.endswith("USD")
+        # Stable-quoted pairs (USD, USDC, USDT) report dollar values to 2 decimals;
+        # crypto-quoted pairs need full 8.
+        quote = self.asset.split("/")[1].upper() if "/" in self.asset else ""
+        is_usd_pair = quote in STABLE_QUOTES
         value_decimals = 2 if is_usd_pair else 8
         pnl_pct = ((equity - self.initial_balance) / self.initial_balance * 100) if self.initial_balance > 0 else 0
         win_rate = (self.win_count / (self.win_count + self.loss_count) * 100) if (self.win_count + self.loss_count) > 0 else 0
@@ -2064,9 +2072,10 @@ class HydraEngine:
         if trade:
             # Prices and amounts always use full precision (8 decimals) — critical
             # for BTC-denominated pairs like SOL/BTC where price ≈ 0.0015.
-            # Dollar values (value, profit) use 2 decimals for USDC/USD pairs,
+            # Dollar values (value, profit) use 2 decimals for stable-quoted pairs,
             # 8 for crypto-denominated pairs.
-            is_usd_pair = self.asset.endswith("USDC") or self.asset.endswith("USD")
+            quote = self.asset.split("/")[1].upper() if "/" in self.asset else ""
+            is_usd_pair = quote in STABLE_QUOTES
             value_decimals = 2 if is_usd_pair else 8
             state["last_trade"] = {
                 "action": trade.action,
@@ -2142,8 +2151,8 @@ class HydraEngine:
 
         status = f"HALTED -- {self.halt_reason[:40]}" if self.halted else "ACTIVE"
         base = self.asset.split("/")[0]
-        quote = self.asset.split("/")[1] if "/" in self.asset else "USDC"
-        is_usd = quote in ("USDC", "USD")
+        quote = self.asset.split("/")[1] if "/" in self.asset else "USD"
+        is_usd = quote in STABLE_QUOTES
         cur = "$" if is_usd else ""
         vd = 2 if is_usd else 8  # value decimals
 
