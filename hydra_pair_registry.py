@@ -87,6 +87,28 @@ ASSET_ALIASES = {
 STAKED_SUFFIXES = (".B", ".S", ".M", ".F")
 
 
+def _alias_variants(canonical: str) -> set[str]:
+    """All asset-code forms that resolve to the canonical asset.
+
+    Derived from ASSET_ALIASES so adding a new prefix variant there
+    automatically extends every pair's alias set in the registry.
+    Includes the canonical form itself.
+
+    Examples:
+      BTC  → {BTC, XBT, XXBT, XBTC}  (Kraken's three Bitcoin codes)
+      USD  → {USD, ZUSD}             (Z-prefix legacy fiat)
+      USDC → {USDC, ZUSDC}
+      SOL  → {SOL, XSOL}
+    """
+    if not canonical:
+        return set()
+    out = {canonical}
+    for src, tgt in ASSET_ALIASES.items():
+        if tgt == canonical:
+            out.add(src)
+    return out
+
+
 def normalize_asset(name: str) -> str:
     """Normalize a Kraken asset code to its canonical form.
 
@@ -187,20 +209,39 @@ class PairRegistry:
         self._index_aliases(pair)
 
     def _index_aliases(self, pair: Pair) -> None:
-        """Generate every input form that must resolve to this pair."""
+        """Generate every input form that must resolve to this pair.
+
+        Cross-product strategy: for each canonical asset code (base and
+        quote), enumerate every alias that maps to it via ASSET_ALIASES,
+        then produce all (base_variant, quote_variant) pairings in both
+        slashed and slashless form. Captures every Kraken naming dialect
+        a single endpoint might emit:
+
+          - clean altname:        BTCUSD, SOLUSD
+          - clean wsname:         BTC/USD, SOL/USD
+          - legacy X-prefix base: XBTUSD, XXBTUSD, XBT/USD
+          - legacy Z-prefix quote: BTCZUSD, SOLZUSD
+          - legacy double-prefix: XXBTZUSD ← the form `kraken volume`
+            actually returns for BTC fiat pairs; v2.19.0 missed this.
+
+        Generation is data-driven from ASSET_ALIASES so adding a new
+        Z-prefix or X-prefix asset code there automatically extends
+        every pair's alias set.
+        """
         canonical = pair.cli_format
-        forms = {
-            pair.cli_format,
-            pair.cli_format.replace("/", ""),
-            pair.api_format,
-            pair.ws_format,
-            pair.ws_format.replace("/", ""),
-        }
-        # XBT is Kraken's legacy ticker for BTC. Any form containing BTC
-        # must also resolve when written with XBT.
-        for f in list(forms):
-            if "BTC" in f:
-                forms.add(f.replace("BTC", "XBT"))
+        base_variants = _alias_variants(pair.base)
+        quote_variants = _alias_variants(pair.quote)
+        forms: set[str] = set()
+        for b in base_variants:
+            for q in quote_variants:
+                forms.add(f"{b}/{q}")
+                forms.add(f"{b}{q}")
+        # Also register the literal API/WS formats (defensive; should
+        # already be subsumed by the cross product, but harmless if
+        # ASSET_ALIASES is incomplete for some asset).
+        forms.add(pair.api_format)
+        forms.add(pair.ws_format)
+        forms.add(pair.cli_format)
         for f in forms:
             self._aliases[f.upper()] = canonical
 

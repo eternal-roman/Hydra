@@ -98,6 +98,62 @@ def test_resolve_xbt_alias():
     assert reg.resolve("SOL/XBT").cli_format == "SOL/BTC"
 
 
+def test_resolve_zusd_alias():
+    """ZUSD is Kraken's Z-prefix internal code for USD fiat. Volume
+    endpoint emits this in the BASE-QUOTE concatenation for fiat pairs.
+    Regression: v2.19.0 missed this dialect; SOL/ZUSD didn't resolve."""
+    reg = default_registry()
+    assert reg.resolve("SOL/ZUSD").cli_format == "SOL/USD"
+    assert reg.resolve("SOLZUSD").cli_format == "SOL/USD"
+    assert reg.resolve("BTC/ZUSD").cli_format == "BTC/USD"
+    assert reg.resolve("BTCZUSD").cli_format == "BTC/USD"
+
+
+def test_resolve_xxbt_double_prefix_alias():
+    """XXBT is Kraken's 4-letter legacy code for BTC. Combined with
+    ZUSD, it produces XXBTZUSD — the form `kraken volume` actually
+    emits for BTC fiat pairs. Smoking-gun regression from v2.19.0."""
+    reg = default_registry()
+    assert reg.resolve("XXBTZUSD").cli_format == "BTC/USD"
+    assert reg.resolve("XXBT/ZUSD").cli_format == "BTC/USD"
+    # Single-prefix combinations also resolve.
+    assert reg.resolve("XXBTUSD").cli_format == "BTC/USD"
+    assert reg.resolve("XBTZUSD").cli_format == "BTC/USD"
+    # XXBT against USDC (less common but consistent with the rule).
+    assert reg.resolve("XXBTUSDC").cli_format == "BTC/USDC"
+
+
+def test_resolve_zusdc_alias():
+    """ZUSDC is in ASSET_ALIASES → USDC; rare in production but the
+    cross-product generator must still register it. Regression
+    completeness check."""
+    reg = default_registry()
+    assert reg.resolve("SOLZUSDC").cli_format == "SOL/USDC"
+    assert reg.resolve("XXBTZUSDC").cli_format == "BTC/USDC"
+
+
+def test_alias_variants_data_driven():
+    """The cross-product generator must derive variants from
+    ASSET_ALIASES, not from a hardcoded base/quote table. Adding a new
+    alias to ASSET_ALIASES at runtime should extend every pair's
+    resolution surface."""
+    from hydra_pair_registry import _alias_variants
+    btc_variants = _alias_variants("BTC")
+    assert "BTC" in btc_variants
+    assert "XBT" in btc_variants
+    assert "XXBT" in btc_variants
+    usd_variants = _alias_variants("USD")
+    assert "USD" in usd_variants
+    assert "ZUSD" in usd_variants
+
+
+def test_alias_variants_unknown_canonical():
+    """An asset with no aliases returns just itself."""
+    from hydra_pair_registry import _alias_variants
+    assert _alias_variants("DOGE") == {"DOGE"}
+    assert _alias_variants("") == set()
+
+
 def test_resolve_unknown_raises():
     reg = default_registry()
     with pytest.raises(KeyError):
