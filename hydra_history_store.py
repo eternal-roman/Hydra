@@ -39,6 +39,17 @@ class CandleRow:
 
 
 @dataclass(frozen=True)
+class Coverage:
+    pair: str
+    grain_sec: int
+    candle_count: int
+    first_ts: Optional[int]
+    last_ts: Optional[int]
+    gap_count: int
+    max_gap_sec: int
+
+
+@dataclass(frozen=True)
 class CandleOut:
     pair: str
     grain_sec: int
@@ -139,3 +150,38 @@ class HistoryStore:
                 (pair, grain_sec, start_ts, end_ts),
             ).fetchall()
         yield from (CandleOut(*row) for row in rows)
+
+    def coverage(self, pair: str, grain_sec: int) -> Coverage:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """SELECT COUNT(*), MIN(ts), MAX(ts) FROM ohlc
+                   WHERE pair=? AND grain_sec=?""",
+                (pair, grain_sec),
+            )
+            count, first, last = cur.fetchone()
+            if count == 0:
+                return Coverage(pair, grain_sec, 0, None, None, 0, 0)
+            cur = conn.execute(
+                """SELECT ts FROM ohlc WHERE pair=? AND grain_sec=?
+                   ORDER BY ts ASC""",
+                (pair, grain_sec),
+            )
+            prev = None
+            gap_count = 0
+            max_gap = 0
+            for (ts,) in cur:
+                if prev is not None:
+                    delta = ts - prev
+                    if delta > grain_sec:
+                        gap_count += 1
+                        if delta > max_gap:
+                            max_gap = delta
+                prev = ts
+        return Coverage(pair, grain_sec, count, first, last, gap_count, max_gap)
+
+    def list_pairs(self) -> List[Tuple[str, int]]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT DISTINCT pair, grain_sec FROM ohlc ORDER BY pair, grain_sec"
+            )
+            return [(r[0], r[1]) for r in cur]

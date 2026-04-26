@@ -72,3 +72,30 @@ def test_rest_overwrites_tape(tmp_path):
     store.upsert_candles([rest_row])
     [got] = list(store.fetch("BTC/USD", 3600, 1_700_000_000, 1_700_000_000))
     assert got.close == 2.0
+
+
+from hydra_history_store import Coverage
+
+
+def test_coverage_empty(tmp_path):
+    store = HistoryStore(str(tmp_path / "h.sqlite"))
+    cov = store.coverage("BTC/USD", 3600)
+    assert cov.candle_count == 0
+    assert cov.first_ts is None and cov.last_ts is None
+
+
+def test_coverage_with_gap(tmp_path):
+    store = HistoryStore(str(tmp_path / "h.sqlite"))
+    rows = [
+        CandleRow("BTC/USD", 3600, 1_700_000_000 + i*3600,
+                  10, 11, 9, 10, 1, "kraken_archive")
+        for i in range(3)  # ts +0, +3600, +7200
+    ]
+    # Skip a candle at +10800, write +14400
+    rows.append(CandleRow("BTC/USD", 3600, 1_700_000_000 + 4*3600,
+                          10, 11, 9, 10, 1, "kraken_archive"))
+    store.upsert_candles(rows)
+    cov = store.coverage("BTC/USD", 3600)
+    assert cov.candle_count == 4
+    assert cov.gap_count == 1
+    assert cov.max_gap_sec == 7200
