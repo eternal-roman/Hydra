@@ -16,7 +16,20 @@ from datetime import datetime, timezone
 # ═══════════════════════════════════════════════════════════════
 
 class KrakenCLI:
-    """Wraps kraken-cli v0.2.3 running in WSL Ubuntu."""
+    """Wraps kraken-cli v0.3.2 running in WSL Ubuntu.
+
+    Verified compatible with kraken-cli v0.3.2 (commit aa32814+):
+      - `--asset-class` flag is canonical (`--aclass` is hidden alias);
+        Hydra never passed `--aclass`, so no callsite change required.
+      - `relativeFundingRate` rename in commit 910a4d6 was internal to
+        kraken-cli's paper-trading futures engine. Hydra calls
+        `kraken futures tickers` (read-only public endpoint), which still
+        emits `fundingRate` (absolute, USD/contract/period) — that field
+        is converted to relative bps via `_absolute_to_relative_bps` in
+        `hydra_derivatives_stream.py`.
+      - Spot endpoints (ticker/balance/orderbook/ohlc/orders/pairs) have
+        no breaking schema changes from v0.2.3 → v0.3.2.
+    """
 
     # REST & WS pair resolution: friendly name → CLI format.
     # Internal canonical uses BTC (modern Kraken convention). The CLI
