@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterable, Iterator, List, Optional, Tuple
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Source tier ranking — higher rank wins on conflict.
 # kraken_archive is immutable; rest > tape for trailing-edge refresh.
@@ -81,6 +81,49 @@ CREATE TABLE IF NOT EXISTS ohlc (
   ingested_at  INTEGER NOT NULL,
   PRIMARY KEY (pair, grain_sec, ts)
 );
+
+CREATE TABLE IF NOT EXISTS regression_run (
+  run_id          TEXT    PRIMARY KEY,
+  hydra_version   TEXT    NOT NULL,
+  git_sha         TEXT    NOT NULL,
+  param_hash      TEXT    NOT NULL,
+  pair            TEXT    NOT NULL,
+  grain_sec       INTEGER NOT NULL,
+  spec_json       TEXT    NOT NULL,
+  override_reason TEXT,
+  created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS regression_metrics (
+  run_id   TEXT NOT NULL,
+  fold_idx INTEGER NOT NULL,
+  metric   TEXT NOT NULL,
+  value    REAL NOT NULL,
+  PRIMARY KEY (run_id, fold_idx, metric),
+  FOREIGN KEY (run_id) REFERENCES regression_run(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS regression_equity_curve (
+  run_id  TEXT NOT NULL,
+  ts      INTEGER NOT NULL,
+  equity  REAL NOT NULL,
+  PRIMARY KEY (run_id, ts),
+  FOREIGN KEY (run_id) REFERENCES regression_run(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS regression_trade (
+  run_id    TEXT NOT NULL,
+  trade_idx INTEGER NOT NULL,
+  ts        INTEGER NOT NULL,
+  side      TEXT NOT NULL,
+  price     REAL NOT NULL,
+  size      REAL NOT NULL,
+  fee       REAL NOT NULL,
+  regime    TEXT,
+  reason    TEXT,
+  PRIMARY KEY (run_id, trade_idx),
+  FOREIGN KEY (run_id) REFERENCES regression_run(run_id)
+);
 """
 
 
@@ -114,14 +157,19 @@ class HistoryStore:
             except sqlite3.OperationalError:
                 existing = None  # fresh DB, meta table not created yet
             if existing is not None and existing != SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"hydra_history_store: schema_version={existing} on disk, "
-                    f"code expects {SCHEMA_VERSION}. Run a migration or delete "
-                    f"the DB to rebuild from archive."
-                )
+                if existing == 1 and SCHEMA_VERSION == 2:
+                    # 1 -> 2: regression_* tables added; safe additive change.
+                    pass
+                else:
+                    raise RuntimeError(
+                        f"hydra_history_store: schema_version={existing} on disk, "
+                        f"code expects {SCHEMA_VERSION}. Run a migration or delete "
+                        f"the DB to rebuild from archive."
+                    )
             conn.executescript(_SCHEMA)
+            # Bump recorded version idempotently.
             conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             conn.commit()
