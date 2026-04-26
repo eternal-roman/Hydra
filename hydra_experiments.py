@@ -450,7 +450,7 @@ def new_experiment(
 
 def build_config_from_preset(
     preset: str,
-    pairs: Tuple[str, ...] = ("SOL/USDC",),  # P9 flips to ("SOL/USD",)
+    pairs: Tuple[str, ...] = ("SOL/USD",),
     n_candles: int = 1000,
     seed: int = 42,
     extra_overrides: Optional[Dict[str, Dict[str, float]]] = None,

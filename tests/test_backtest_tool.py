@@ -298,7 +298,7 @@ class TestDispatcherRouting(unittest.TestCase, _TempStoreMixin):
             "n_candles": 400,
         }, caller="cli")["data"]["id"]
         out = self.dispatcher.execute("get_equity_curve", {
-            "experiment_id": eid, "pair": "SOL/USDC", "downsample_to": 50,
+            "experiment_id": eid, "pair": "SOL/USD", "downsample_to": 50,
         }, caller="cli")
         self.assertTrue(out["success"])
         self.assertLessEqual(len(out["data"]["values"]), 50)
@@ -429,7 +429,7 @@ class TestDispatcherErrorIsolation(unittest.TestCase, _TempStoreMixin):
         self.dispatcher.execute("run_backtest", {
             "preset": "default", "hypothesis": "big overrides redacted",
             "n_candles": 50,
-            "overrides": {"SOL/USDC": {"foo": 1.0, "bar": 2.0}},
+            "overrides": {"SOL/USD": {"foo": 1.0, "bar": 2.0}},
         }, caller="brain:analyst")
         events = self.dispatcher.store.read_audit()
         run_events = [e for e in events if e.get("tool") == "run_backtest"]
@@ -437,7 +437,7 @@ class TestDispatcherErrorIsolation(unittest.TestCase, _TempStoreMixin):
         # overrides redacted; override_keys present
         self.assertNotIn("overrides", run_events[-1]["input"])
         # override_keys is the top-level pair keys (per-pair override dict)
-        self.assertEqual(run_events[-1]["input"]["override_keys"], ["SOL/USDC"])
+        self.assertEqual(run_events[-1]["input"]["override_keys"], ["SOL/USD"])
 
 
 # ═══════════════════════════════════════════════════════════════

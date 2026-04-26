@@ -3,12 +3,15 @@
 HYDRA Agent — Kraken CLI Integration Layer (Live Trading)
 
 Connects the HYDRA engine to live Kraken market data via kraken-cli (WSL).
-Supports live trading on SOL/USDC, SOL/BTC, and BTC/USDC.
+Supports live trading on SOL/USD, SOL/BTC, and BTC/USD by default; the
+active triangle's stable quote (USD / USDC / USDT) is selected by
+--pairs at agent boot.
 Broadcasts state over WebSocket for the React dashboard.
 
 Usage:
-    python hydra_agent.py --pairs SOL/USDC,SOL/BTC --balance 100 --duration 600
-    python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60
+    python hydra_agent.py --pairs SOL/USD,SOL/BTC --balance 100 --duration 600
+    python hydra_agent.py --pairs SOL/USD,SOL/BTC,BTC/USD --interval 60
+    python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60   # opt back into USDC
 """
 
 import subprocess
@@ -688,6 +691,27 @@ class HydraAgent:
             print(f"  [SNAPSHOT] Save failed: {e}")
 
     @staticmethod
+    def _detect_snapshot_stable_quote(snapshot: dict) -> Optional[str]:
+        """Detect the stable quote a persisted snapshot was written under.
+
+        Scans `pairs` for the first stable-quoted entry; returns the
+        uppercased quote ("USDC", "USD", "USDT") or None when the
+        snapshot has no stable-quoted pairs (e.g. a SOL/BTC-only
+        backtest). Used by `_load_snapshot` to decide whether to
+        invoke the state migrator.
+        """
+        pairs = snapshot.get("pairs") or []
+        if not isinstance(pairs, list):
+            return None
+        for p in pairs:
+            if not isinstance(p, str) or "/" not in p:
+                continue
+            quote = p.split("/", 1)[1].strip().upper()
+            if quote in STABLE_QUOTES:
+                return quote
+        return None
+
+    @staticmethod
     def _derive_triangle(pairs: List[str]) -> Optional[TradingTriangle]:
         """Best-effort triangle derivation from a pair-symbol list.
 
@@ -759,6 +783,34 @@ class HydraAgent:
             if snapshot.get("version") != 1:
                 print(f"  [SNAPSHOT] Unknown version {snapshot.get('version')}, skipping.")
                 return
+            # v2.19: quote-currency migration. If the snapshot's recorded
+            # pairs use a different stable quote than the active triangle
+            # (e.g. USDC snapshot, USD-default agent), rewrite the pair-
+            # keyed fields in place so engine state, regime history, and
+            # OI deques are preserved across the quote flip.
+            triangle = getattr(self, "triangle", None)
+            if triangle is not None:
+                target_quote = triangle.quote
+                source_quote = self._detect_snapshot_stable_quote(snapshot)
+                if source_quote and source_quote != target_quote:
+                    from hydra_state_migrator import migrate_snapshot
+                    migrate_snapshot(
+                        snapshot,
+                        source_quote=source_quote,
+                        target_quote=target_quote,
+                    )
+                    print(f"  [SNAPSHOT] Migrated pair keys {source_quote} → "
+                          f"{target_quote} (engine state preserved).")
+                    # Persist the migrated snapshot back to disk so the
+                    # marker survives subsequent boots even if migration
+                    # is otherwise idempotent.
+                    try:
+                        tmp = path + ".tmp"
+                        with open(tmp, "w") as f:
+                            json.dump(snapshot, f, default=str)
+                        os.replace(tmp, path)
+                    except OSError as e:
+                        print(f"  [SNAPSHOT] Post-migration write failed: {e}")
             # Normalize legacy XBT pair names in engine keys
             engines_raw = snapshot.get("engines", {})
             engines = {self._normalize_pair_name(k): v for k, v in engines_raw.items()}
@@ -3777,8 +3829,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="HYDRA — Live Regime-Adaptive Trading Agent for Kraken CLI",
     )
-    parser.add_argument("--pairs", type=str, default="SOL/USDC,SOL/BTC,BTC/USDC",
-                        help="Comma-separated trading pairs (default: SOL/USDC,SOL/BTC,BTC/USDC)")
+    parser.add_argument("--pairs", type=str, default="SOL/USD,SOL/BTC,BTC/USD",
+                        help="Comma-separated trading pairs (default: SOL/USD,SOL/BTC,BTC/USD; v2.19+ flipped from USDC to USD)")
     parser.add_argument("--balance", type=float, default=100.0,
                         help="Reference balance for position sizing (default: 100)")
     parser.add_argument("--interval", type=int, default=None,

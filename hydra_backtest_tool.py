@@ -534,7 +534,7 @@ class BacktestToolDispatcher:
         if not hypothesis or len(hypothesis) < 8:
             return _error("hypothesis is required and must be ≥ 8 characters")
 
-        pairs = tuple(tool_input.get("pairs") or ["SOL/USDC"])  # P9 flips to USD
+        pairs = tuple(tool_input.get("pairs") or ["SOL/USD"])
         n_candles = int(tool_input.get("n_candles") or 500)
         seed = int(tool_input.get("seed") or 42)
         overrides = tool_input.get("overrides") or None
@@ -683,7 +683,7 @@ class BacktestToolDispatcher:
             return _error("sweep values limited to 10 per call")
 
         try:
-            pairs = tuple([pair]) if pair else ("SOL/USDC",)  # P9 flips to USD
+            pairs = tuple([pair]) if pair else ("SOL/USD",)
             cfg, _ov = build_config_from_preset(
                 preset=preset,
                 pairs=pairs,

@@ -71,7 +71,7 @@ class BacktestConfig:
     description: str = ""
     hypothesis: str = ""
 
-    pairs: Tuple[str, ...] = ("SOL/USDC",)  # P9 flips to ("SOL/USD",)
+    pairs: Tuple[str, ...] = ("SOL/USD",)
     initial_balance_per_pair: float = 100.0
     candle_interval: int = 15  # minutes
 
@@ -1085,7 +1085,7 @@ def new_experiment_id() -> str:
 def make_quick_config(
     *,
     name: str = "quick",
-    pairs: Tuple[str, ...] = ("SOL/USDC",),  # P9 flips to ("SOL/USD",)
+    pairs: Tuple[str, ...] = ("SOL/USD",),
     n_candles: int = 500,
     kind: str = "gbm",
     seed: int = 42,
