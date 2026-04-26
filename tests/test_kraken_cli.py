@@ -370,11 +370,19 @@ class TestFeeTierExtraction:
         assert result["pair_fees"]["SOL/USDC"]["taker_pct"] == 0.26
 
     def test_extract_fee_tier_missing_pairs_attr(self):
-        """Agent without `pairs` set should still return a valid dict."""
+        """Agent without `pairs` set should still return a valid dict.
+
+        v2.19+ improvement: the registry-based resolution canonicalizes
+        the key regardless of whether the agent's `pairs` attr is set.
+        Pre-v2.19 the key passed through unchanged when pairs was missing,
+        leaking Kraken's slashless dialect into downstream consumers.
+        """
         agent = object.__new__(HydraAgent)
         # deliberately no pairs attr
         result = agent._extract_fee_tier({"fees": {"SOLUSDC": {"fee": "0.26"}}})
-        assert "SOLUSDC" in result["pair_fees"]  # unmapped key passthrough
+        # Canonicalized via registry — SOLUSDC is a known alias for SOL/USDC.
+        assert "SOL/USDC" in result["pair_fees"]
+        assert result["pair_fees"]["SOL/USDC"]["taker_pct"] == 0.26
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 
+from hydra_pair_registry import (
+    PairRegistry,
+    default_registry,
+    normalize_asset as _registry_normalize_asset,
+    STAKED_SUFFIXES as _REGISTRY_STAKED_SUFFIXES,
+    ASSET_ALIASES as _REGISTRY_ASSET_ALIASES,
+)
+
 # ═══════════════════════════════════════════════════════════════
 # KRAKEN CLI WRAPPER (via WSL)
 # ═══════════════════════════════════════════════════════════════
@@ -29,75 +37,54 @@ class KrakenCLI:
         `hydra_derivatives_stream.py`.
       - Spot endpoints (ticker/balance/orderbook/ohlc/orders/pairs) have
         no breaking schema changes from v0.2.3 → v0.3.2.
+
+    Pair metadata (precision, ordermin, costmin, alias resolution) is
+    delegated to `hydra_pair_registry.PairRegistry`. The class-level
+    `registry` attribute is the shared registry instance; live agent
+    boot calls `KrakenCLI.apply_pair_constants(load_pair_constants(...))`
+    to overlay authoritative metadata from `kraken pairs`.
     """
 
-    # REST & WS pair resolution: friendly name → CLI format.
-    # Internal canonical uses BTC (modern Kraken convention). The CLI
-    # accepts slashed BTC form natively (SOL/BTC, BTC/USDC). Legacy XBT
-    # aliases are kept so old snapshots/journals resolve correctly.
-    PAIR_MAP = {
-        "SOL/USDC": "SOL/USDC",
-        "SOL/BTC": "SOL/BTC",
-        "BTC/USDC": "BTC/USDC",
-        "BTC/USD": "BTC/USD",
-        # Legacy XBT aliases — resolve to BTC canonical
-        "SOL/XBT": "SOL/BTC",
-        "XBT/USDC": "BTC/USDC",
-    }
-
-    # WS v2 API pair resolution: friendly name → WS v2 format.
-    # With BTC as canonical, WS v2 format matches internal names directly.
-    WS_PAIR_MAP = {
-        "SOL/USDC": "SOL/USDC",
-        "SOL/BTC": "SOL/BTC",
-        "BTC/USDC": "BTC/USDC",
-    }
+    # Single source of truth for pair metadata. Class-level so the
+    # static-method API (_resolve_pair, _format_price, ...) can delegate
+    # without threading an instance through every callsite. Tests that
+    # need isolation can call `set_registry(default_registry())` to
+    # reset between cases.
+    registry: PairRegistry = default_registry()
 
     # Suffixes Kraken uses for non-tradable (staked/bonded/locked/earn) assets.
-    # .F = earn-flex (yield-bearing, instant-redeem) — e.g. USDC.F. v2.16.2
-    # adds .F to the suffix set: previously USDC.F normalized to itself,
-    # missed the "USDC"→1.0 USD price lookup, and was silently valued at $0
-    # in the dashboard's balance history chart + Total Balance stat.
-    STAKED_SUFFIXES = ('.B', '.S', '.M', '.F')
+    # Re-exposed from hydra_pair_registry so external callers
+    # (KrakenCLI.STAKED_SUFFIXES) continue to resolve.
+    STAKED_SUFFIXES = _REGISTRY_STAKED_SUFFIXES
 
-    # Kraken sometimes returns extended asset names — normalize to canonical form
-    ASSET_NORMALIZE = {
-        'XXBT': 'BTC', 'XBTC': 'BTC', 'XBT': 'BTC',
-        'XETH': 'ETH', 'XSOL': 'SOL',
-        'ZUSD': 'USD', 'ZUSDC': 'USDC',
-    }
+    # Re-export for external callers that previously read this dict.
+    # Prefer `hydra_pair_registry.normalize_asset` for new code.
+    ASSET_NORMALIZE = _REGISTRY_ASSET_ALIASES
 
-    # Per-pair price precision (hardcoded fallbacks). Dynamically overridden
-    # at startup by load_pair_constants() → apply_pair_constants() from
-    # `kraken pairs`. Legacy XBT aliases kept so _format_price works with
-    # old journal/snapshot data.
-    PRICE_DECIMALS = {
-        'SOL/USDC': 2, 'SOLUSDC': 2,
-        'BTC/USDC': 1, 'BTCUSDC': 1,
-        'SOL/BTC': 7, 'SOLBTC': 7,
-        'BTC/USD': 1, 'BTCUSD': 1,
-        # Legacy XBT aliases
-        'XBT/USDC': 1, 'XBTUSDC': 1,
-        'SOL/XBT': 7, 'SOLXBT': 7,
-        'XBT/USD': 1, 'XBTUSD': 1,
-    }
-    PRICE_DECIMALS_DEFAULT = 8  # conservative fallback for unknown pairs
+    # Conservative fallback for any pair not in the registry — preserves
+    # the legacy `_format_price` passthrough behavior for unknown pairs.
+    PRICE_DECIMALS_DEFAULT = 8
+
+    @classmethod
+    def set_registry(cls, registry: PairRegistry) -> None:
+        """Replace the class-level registry (test/boot use only)."""
+        cls.registry = registry
 
     @staticmethod
     def _is_staked(asset: str) -> bool:
         """Check if an asset name represents a staked/bonded/locked position."""
-        return any(asset.endswith(s) for s in KrakenCLI.STAKED_SUFFIXES)
+        if not asset:
+            return False
+        return any(asset.endswith(s) for s in _REGISTRY_STAKED_SUFFIXES)
 
     @staticmethod
     def _normalize_asset(asset: str) -> str:
         """Normalize Kraken asset name to canonical form (e.g. XXBT → BTC).
-        Strips staked suffixes first, then applies name mapping."""
-        name = asset
-        for suffix in KrakenCLI.STAKED_SUFFIXES:
-            if name.endswith(suffix):
-                name = name[:-len(suffix)]
-                break
-        return KrakenCLI.ASSET_NORMALIZE.get(name, name)
+
+        Strips staked suffixes (.B/.S/.M/.F) first, then applies
+        Z/X-prefix aliases (ZUSD→USD, XXBT→BTC).
+        """
+        return _registry_normalize_asset(asset)
 
     @staticmethod
     def _run(args: list, timeout: int = 20) -> dict:
@@ -110,14 +97,14 @@ class KrakenCLI:
         RCE in the WSL environment. v2.15.0 hardens the boundary.
         """
         quoted = " ".join(shlex.quote(str(a)) for a in args)
-        
+
         # Multi-tenancy: inject dynamic API keys if provided in the process environment
         cmd_str = "source ~/.cargo/env"
         api_key = os.environ.get("KRAKEN_API_KEY")
         api_secret = os.environ.get("KRAKEN_API_SECRET")
         if api_key and api_secret:
             cmd_str += f" && export KRAKEN_API_KEY={shlex.quote(api_key)} && export KRAKEN_API_SECRET={shlex.quote(api_secret)}"
-            
+
         cmd_str += f" && kraken {quoted} -o json 2>/dev/null"
         cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
         try:
@@ -143,34 +130,40 @@ class KrakenCLI:
         except Exception as e:
             return {"error": str(e)}
 
-    @staticmethod
-    def _resolve_pair(pair: str) -> str:
-        """Resolve to CLI pair format (e.g. SOL/BTC, BTC/USDC)."""
-        return KrakenCLI.PAIR_MAP.get(pair, pair)
+    @classmethod
+    def _resolve_pair(cls, pair: str) -> str:
+        """Resolve to CLI pair format (e.g. SOL/BTC, BTC/USD).
 
-    @staticmethod
-    def _resolve_ws_pair(pair: str) -> str:
-        """Resolve to WS v2 pair format (e.g. SOL/BTC, BTC/USDC)."""
-        return KrakenCLI.WS_PAIR_MAP.get(pair, pair)
-
-    @staticmethod
-    def _format_price(pair: str, price: float) -> str:
-        """HF-001 fix: format a price at the pair's native precision.
-
-        Looks up the pair in PRICE_DECIMALS (accepting the friendly form with
-        slash, the slashless form, or the PAIR_MAP-resolved form). Falls back
-        to PRICE_DECIMALS_DEFAULT (8) for unknown pairs. Rounds the price to
-        the allowed number of decimals and formats with trailing zeros to 8dp
-        (Kraken accepts trailing zeros as insignificant but rejects meaningful
-        decimals beyond the pair's precision).
+        Unknown pairs are returned unchanged (passthrough), matching
+        the pre-v2.19 behavior.
         """
-        decimals = (
-            KrakenCLI.PRICE_DECIMALS.get(pair)
-            or KrakenCLI.PRICE_DECIMALS.get(pair.replace("/", ""))
-            or KrakenCLI.PRICE_DECIMALS.get(KrakenCLI._resolve_pair(pair))
-            or KrakenCLI.PRICE_DECIMALS_DEFAULT
-        )
-        rounded = round(float(price), decimals)
+        p = cls.registry.get(pair)
+        return p.cli_format if p else pair
+
+    @classmethod
+    def _resolve_ws_pair(cls, pair: str) -> str:
+        """Resolve to WS v2 pair format (e.g. SOL/BTC, BTC/USD).
+
+        Unknown pairs returned unchanged. With BTC as canonical, WS v2
+        format matches CLI format directly for all known pairs.
+        """
+        p = cls.registry.get(pair)
+        return p.ws_format if p else pair
+
+    @classmethod
+    def _format_price(cls, pair: str, price: float) -> str:
+        """Format a price at the pair's native precision.
+
+        Looks up the pair in the registry, rounds the price to the
+        allowed number of decimals, and formats with trailing zeros to
+        8dp (Kraken accepts trailing zeros as insignificant but rejects
+        meaningful decimals beyond the pair's precision). Unknown pairs
+        fall back to PRICE_DECIMALS_DEFAULT (8).
+        """
+        p = cls.registry.get(pair)
+        if p is not None:
+            return p.format_price(price)
+        rounded = round(float(price), cls.PRICE_DECIMALS_DEFAULT)
         return f"{rounded:.8f}"
 
     # ─── System Status ───
@@ -186,8 +179,8 @@ class KrakenCLI:
 
     # ─── Asset Pair Info ───
 
-    @staticmethod
-    def asset_pairs(pairs: list = None) -> dict:
+    @classmethod
+    def asset_pairs(cls, pairs: list = None) -> dict:
         """Get tradable asset pair info.
 
         Returns {pair_name: {pair_decimals, ordermin, costmin, base, quote, ...}}
@@ -195,9 +188,9 @@ class KrakenCLI:
         """
         args = ["pairs"]
         if pairs:
-            resolved = ",".join(KrakenCLI._resolve_pair(p) for p in pairs)
+            resolved = ",".join(cls._resolve_pair(p) for p in pairs)
             args.extend(["--pair", resolved])
-        return KrakenCLI._run(args)
+        return cls._run(args)
 
     @classmethod
     def load_pair_constants(cls, pairs: list) -> dict:
@@ -205,42 +198,36 @@ class KrakenCLI:
 
         Returns {friendly_pair: {price_decimals, ordermin, costmin, base, quote,
         lot_decimals, tick_size}} for each requested pair that Kraken knows about.
-        Returns {} on API failure (caller should use hardcoded fallbacks).
+        Returns {} on API failure (caller should use registry fallback values).
         """
         data = cls.asset_pairs(pairs)
         if not isinstance(data, dict) or "error" in data:
             return {}
 
-        # Build reverse map: every form Kraken might use → friendly pair name.
-        # Includes legacy XBT aliases so Kraken's wsname/altname (which still
-        # use XBT internally) resolve to our BTC canonical pairs.
-        friendly_map = {}
-        for fp in pairs:
-            resolved = cls._resolve_pair(fp)
-            friendly_map[fp] = fp
-            friendly_map[fp.replace("/", "")] = fp
-            friendly_map[resolved] = fp
-            friendly_map[resolved.replace("/", "")] = fp
-        # Add legacy XBT alias entries: Kraken pairs API returns wsname="XBT/USDC",
-        # altname="XBTUSDC" etc. Map those back to our BTC canonical pairs.
-        for alias, target in cls.PAIR_MAP.items():
-            if alias != target:  # only aliases (XBT→BTC mappings)
-                for fp in pairs:
-                    if cls._resolve_pair(fp) == target:
-                        friendly_map[alias] = fp
-                        friendly_map[alias.replace("/", "")] = fp
-                        break
-
+        # Build a friendly-name lookup using the registry for input forms.
+        # Kraken returns wsname like "SOL/USD" or "XBT/USDC"; altname like
+        # "SOLUSD" or "XBTUSDC"; and the top-level dict key uses Kraken's
+        # internal name. The registry resolves all these forms.
         result = {}
         for kraken_name, info in data.items():
             if not isinstance(info, dict):
                 continue
-            friendly = (
-                friendly_map.get(info.get("wsname"))
-                or friendly_map.get(info.get("altname"))
-                or friendly_map.get(kraken_name)
-                or friendly_map.get(kraken_name.replace("/", ""))
+            friendly_pair = (
+                cls.registry.get(info.get("wsname"))
+                or cls.registry.get(info.get("altname"))
+                or cls.registry.get(kraken_name)
             )
+            # If we asked for a pair not in the registry, fall back to the
+            # original friendly form the caller passed.
+            friendly = friendly_pair.cli_format if friendly_pair else None
+            if not friendly:
+                # Best-effort: if Kraken's altname matches one of our
+                # requested pairs in a slashless form, use the original.
+                slashless = (info.get("altname") or kraken_name).upper()
+                for requested in pairs or []:
+                    if requested.replace("/", "").upper() == slashless:
+                        friendly = requested
+                        break
             if not friendly:
                 continue
             base = cls._normalize_asset(info.get("base", ""))
@@ -258,22 +245,20 @@ class KrakenCLI:
 
     @classmethod
     def apply_pair_constants(cls, loaded: dict):
-        """Merge dynamically loaded pair constants into class-level PRICE_DECIMALS."""
-        for friendly, info in loaded.items():
-            dec = info["price_decimals"]
-            cls.PRICE_DECIMALS[friendly] = dec
-            cls.PRICE_DECIMALS[friendly.replace("/", "")] = dec
-            resolved = cls._resolve_pair(friendly)
-            cls.PRICE_DECIMALS[resolved] = dec
-            cls.PRICE_DECIMALS[resolved.replace("/", "")] = dec
+        """Merge dynamically loaded pair constants into the shared registry.
+
+        Calls `PairRegistry.bootstrap_from_kraken(loaded)` — overlays
+        precision/ordermin/costmin from live Kraken data. Idempotent.
+        """
+        cls.registry.bootstrap_from_kraken(loaded)
 
     # ─── Public Market Data ───
 
-    @staticmethod
-    def ticker(pair: str) -> dict:
+    @classmethod
+    def ticker(cls, pair: str) -> dict:
         """Get current ticker data."""
-        p = KrakenCLI._resolve_pair(pair)
-        data = KrakenCLI._run(["ticker", p])
+        p = cls._resolve_pair(pair)
+        data = cls._run(["ticker", p])
         if "error" in data:
             return data
         for key, val in data.items():
@@ -290,11 +275,11 @@ class KrakenCLI:
                 }
         return data
 
-    @staticmethod
-    def ohlc(pair: str, interval: int = 1) -> list:
+    @classmethod
+    def ohlc(cls, pair: str, interval: int = 1) -> list:
         """Fetch OHLC candles. Returns list of candle dicts."""
-        p = KrakenCLI._resolve_pair(pair)
-        data = KrakenCLI._run(["ohlc", p, "--interval", str(interval)])
+        p = cls._resolve_pair(pair)
+        data = cls._run(["ohlc", p, "--interval", str(interval)])
         if isinstance(data, dict) and "error" in data:
             print(f"  [WARN] OHLC fetch error for {pair}: {data['error']}")
             return []
@@ -339,27 +324,27 @@ class KrakenCLI:
             args.extend(["--end", str(end)])
         return KrakenCLI._run(args)
 
-    @staticmethod
-    def volume(pairs=None) -> dict:
+    @classmethod
+    def volume(cls, pairs=None) -> dict:
         """Get 30-day trade volume and current fee tier.
 
-        pairs: optional list of friendly pair symbols (e.g. ["SOL/USDC","BTC/USDC"])
+        pairs: optional list of friendly pair symbols (e.g. ["SOL/USD","BTC/USD"])
         or a pre-formatted comma-separated string. Returns raw Kraken response dict,
         or {"error": ...} on failure.
         """
         args = ["volume"]
         if pairs:
             if isinstance(pairs, (list, tuple)):
-                resolved = ",".join(KrakenCLI._resolve_pair(p) for p in pairs)
+                resolved = ",".join(cls._resolve_pair(p) for p in pairs)
             else:
                 resolved = pairs
             args.extend(["--pair", resolved])
-        return KrakenCLI._run(args)
+        return cls._run(args)
 
     # ─── Order Execution ───
 
-    @staticmethod
-    def order_buy(pair: str, volume: float, price: float = None,
+    @classmethod
+    def order_buy(cls, pair: str, volume: float, price: float = None,
                   order_type: str = "limit", post_only: bool = True,
                   validate: bool = False, userref: int = None) -> dict:
         """Place a buy order. Defaults to limit post-only (maker).
@@ -368,20 +353,20 @@ class KrakenCLI:
         `order_userref` on the WS executions stream — our primary
         correlation key between a local journal entry and the exchange.
         """
-        p = KrakenCLI._resolve_pair(pair)
+        p = cls._resolve_pair(pair)
         args = ["order", "buy", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
-            args.extend(["--price", KrakenCLI._format_price(pair, price)])
+            args.extend(["--price", cls._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
         if userref is not None:
             args.extend(["--userref", str(int(userref))])
         if validate:
             args.append("--validate")
-        return KrakenCLI._run(args)
+        return cls._run(args)
 
-    @staticmethod
-    def order_sell(pair: str, volume: float, price: float = None,
+    @classmethod
+    def order_sell(cls, pair: str, volume: float, price: float = None,
                    order_type: str = "limit", post_only: bool = True,
                    validate: bool = False, userref: int = None) -> dict:
         """Place a sell order. Defaults to limit post-only (maker).
@@ -390,17 +375,17 @@ class KrakenCLI:
         `order_userref` on the WS executions stream — our primary
         correlation key between a local journal entry and the exchange.
         """
-        p = KrakenCLI._resolve_pair(pair)
+        p = cls._resolve_pair(pair)
         args = ["order", "sell", p, f"{volume:.8f}", "--type", order_type, "--yes"]
         if price is not None and order_type != "market":
-            args.extend(["--price", KrakenCLI._format_price(pair, price)])
+            args.extend(["--price", cls._format_price(pair, price)])
         if post_only and order_type == "limit":
             args.extend(["--oflags", "post"])
         if userref is not None:
             args.extend(["--userref", str(int(userref))])
         if validate:
             args.append("--validate")
-        return KrakenCLI._run(args)
+        return cls._run(args)
 
     @staticmethod
     def query_orders(*txids, userref: int = None, trades: bool = False) -> dict:
@@ -441,22 +426,19 @@ class KrakenCLI:
 
     # ─── Paper Trading ───
 
-    @staticmethod
-    def paper_buy(pair: str, volume: float, order_type: str = "limit") -> dict:
+    @classmethod
+    def paper_buy(cls, pair: str, volume: float, order_type: str = "limit") -> dict:
         """Paper trade buy — no API keys needed."""
-        p = KrakenCLI._resolve_pair(pair)
-        return KrakenCLI._run(["paper", "buy", p, "--type", order_type, "--volume", f"{volume:.8f}"])
+        p = cls._resolve_pair(pair)
+        return cls._run(["paper", "buy", p, "--type", order_type, "--volume", f"{volume:.8f}"])
 
-    @staticmethod
-    def paper_sell(pair: str, volume: float, order_type: str = "limit") -> dict:
+    @classmethod
+    def paper_sell(cls, pair: str, volume: float, order_type: str = "limit") -> dict:
         """Paper trade sell — no API keys needed."""
-        p = KrakenCLI._resolve_pair(pair)
-        return KrakenCLI._run(["paper", "sell", p, "--type", order_type, "--volume", f"{volume:.8f}"])
+        p = cls._resolve_pair(pair)
+        return cls._run(["paper", "sell", p, "--type", order_type, "--volume", f"{volume:.8f}"])
 
     @staticmethod
     def paper_balance() -> dict:
         """Get paper trading balance."""
         return KrakenCLI._run(["paper", "balance"])
-
-
-

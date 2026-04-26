@@ -3229,26 +3229,14 @@ class HydraAgent:
             fees_taker = {}
         if not isinstance(fees_maker, dict):
             fees_maker = {}
-        # Kraken may return fee keys in several forms ("SOLUSDC", "SOL/USDC", "BTCUSDC",
-        # "XXBTZUSD" historically). Build a forgiving reverse map that accepts both the
-        # PAIR_MAP-resolved form and the slashless form of the original friendly pair.
-        pair_reverse = {}
-        for p in getattr(self, "pairs", []):
-            resolved = KrakenCLI._resolve_pair(p)
-            pair_reverse[resolved] = p
-            pair_reverse[p.replace("/", "")] = p  # slashless fallback ("SOLUSDC" → "SOL/USDC")
-            pair_reverse[p] = p                   # passthrough
-        # Add legacy XBT alias forms so Kraken fee keys like "XBTUSDC", "SOLXBT" resolve
-        for alias, target in KrakenCLI.PAIR_MAP.items():
-            if alias != target:
-                for p in getattr(self, "pairs", []):
-                    if KrakenCLI._resolve_pair(p) == target:
-                        pair_reverse[alias] = p
-                        pair_reverse[alias.replace("/", "")] = p
-                        break
+        # Kraken may return fee keys in several forms ("SOLUSD", "SOL/USD", "BTCUSDC",
+        # "XXBTZUSD" historically). The PairRegistry already knows every alias
+        # dialect, so we just resolve raw_key → friendly via the registry,
+        # falling back to raw_key for unknown pairs.
         seen_keys = set(fees_taker.keys()) | set(fees_maker.keys())
         for raw_key in seen_keys:
-            friendly = pair_reverse.get(raw_key, raw_key)
+            resolved = KrakenCLI.registry.get(raw_key)
+            friendly = resolved.cli_format if resolved else raw_key
             taker_entry = fees_taker.get(raw_key) or {}
             maker_entry = fees_maker.get(raw_key) or {}
             taker_pct = None

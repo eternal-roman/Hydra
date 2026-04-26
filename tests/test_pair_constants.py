@@ -1,8 +1,10 @@
 """
 HYDRA Dynamic Pair Constants Test Suite
-Validates load_pair_constants, apply_pair_constants, and apply_pair_limits
-for the Phase 2 dynamic pair loading feature. Ensures hardcoded fallbacks
-survive, dynamic overrides take effect, and all pair name forms are patched.
+
+Validates load_pair_constants, apply_pair_constants (registry overlay),
+and PositionSizer.apply_pair_limits. v2.19+: KrakenCLI delegates pair
+metadata to hydra_pair_registry.PairRegistry; the legacy class-level
+PRICE_DECIMALS dict is gone. Tests now assert against the registry.
 """
 
 import sys
@@ -11,6 +13,7 @@ import copy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hydra_kraken_cli import KrakenCLI
+from hydra_pair_registry import default_registry
 from hydra_engine import PositionSizer
 
 
@@ -84,16 +87,12 @@ FRIENDLY_PAIRS = ["SOL/USDC", "SOL/BTC", "BTC/USDC"]
 
 
 # ═══════════════════════════════════════════════════════════════
-# Helpers — save & restore class-level state that tests mutate
+# Helpers — reset KrakenCLI.registry between tests for isolation
 # ═══════════════════════════════════════════════════════════════
 
-def _snapshot_price_decimals():
-    return dict(KrakenCLI.PRICE_DECIMALS)
-
-
-def _restore_price_decimals(snap):
-    KrakenCLI.PRICE_DECIMALS.clear()
-    KrakenCLI.PRICE_DECIMALS.update(snap)
+def _reset_registry():
+    """Snapshot a fresh default registry into the class-level slot."""
+    KrakenCLI.set_registry(default_registry())
 
 
 def _snapshot_sizer():
@@ -112,6 +111,9 @@ def _restore_sizer(snap):
 # ═══════════════════════════════════════════════════════════════
 
 class TestLoadPairConstants:
+
+    def setup_method(self):
+        _reset_registry()
 
     def test_parses_real_kraken_shape(self):
         """Feed the real Kraken response shape and verify all fields extracted."""
@@ -133,7 +135,7 @@ class TestLoadPairConstants:
         assert sol["tick_size"] == "0.01"
 
     def test_maps_xbtusdc_to_friendly(self):
-        """Kraken returns 'XBTUSDC' key with wsname='XBT/USDC' → maps to friendly 'BTC/USDC'."""
+        """Kraken returns 'XBTUSDC' key with wsname='XBT/USDC' → registry resolves XBT alias to friendly 'BTC/USDC'."""
         stub = _StubRun(REAL_KRAKEN_RESPONSE)
         stub.install()
         try:
@@ -189,8 +191,14 @@ class TestLoadPairConstants:
             stub.restore()
         assert result == {}
 
-    def test_unknown_pair_in_response_ignored(self):
-        """Pairs returned by Kraken that we didn't request are skipped."""
+    def test_unknown_pair_in_response_passes_through(self):
+        """Pairs returned by Kraken that we didn't request and that the
+        registry recognizes still come through (registry knows about them).
+        ETH/USDC is not in the static fallback, but since the test response
+        provides full metadata, the registry's bootstrap_from_kraken would
+        accept it. load_pair_constants returns it iff the registry resolves
+        the pair name — which only happens if it's pre-registered or it
+        matches a slashless requested form. ETH/USDC is neither here."""
         resp = {"ETH/USDC": {"pair_decimals": 2, "ordermin": "0.01", "costmin": "0.5",
                               "base": "ETH", "quote": "USDC", "lot_decimals": 8,
                               "wsname": "ETH/USDC", "altname": "ETHUSDC"}}
@@ -215,59 +223,63 @@ class TestLoadPairConstants:
 
 
 # ═══════════════════════════════════════════════════════════════
-# TESTS: apply_pair_constants
+# TESTS: apply_pair_constants — now overlays the registry
 # ═══════════════════════════════════════════════════════════════
 
 class TestApplyPairConstants:
 
-    def test_patches_all_forms(self):
-        """apply_pair_constants should patch friendly, slashless, and resolved forms."""
-        snap = _snapshot_price_decimals()
-        try:
-            loaded = {"SOL/USDC": {"price_decimals": 3}}
-            KrakenCLI.apply_pair_constants(loaded)
-            assert KrakenCLI.PRICE_DECIMALS["SOL/USDC"] == 3
-            assert KrakenCLI.PRICE_DECIMALS["SOLUSDC"] == 3
-            # resolved form for SOL/USDC is SOL/USDC (identity in PAIR_MAP)
-            assert KrakenCLI.PRICE_DECIMALS.get("SOL/USDC") == 3
-        finally:
-            _restore_price_decimals(snap)
+    def setup_method(self):
+        _reset_registry()
 
-    def test_patches_resolved_form_for_btc(self):
-        """BTC/USDC resolves to BTC/USDC via PAIR_MAP (identity)."""
-        snap = _snapshot_price_decimals()
-        try:
-            loaded = {"BTC/USDC": {"price_decimals": 2}}
-            KrakenCLI.apply_pair_constants(loaded)
-            assert KrakenCLI.PRICE_DECIMALS["BTC/USDC"] == 2
-            assert KrakenCLI.PRICE_DECIMALS["BTCUSDC"] == 2
-        finally:
-            _restore_price_decimals(snap)
+    def test_overlays_precision_in_registry(self):
+        """apply_pair_constants should overlay precision in the registry."""
+        # Static fallback has SOL/USDC at 2 decimals; override to 3.
+        loaded = {"SOL/USDC": {
+            "price_decimals": 3, "ordermin": 0.02, "costmin": 0.5,
+            "base": "SOL", "quote": "USDC", "lot_decimals": 8, "tick_size": None,
+        }}
+        KrakenCLI.apply_pair_constants(loaded)
+        assert KrakenCLI.registry.resolve("SOL/USDC").price_decimals == 3
+        # The registry resolves all alias forms to the same canonical pair,
+        # so all forms reflect the new precision.
+        assert KrakenCLI.registry.resolve("SOLUSDC").price_decimals == 3
+
+    def test_overlays_btc_pair(self):
+        """BTC/USDC overlay reflected in registry resolution."""
+        loaded = {"BTC/USDC": {
+            "price_decimals": 2, "ordermin": 0.0001, "costmin": 0.5,
+            "base": "BTC", "quote": "USDC", "lot_decimals": 8, "tick_size": None,
+        }}
+        KrakenCLI.apply_pair_constants(loaded)
+        assert KrakenCLI.registry.resolve("BTC/USDC").price_decimals == 2
+        assert KrakenCLI.registry.resolve("BTCUSDC").price_decimals == 2
+        # XBT alias still resolves correctly after overlay.
+        assert KrakenCLI.registry.resolve("XBT/USDC").price_decimals == 2
 
     def test_preserves_unaffected_entries(self):
         """Existing entries for other pairs should survive."""
-        snap = _snapshot_price_decimals()
-        try:
-            original_sol_btc = KrakenCLI.PRICE_DECIMALS.get("SOL/BTC")
-            loaded = {"SOL/USDC": {"price_decimals": 3}}
-            KrakenCLI.apply_pair_constants(loaded)
-            assert KrakenCLI.PRICE_DECIMALS.get("SOL/BTC") == original_sol_btc
-        finally:
-            _restore_price_decimals(snap)
+        original_sol_btc = KrakenCLI.registry.resolve("SOL/BTC").price_decimals
+        loaded = {"SOL/USDC": {
+            "price_decimals": 3, "ordermin": 0.02, "costmin": 0.5,
+            "base": "SOL", "quote": "USDC", "lot_decimals": 8, "tick_size": None,
+        }}
+        KrakenCLI.apply_pair_constants(loaded)
+        assert KrakenCLI.registry.resolve("SOL/BTC").price_decimals == original_sol_btc
 
     def test_dynamic_overrides_in_format_price(self):
         """After apply, _format_price should use the new precision."""
-        snap = _snapshot_price_decimals()
-        try:
-            # Override SOL/USDC from 2 → 3 decimals
-            loaded = {"SOL/USDC": {"price_decimals": 3}}
-            KrakenCLI.apply_pair_constants(loaded)
-            # With 2 decimals, 80.4745 → 80.47; with 3 decimals → 80.475
-            assert KrakenCLI._format_price("SOL/USDC", 80.4745) == "80.47500000"
-            # 80.1234 with 3 decimals → 80.123
-            assert KrakenCLI._format_price("SOL/USDC", 80.1234) == "80.12300000"
-        finally:
-            _restore_price_decimals(snap)
+        loaded = {"SOL/USDC": {
+            "price_decimals": 3, "ordermin": 0.02, "costmin": 0.5,
+            "base": "SOL", "quote": "USDC", "lot_decimals": 8, "tick_size": None,
+        }}
+        KrakenCLI.apply_pair_constants(loaded)
+        # With 2 decimals, 80.4745 → 80.47; with 3 decimals → 80.475
+        # round(80.4745, 3) → 80.475 (Python banker's rounding to nearest tied even
+        # would give 80.474 but float repr of 80.4745 is 80.474500000…01 so it
+        # rounds up).
+        assert KrakenCLI._format_price("SOL/USDC", 80.4745) == "80.47500000"
+        # 80.1234 with 3 decimals → 80.123
+        assert KrakenCLI._format_price("SOL/USDC", 80.1234) == "80.12300000"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -314,7 +326,6 @@ class TestApplyPairLimits:
         try:
             sizer = PositionSizer()
             sizer.apply_pair_limits({})
-            # Nothing should change
             assert PositionSizer.MIN_ORDER_SIZE == snap[0]
             assert PositionSizer.MIN_COST == snap[1]
         finally:
@@ -340,10 +351,15 @@ class TestApplyPairLimits:
 
 class TestFallbackBehavior:
 
+    def setup_method(self):
+        _reset_registry()
+
     def test_format_price_works_without_dynamic_load(self):
-        """Hardcoded defaults work even if load_pair_constants was never called."""
-        # SOL/USDC has hardcoded 2 decimals
+        """Static fallback values work even if load_pair_constants was never called."""
+        # SOL/USDC fallback has 2 decimals
         assert KrakenCLI._format_price("SOL/USDC", 80.4745) == "80.47000000"
+        # SOL/USD fallback has 2 decimals
+        assert KrakenCLI._format_price("SOL/USD", 80.4745) == "80.47000000"
 
     def test_sizer_works_without_dynamic_load(self):
         """Hardcoded MIN_ORDER_SIZE/MIN_COST work without apply_pair_limits."""
@@ -376,6 +392,8 @@ def run_tests():
         for method_name in sorted(methods):
             test_name = f"{cls.__name__}.{method_name}"
             try:
+                if hasattr(instance, "setup_method"):
+                    instance.setup_method()
                 getattr(instance, method_name)()
                 passed += 1
                 print(f"  PASS  {test_name}")
