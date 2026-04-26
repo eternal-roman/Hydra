@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import pytest
-from hydra_history_store import HistoryStore, SCHEMA_VERSION, CandleRow
+from hydra_history_store import HistoryStore, SCHEMA_VERSION, CandleRow, Coverage
 
 
 def test_init_creates_schema(tmp_path):
@@ -73,8 +73,6 @@ def test_rest_overwrites_tape(tmp_path):
     [got] = list(store.fetch("BTC/USD", 3600, 1_700_000_000, 1_700_000_000))
     assert got.close == 2.0
 
-
-from hydra_history_store import Coverage
 
 
 def test_coverage_empty(tmp_path):
