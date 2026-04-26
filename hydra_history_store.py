@@ -35,9 +35,6 @@ CREATE TABLE IF NOT EXISTS ohlc (
   ingested_at  INTEGER NOT NULL,
   PRIMARY KEY (pair, grain_sec, ts)
 );
-
-CREATE INDEX IF NOT EXISTS ix_ohlc_pair_grain_ts
-  ON ohlc(pair, grain_sec, ts);
 """
 
 
