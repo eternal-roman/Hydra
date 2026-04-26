@@ -94,6 +94,8 @@ class BacktestConfig:
     random_seed: int = 42
     max_ticks: int = DEFAULT_MAX_TICKS
 
+    brain_mode: str = "stub"   # "stub" | "replay" | "live" — only "stub" wired in v2.20.0
+
     # Stamps
     git_sha: str = ""
     param_hash: str = ""
@@ -170,6 +172,18 @@ def _compute_param_hash(cfg: BacktestConfig) -> str:
 
 def _iso_utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _stub_brain_decision(quant_signal, rules_outcome):
+    """Deterministic stand-in for the AI brain in regression/lab runs.
+    Approves the quant signal iff R10 quant_rules approve; otherwise HOLD.
+    No LLM calls, no network, no randomness. Reserved for the brain
+    integration step (deferred past v2.20.0); kept here so the contract
+    is defined when the wire-up lands."""
+    if rules_outcome and getattr(rules_outcome, "approved", True):
+        return quant_signal
+    from hydra_engine import SignalAction
+    return SignalAction.HOLD
 
 
 @dataclass
@@ -623,6 +637,16 @@ class BacktestRunner:
         )
         self.filler = SimulatedFiller(cfg.fill_model, cfg.maker_fee_bps)
         self._pending: Dict[str, Optional[PendingOrder]] = {p: None for p in cfg.pairs}
+
+    def _validate_brain_mode(self) -> None:
+        """Enforce that only brain_mode='stub' is wired in v2.20.0.
+        Raises NotImplementedError for 'replay' or 'live'."""
+        if self.config.brain_mode == "stub":
+            return
+        raise NotImplementedError(
+            f"brain_mode={self.config.brain_mode!r} not implemented in v2.20.0; "
+            f"only 'stub' is supported. Modes 'replay' and 'live' are deferred."
+        )
 
     # ---- public API ----
 
