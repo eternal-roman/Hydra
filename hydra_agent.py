@@ -353,6 +353,21 @@ class HydraAgent:
         self.ticker_stream = TickerStream(pairs, paper=paper)
         self.balance_stream = BalanceStream(paper=paper)
         self.book_stream = BookStream(pairs, depth=10, paper=paper)
+        # v2.20.0 — Live tape capture: subscribe to CandleStream pushes and
+        # write closed candles into the canonical hydra_history.sqlite store.
+        # Bounded queue + writer thread guarantee the agent's main loop never
+        # stalls on a SQLite fsync. Default ON; disable with HYDRA_TAPE_CAPTURE=0.
+        if os.environ.get("HYDRA_TAPE_CAPTURE", "1") == "1":
+            from hydra_history_store import HistoryStore
+            from hydra_tape_capture import TapeCapture
+            _tape_db = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            self._tape_store = HistoryStore(_tape_db)
+            self._tape_capture = TapeCapture(self._tape_store)
+            self.candle_stream.on_candle(self._tape_capture.on_candle)
+            self._tape_capture.start()
+        else:
+            self._tape_store = None
+            self._tape_capture = None
         # Tracks the most recently logged unhealthy reason so the tick body
         # only prints on transitions instead of spamming the warning every
         # tick. None means "currently healthy or never warned".
@@ -447,6 +462,13 @@ class HydraAgent:
                 self.derivatives_stream.stop()
             except Exception as e:
                 print(f"  [HYDRA] DerivativesStream stop failed: {e}")
+        # v2.20.0 — Stop tape capture last (after streams are torn down so no
+        # more candles arrive). Drain the queue cleanly.
+        if getattr(self, "_tape_capture", None) is not None:
+            try:
+                self._tape_capture.stop()
+            except Exception as e:
+                print(f"  [HYDRA] TapeCapture stop failed: {e}")
         # Drain the backtest worker pool (daemon threads — best-effort join).
         if self.backtest_pool is not None:
             try:
