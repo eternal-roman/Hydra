@@ -16,6 +16,41 @@ from typing import Iterable, Iterator, List, Optional, Tuple
 
 SCHEMA_VERSION = 1
 
+# Source tier ranking — higher rank wins on conflict.
+# kraken_archive is immutable; rest > tape for trailing-edge refresh.
+_SOURCE_RANK = {"tape": 1, "kraken_rest": 2, "kraken_archive": 3}
+
+
+@dataclass(frozen=True)
+class CandleRow:
+    pair: str
+    grain_sec: int
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    source: str
+
+    def __post_init__(self):
+        if self.source not in _SOURCE_RANK:
+            raise ValueError(f"unknown source tier: {self.source}")
+
+
+@dataclass(frozen=True)
+class CandleOut:
+    pair: str
+    grain_sec: int
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    source: str
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -62,3 +97,46 @@ class HistoryStore:
                 (str(SCHEMA_VERSION),),
             )
             conn.commit()
+
+    def upsert_candles(self, rows: Iterable[CandleRow]) -> int:
+        rows = list(rows)
+        if not rows:
+            return 0
+        now = int(time.time())
+        n = 0
+        with self._lock, self._conn() as conn:
+            for r in rows:
+                # Tier-aware insert: only overwrite if incoming source rank
+                # >= existing source rank.
+                cur = conn.execute(
+                    "SELECT source FROM ohlc WHERE pair=? AND grain_sec=? AND ts=?",
+                    (r.pair, r.grain_sec, r.ts),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    if _SOURCE_RANK[r.source] < _SOURCE_RANK[existing[0]]:
+                        continue  # incoming is lower tier — skip
+                conn.execute(
+                    """INSERT OR REPLACE INTO ohlc
+                       (pair, grain_sec, ts, open, high, low, close, volume,
+                        source, ingested_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (r.pair, r.grain_sec, r.ts, r.open, r.high, r.low,
+                     r.close, r.volume, r.source, now),
+                )
+                n += 1
+            conn.commit()
+        return n
+
+    def fetch(self, pair: str, grain_sec: int,
+              start_ts: int, end_ts: int) -> Iterator[CandleOut]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """SELECT pair, grain_sec, ts, open, high, low, close, volume, source
+                   FROM ohlc
+                   WHERE pair=? AND grain_sec=? AND ts>=? AND ts<=?
+                   ORDER BY ts ASC""",
+                (pair, grain_sec, start_ts, end_ts),
+            )
+            for row in cur:
+                yield CandleOut(*row)
