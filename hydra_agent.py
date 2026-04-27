@@ -30,7 +30,7 @@ import threading
 import traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import deque
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -3749,8 +3749,18 @@ class HydraAgent:
 
         Uses average-cost-basis accounting: each sell's cost is valued at
         the running weighted-average buy price, so only *closed* round-trip
-        profit/loss is reflected.  Unsold inventory cost stays out of
+        profit/loss is reflected. Unsold inventory cost stays out of
         realized P&L — it belongs in unrealized (pos_size * (price - avg_entry)).
+
+        **Stable-quote netting** (cross-pair fix, v2.20.0):
+        Stable quotes are equivalent ($1 by CLAUDE.md invariant
+        `STABLE_QUOTES = {USD, USDC, USDT}`). A SOL bought via SOL/USDC
+        and sold via SOL/USD shares the same SOL inventory; siloing the
+        cost basis per pair manufactures fictitious P&L. So when the
+        requested pair has a stable quote, we walk all journal entries
+        whose base matches AND whose quote is also in STABLE_QUOTES,
+        treating prices as USD-equivalent. Entries with non-stable quote
+        (e.g. SOL/BTC) stay per-pair — BTC is a real quote.
 
         Only counts FILLED / PARTIALLY_FILLED entries — PLACED,
         PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED are skipped.
@@ -3759,12 +3769,42 @@ class HydraAgent:
         journal state, not engine balances which get pooled and re-split.
         """
         FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
+        if "/" in pair:
+            req_base, req_quote = pair.split("/", 1)
+        else:
+            req_base, req_quote = pair, "USD"
+        req_is_stable = req_quote in STABLE_QUOTES
+
+        def _matches(entry_pair: str) -> bool:
+            if "/" not in entry_pair:
+                return entry_pair == pair
+            eb, eq = entry_pair.split("/", 1)
+            if req_is_stable:
+                return eb == req_base and eq in STABLE_QUOTES
+            return entry_pair == pair
+
+        # Iterate in chronological order so cost basis evolves correctly
+        # across stable siblings. Sort defensively by placed_at.
+        # Rolling 90-day window (v2.20.0): older trades drop out so the
+        # headline P&L reflects recent activity, not 14-month history.
+        # The window cutoff is computed from `placed_at` strings; entries
+        # without a parseable timestamp pass the filter (legacy compat).
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        def _within_window(e: dict) -> bool:
+            pa = e.get("placed_at")
+            if not pa:
+                return True
+            return pa >= cutoff
+        entries = [
+            e for e in self.order_journal
+            if _matches(e.get("pair") or "") and _within_window(e)
+        ]
+        entries.sort(key=lambda e: e.get("placed_at") or "")
+
         total_buy_cost = 0.0
         total_buy_vol = 0.0
         realized = 0.0
-        for entry in self.order_journal:
-            if entry.get("pair") != pair:
-                continue
+        for entry in entries:
             lifecycle = entry.get("lifecycle") or {}
             if lifecycle.get("state") not in FILL_STATES:
                 continue

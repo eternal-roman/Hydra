@@ -12,7 +12,22 @@ Research tab redesign — replaces synthetic-data backtests with a real-history
 SQLite store (Kraken trade-archive bootstrap + live tape capture), an
 anchored quarterly walk-forward + paired Wilcoxon methodology that powers
 both Mode B (hypothesis lab) and Mode C (release regression snapshots), and
-a `/release` regression gate.
+a `/release` regression gate. Also bundles the live P&L accounting fix
+(stable-quote inventory netting + rolling 90-day window).
+
+### Fixed
+
+- **Live P&L accounting (`_compute_pair_realized_pnl` in `hydra_agent.py`):**
+  - **Stable-quote netting:** A SOL bought via SOL/USDC and sold via SOL/USD
+    now shares cost basis (USD/USDC/USDT are equivalent per the
+    `STABLE_QUOTES = {USD, USDC, USDT}` invariant). Previously, the per-pair
+    silo manufactured fictitious P&L when inventory crossed stable-quoted
+    siblings — e.g. a SOL/USD SELL with no SOL/USD BUYs in journal would
+    report proceeds with zero cost basis.
+  - **Rolling 90-day window:** dashboard headline P&L now reflects only the
+    last 90 days of trade activity, not the full journal history.
+  - Pairs with non-stable quotes (SOL/BTC) keep per-pair accounting because
+    BTC is a real volatile quote, not a $1 stable.
 
 ### Added
 
