@@ -44,7 +44,7 @@ from hydra_engine import (
     CrossPairCoordinator,
     HydraEngine,
     SIZING_COMPETITION,
-    SIZING_CONSERVATIVE,
+    SIZING_CONSERVATIVE,  # noqa: F401 — re-exported for callers
     SignalAction,
 )
 
@@ -182,7 +182,6 @@ def _stub_brain_decision(quant_signal, rules_outcome):
     is defined when the wire-up lands."""
     if rules_outcome and getattr(rules_outcome, "approved", True):
         return quant_signal
-    from hydra_engine import SignalAction
     return SignalAction.HOLD
 
 

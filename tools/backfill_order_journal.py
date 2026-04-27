@@ -27,7 +27,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 
 HYDRA_RELEVANT_PAIRS = (

@@ -40,7 +40,7 @@ import queue
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,7 +51,6 @@ from hydra_backtest import (
     _iso_utc_now,
 )
 from hydra_experiments import (
-    DEFAULT_STORE_ROOT,
     Experiment,
     ExperimentStore,
     new_experiment,

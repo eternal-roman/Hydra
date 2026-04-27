@@ -14,25 +14,18 @@ Usage:
     python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60   # opt back into USDC
 """
 
-import subprocess
 import dataclasses
 import json
 import time
 import sys
 import os
 import argparse
-import queue
-import secrets
-import shlex
 import signal as sig
-import asyncio
-import threading
 import traceback
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from collections import deque
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -75,7 +68,7 @@ from hydra_kraken_cli import KrakenCLI
 from hydra_pair_registry import STABLE_QUOTES
 from hydra_config import TradingTriangle
 from hydra_ws_server import DashboardBroadcaster
-from hydra_streams import BaseStream, CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
+from hydra_streams import CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
 
 # ═══════════════════════════════════════════════════════════════
 # HYDRA AGENT (Main Loop)

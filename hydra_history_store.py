@@ -6,7 +6,6 @@ docs/superpowers/specs/2026-04-26-research-tab-redesign-design.md.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 import time

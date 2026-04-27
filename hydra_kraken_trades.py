@@ -34,13 +34,12 @@ Schema (canonical, in perpetuity):
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional
+from typing import Iterator, List, Optional
 
 SCHEMA_VERSION = 1
 
