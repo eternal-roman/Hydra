@@ -115,6 +115,30 @@ export default function DatasetPane({ sendMessage, coverageData }) {
         Read-only inspector. Refresh via{" "}
         <code style={styles.code}>tools/refresh_history.py</code>.
       </p>
+      <div
+        style={{
+          background: "#1a2a3a",
+          border: "1px solid #2a4a6a",
+          borderRadius: 4,
+          padding: "8px 12px",
+          marginBottom: 12,
+          fontSize: 11,
+          color: "#a8c8e8",
+          lineHeight: 1.5,
+        }}
+      >
+        <strong style={{ color: "#fff" }}>About gaps:</strong> Gap counts
+        below reflect <em>real exchange-side activity</em> — hours where
+        Kraken recorded zero trades on that pair. Verified: zero trades in
+        these windows in the source archive. Common causes: (a) Kraken's
+        early low-volume era for BTC/USD (~1300 gaps in 2014, drops to
+        &lt;10/year by 2017); (b) exchange maintenance / outages affecting
+        SOL trading (e.g. <code style={styles.code}>2024-01-20</code>,
+        <code style={styles.code}>2024-04-14</code>,
+        <code style={styles.code}>2025-11-01</code> appear identically in
+        SOL/USD and SOL/BTC). The data ingestion is correct; gaps are
+        ground truth from the exchange.
+      </div>
       <table style={styles.table}>
         <thead>
           <tr style={styles.theadTr}>

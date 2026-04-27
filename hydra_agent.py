@@ -357,17 +357,23 @@ class HydraAgent:
         # write closed candles into the canonical hydra_history.sqlite store.
         # Bounded queue + writer thread guarantee the agent's main loop never
         # stalls on a SQLite fsync. Default ON; disable with HYDRA_TAPE_CAPTURE=0.
+        # Wrapped in try/except so a SQLite lock / fs issue cannot crash
+        # __init__ and silently kill the companion subsystem alongside.
+        self._tape_store = None
+        self._tape_capture = None
         if os.environ.get("HYDRA_TAPE_CAPTURE", "1") == "1":
-            from hydra_history_store import HistoryStore
-            from hydra_tape_capture import TapeCapture
-            _tape_db = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
-            self._tape_store = HistoryStore(_tape_db)
-            self._tape_capture = TapeCapture(self._tape_store)
-            self.candle_stream.on_candle(self._tape_capture.on_candle)
-            self._tape_capture.start()
-        else:
-            self._tape_store = None
-            self._tape_capture = None
+            try:
+                from hydra_history_store import HistoryStore
+                from hydra_tape_capture import TapeCapture
+                _tape_db = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+                self._tape_store = HistoryStore(_tape_db)
+                self._tape_capture = TapeCapture(self._tape_store)
+                self.candle_stream.on_candle(self._tape_capture.on_candle)
+                self._tape_capture.start()
+            except Exception as e:
+                print(f"  [TAPE] init failed ({type(e).__name__}: {e}); disabled for this run")
+                self._tape_store = None
+                self._tape_capture = None
         # Tracks the most recently logged unhealthy reason so the tick body
         # only prints on transitions instead of spamming the warning every
         # tick. None means "currently healthy or never warned".
@@ -3044,7 +3050,7 @@ class HydraAgent:
         sell_amount = sell_engine.position.size
         sell_price = sell_state.get("price", 0)
 
-        print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} → BUY {buy_pair}")
+        print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} @ {sell_price} → BUY {buy_pair}")
         print(f"  [SWAP] Reason: {reason}")
 
         # Leg 1: Sell — update engine state first, then execute on exchange
