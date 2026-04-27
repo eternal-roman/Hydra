@@ -36,11 +36,12 @@ class BuyLimitOffsetBpsTests(unittest.TestCase):
     def test_sol_btc_volatile_uses_25bps(self):
         self.assertEqual(_buy_limit_offset_bps("SOL/BTC", "VOLATILE"), 25)
 
-    def test_btc_usd_trend_down_uses_35bps(self):
-        self.assertEqual(_buy_limit_offset_bps("BTC/USD", "TREND_DOWN"), 35)
+    def test_btc_usd_trend_down_no_offset(self):
+        # BTC fills already land at local floor (1h DD == 24h DD).
+        self.assertEqual(_buy_limit_offset_bps("BTC/USD", "TREND_DOWN"), 0)
 
-    def test_btc_usd_volatile_uses_30bps(self):
-        self.assertEqual(_buy_limit_offset_bps("BTC/USD", "VOLATILE"), 30)
+    def test_btc_usd_volatile_no_offset(self):
+        self.assertEqual(_buy_limit_offset_bps("BTC/USD", "VOLATILE"), 0)
 
     # ── No-offset regimes (the caveat — avoid missing fills) ─────
 
@@ -103,12 +104,12 @@ class ApplyBuyLimitOffsetTests(unittest.TestCase):
         self.assertEqual(bps, 90)
         self.assertAlmostEqual(adj, 198.20, places=2)
 
-    def test_btc_usd_volatile_drops_price_by_30bps(self):
+    def test_btc_usd_volatile_unchanged(self):
+        # BTC has no offset (fills already at local floor).
         bid = 80000.00
         adj, bps = _apply_buy_limit_offset("BTC/USD", bid, "VOLATILE")
-        # 80000 * (1 - 0.0030) = 79760
-        self.assertEqual(bps, 30)
-        self.assertAlmostEqual(adj, 79760.00, places=1)
+        self.assertEqual(bps, 0)
+        self.assertEqual(adj, bid)
 
     def test_sol_btc_respects_native_precision(self):
         # SOL/BTC has high price precision; adjusted price should round

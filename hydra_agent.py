@@ -93,13 +93,14 @@ from hydra_streams import CandleStream, TickerStream, BalanceStream, BookStream,
 # USD/USDC/USDT -> "STABLE" via STABLE_QUOTES; non-stable BTC quote
 # stays "BTC". Missing key -> 0 bps (safe fallback).
 _BUY_LIMIT_OFFSET_BPS: Dict[tuple, int] = {
-    # BTC base
-    ("BTC", "STABLE", "VOLATILE"):    30,
-    ("BTC", "STABLE", "TREND_DOWN"):  35,
-    # SOL on /BTC
+    # BTC on stable quote: NO offset. Empirical 1h DD == 24h DD == -0.33%
+    # means fills already land at the local floor — there is no later
+    # dip to wait for, and any offset just causes missed fills.
+    # SOL on /BTC: small offset; bid drifts with BTC's own decline.
     ("SOL", "BTC",    "VOLATILE"):    25,
     ("SOL", "BTC",    "TREND_DOWN"):  30,
     # SOL on /USD or /USDC or /USDT — the structural early-fire case
+    # (median 1h DD -0.63%, 100% of fills printed lower in the next hour).
     ("SOL", "STABLE", "VOLATILE"):    65,
     ("SOL", "STABLE", "TREND_DOWN"):  90,
 }
