@@ -3545,6 +3545,11 @@ class HydraAgent:
         }
         try:
             _FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
+            # Rolling 90-day window — fills, win rate, and downstream P&L
+            # all reflect recent activity, not multi-year journal history.
+            # Entries without a parseable placed_at pass the filter (legacy
+            # compat). Same cutoff used by _compute_pair_realized_pnl.
+            _stats_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
             total_fills = 0
             fills_by_pair: Dict[str, Dict[str, Any]] = {}
             _buy_cost: Dict[str, float] = {}
@@ -3552,6 +3557,9 @@ class HydraAgent:
             for entry in self.order_journal:
                 lc = entry.get("lifecycle") or {}
                 if lc.get("state") not in _FILL_STATES:
+                    continue
+                pa = entry.get("placed_at") or ""
+                if pa and pa < _stats_cutoff:
                     continue
                 total_fills += 1
                 p = entry.get("pair", "")
