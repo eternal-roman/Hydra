@@ -131,7 +131,8 @@ def main() -> None:
     ap.add_argument("--pairs", default="SOLUSD,XBTUSD,SOLXBT",
                     help="Comma-separated Kraken pair names (e.g. SOLUSD,XBTUSD,SOLXBT)")
     ap.add_argument("--grain", type=int, default=3600, help="Candle grain in seconds (default 3600)")
-    ap.add_argument("--out", default="hydra_history.sqlite", help="Output SQLite path")
+    ap.add_argument("--out", default=os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite"),
+                    help="Output SQLite path (env: HYDRA_HISTORY_DB)")
     args = ap.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
     bootstrap_zip(args.zip, args.out, pairs=pairs, grain_sec=args.grain)

@@ -611,6 +611,7 @@ class BacktestRunner:
         # hydra_backtest_metrics.walk_forward / out_of_sample_gap to feed candle
         # slices without duplicating _loop. None (default) preserves live path.
         self._sources_override = sources_override
+        self._validate_brain_mode()
         self._build_engines_and_coord()
 
     # ---- internal setup ----

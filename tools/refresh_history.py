@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import time as _time
 from typing import Any, List, Optional
 
@@ -119,7 +120,8 @@ def refresh_all(db_path: str = "hydra_history.sqlite") -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="hydra_history.sqlite")
+    ap.add_argument("--db", default=os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite"),
+                    help="SQLite path (env: HYDRA_HISTORY_DB)")
     args = ap.parse_args()
     refresh_all(args.db)
 

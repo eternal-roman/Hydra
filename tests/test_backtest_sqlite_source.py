@@ -43,13 +43,11 @@ def test_brain_mode_stub_is_default():
 
 def test_brain_mode_live_not_supported_yet():
     cfg = BacktestConfig(name="t", pairs=("BTC/USD",), brain_mode="live")
-    runner = BacktestRunner(cfg)
     with pytest.raises(NotImplementedError, match="not implemented in v2.20.0"):
-        runner._validate_brain_mode()
+        BacktestRunner(cfg)
 
 
 def test_brain_mode_replay_not_supported_yet():
     cfg = BacktestConfig(name="t", pairs=("BTC/USD",), brain_mode="replay")
-    runner = BacktestRunner(cfg)
     with pytest.raises(NotImplementedError, match="not implemented in v2.20.0"):
-        runner._validate_brain_mode()
+        BacktestRunner(cfg)
