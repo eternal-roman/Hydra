@@ -2,15 +2,18 @@
 //
 // v2.20.0 Research tab composer — three structured sub-panes:
 //   DATASET   — read-only canonical OHLC store inspector (Mode A read)
-//   LAB       — Mode B hypothesis lab (DEFERRED at MVP — surface only)
+//   LAB       — Mode B hypothesis lab
 //   RELEASES  — Mode C release regression snapshots
 //
 // Owns only the local sub-tab state. All data + ws comes from App.jsx as props.
+// v2.20.1: restyled to use shared theme tokens (COLORS, mono) — was a generic
+// dark-template aesthetic before.
 
 import React, { useState } from "react";
 import DatasetPane from "./research/DatasetPane";
 import LabPane from "./research/LabPane";
 import ReleasesPane from "./research/ReleasesPane";
+import { COLORS, mono } from "../theme";
 
 const TABS = [
   ["DATASET", "Dataset"],
@@ -22,11 +25,11 @@ export default function ResearchTab({
   sendMessage,
   coverageData,
   labResult,
-  labProgress,            // T30B — streaming progress array from daemon thread
+  labProgress,
   releasesList,
   releasesDiff,
-  paramsSchema,           // T30A — param schema from research_params_current
-  clearLabRunState,       // T26 audit fix — clear stale lab state on pair change
+  paramsSchema,
+  clearLabRunState,
 }) {
   const [pane, setPane] = useState("DATASET");
 
@@ -34,8 +37,8 @@ export default function ResearchTab({
     <div>
       <nav
         style={{
-          borderBottom: "1px solid #333",
-          padding: "0 16px",
+          borderBottom: `1px solid ${COLORS.panelBorder}`,
+          padding: "0 24px",
           display: "flex",
           gap: 4,
         }}
@@ -49,16 +52,19 @@ export default function ResearchTab({
               style={{
                 background: "transparent",
                 border: "none",
-                color: active ? "#fff" : "#888",
-                padding: "12px 16px",
+                color: active ? COLORS.text : COLORS.textDim,
+                padding: "14px 18px",
                 cursor: "pointer",
                 borderBottom: active
-                  ? "2px solid #3aa757"
+                  ? `2px solid ${COLORS.accent}`
                   : "2px solid transparent",
-                fontFamily: "inherit",
-                fontSize: 13,
-                fontWeight: active ? 600 : 400,
+                fontFamily: mono,
+                fontSize: 11,
+                fontWeight: active ? 700 : 500,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
                 outline: "none",
+                transition: "color 160ms, border-color 160ms",
               }}
             >
               {label}

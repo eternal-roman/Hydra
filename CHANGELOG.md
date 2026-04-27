@@ -6,6 +6,85 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.20.1] — 2026-04-27
+
+Fill-quality fix: regime-gated BUY limit offset.
+
+### Fixed
+
+- **SOL BUY early-fire (`hydra_agent.py`):** Empirical post-fill drawdown
+  analysis (200 recent fills, 15m candles, min-low over [t, t+1h]) showed
+  SOL/USD BUYs printed a lower low **100% of the time** with median 1h
+  drawdown **−0.63%**, vs BTC/USD **−0.33%** (1.9× deeper at 1h, 4.1× at
+  24h). SOL signals were structurally firing ~1h early in downtrends.
+
+  Fix: rest BUY limits below the live bid by a regime-gated bps offset.
+  Table `_BUY_LIMIT_OFFSET_BPS` is keyed by `(base, quote_class, regime)`
+  — only SOL bases carry offsets, and only in `VOLATILE` / `TREND_DOWN`
+  (RANGING/TREND_UP and all BTC-base entries stay at raw bid; BTC fills
+  empirically already land at their local floor — 1h DD ≡ 24h DD).
+
+  | Pair / regime | RANGING | TREND_UP | VOLATILE | TREND_DOWN |
+  |---|---|---|---|---|
+  | BTC/* | 0 | 0 | 0 | 0 |
+  | SOL/BTC | 0 | 0 | 25 bps | 30 bps |
+  | SOL/* (stable) | 0 | 0 | 65 bps | **90 bps** |
+
+  SELLs are untouched (SELL-side offset would lock in worse prices and is
+  not desired). Offset applied at both ticker-fetch sites in
+  `_place_order` (initial + post-validate re-fetch). New optional journal
+  field `intent.buy_offset_bps` stamped on every BUY for re-analysis.
+
+- **Stale WS auth token in `dashboard/dist/` (`hydra_ws_server.py`):**
+  The agent wrote the per-process auth token to
+  `hydra_ws_token.json` and `dashboard/public/hydra_ws_token.json`,
+  but NOT to `dashboard/dist/hydra_ws_token.json`. The
+  Electron-wrapped desktop dashboard is served from `dist/`, so the
+  browser fetched whatever token was bundled at `npm run build`
+  time — which never matched the live agent's token. Result: every
+  dispatch request (Research panes, COMPARE library, etc.) replied
+  `auth_required` while LIVE-tab broadcasts kept working (broadcasts
+  bypass per-message auth). Fix: add `dashboard/dist/hydra_ws_token.json`
+  to `TOKEN_FILES`, gated on a `dashboard/dist/index.html` sentinel
+  so dev-only checkouts that never ran `npm run build` don't
+  materialize a stray `dist/` directory.
+
+- **Research-tab styling drift (`dashboard/src/components/research/`):**
+  The Research subtree shipped in v2.20.0 used a generic dark-template
+  palette (hardcoded `#888` / `#3aa757` / `#1a1a1a` / `#d04545`) and a
+  cramped 7-column slider table that visually diverged from the rest of
+  the Hydra dashboard. Extracted design tokens (`COLORS`, `mono`,
+  `heading`) into a shared `dashboard/src/theme.js` module and rewrote
+  all four research components (`ResearchTab`, `LabPane`, `DatasetPane`,
+  `ReleasesPane` + `DiffView`) to use them. LabPane is now stacked
+  param cards with full-width sliders, accent/blue thumb colors for
+  baseline/candidate, and a Δ readout per row when the candidate has
+  drifted. Buttons match the Hydra primary style (mono font, uppercase
+  letterSpacing, transparency-tinted background).
+
+### Added
+
+- **Env flag `HYDRA_BUY_OFFSET_DISABLED=1`** — instant runtime rollback
+  to raw-bid BUYs without redeploy. Default off (offset active).
+
+### Stamps
+
+- Dashboard footer `HYDRA v2.20.0` → `HYDRA v2.20.1`.
+- `hydra_backtest.HYDRA_VERSION` → `2.20.1`.
+
+### Known follow-ups (NOT shipping in v2.20.1)
+
+- Paper mode (`_place_paper_order`) does not apply the offset — harness
+  parity gap, not user-impacting. Apply if/when a drift test needs it.
+- Backtest (`hydra_backtest.py`) does not apply the offset — backtests
+  will overstate live fill quality in TREND_DOWN SOL. Regression gate
+  not fooled (backtest-vs-backtest both without offset).
+- Companion live executor (`hydra_companions/live_executor.py`) does not
+  apply the offset — by design; human-proposed trades respect human-
+  stated price.
+
+---
+
 ## [2.20.0] — 2026-04-26
 
 Research tab redesign — replaces synthetic-data backtests with a real-history

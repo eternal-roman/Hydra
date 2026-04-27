@@ -47,7 +47,7 @@ regression bug, not a style issue.
   `STABLE_QUOTES = {USD, USDC, USDT}` are first-class. v2.19 flipped
   the default from USDC → USD; opt back into USDC by passing
   `--pairs SOL/USDC,SOL/BTC,BTC/USDC`.
-- **Version pin:** v2.20.0
+- **Version pin:** v2.20.1
 
 ## Defaults (inherited)
 
@@ -188,6 +188,7 @@ every call (tokens rotate).
 | `CBP_RUNNER_DIR` | memory | override sibling `cbp-runner` checkout location |
 | `HYDRA_POSTEDIT_HOOK_DISABLED` | tooling | silence hook during heavy refactors |
 | `HYDRA_RM_FEATURES_DISABLED` | rm_features | `=1` skips engine-internal feature computation in `_build_quant_indicators`; instant rollback without redeploy. Default off (features enabled). |
+| `HYDRA_BUY_OFFSET_DISABLED` | execution | `=1` disables the regime-gated BUY limit offset (BUYs revert to raw bid). Default off (offset active). Table lives in `hydra_agent.py:_BUY_LIMIT_OFFSET_BPS` keyed by `(base, quote_class, regime)`; only SOL bases carry offsets, and only in `VOLATILE`/`TREND_DOWN` (RANGING/TREND_UP and all BTC-base entries stay at raw bid to avoid missing fills — BTC empirically fills at its local floor already). SOL on stable quote gets the largest offset (90 bps in TREND_DOWN) — derived from empirical post-fill drawdown analysis (median 1h DD −0.63% vs BTC/USD −0.33% with floor=floor structure). |
 | `HYDRA_QUOTE` | config | Default stable quote when `--quote` is not passed and no `--pairs` override. Choices: `USD` (v2.19+ default), `USDC`, `USDT`. Resolution order: explicit `--quote` > `HYDRA_QUOTE` env > `DEFAULT_QUOTE` (USD). |
 | `HYDRA_TAPE_CAPTURE` | history | `=1` (default) wires CandleStream candle-close pushes into a bounded-queue writer that upserts to `hydra_history.sqlite` (`source='tape'`). Set `=0` to disable (e.g. paper-mode tests on a shared DB). |
 | `HYDRA_HISTORY_DB` | history | Path override for the canonical OHLC store. Defaults to `hydra_history.sqlite` in the working directory. Used by the agent (tape capture), `tools/refresh_history.py`, `tools/run_regression.py`, and the SqliteSource backtest path. |

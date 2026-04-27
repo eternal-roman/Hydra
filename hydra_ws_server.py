@@ -56,10 +56,30 @@ class DashboardBroadcaster:
     # Token file paths — written at startup so the dashboard (served by
     # Vite at dashboard/public/*) can fetch it via HTTP, and tests/CLI
     # tools can read it directly from the Hydra root.
+    #
+    # The dist/ entry covers the production build path (Electron-wrapped
+    # desktop dashboard served from dashboard/dist/). Without it, dist/
+    # carries whatever token was bundled at `npm run build` time, which
+    # never matches the live agent's per-process token — every dispatch
+    # request (Research panes, etc.) replies auth_required while
+    # broadcasts (LIVE tab) keep working because they bypass auth.
+    # _write_token_files() is gated on a sentinel-file check (e.g.
+    # dist/index.html) so dev-only checkouts that never built dist/
+    # don't get a stray dashboard/dist/ directory.
     TOKEN_FILES = (
         Path("hydra_ws_token.json"),
         Path("dashboard/public/hydra_ws_token.json"),
+        Path("dashboard/dist/hydra_ws_token.json"),
     )
+
+    # Token file paths that should only be written if a sentinel exists.
+    # Maps the token path to the sentinel that proves the surrounding
+    # build artifact is present. Skipped silently when the sentinel is
+    # absent — keeps dev-only checkouts clean.
+    TOKEN_FILE_SENTINELS = {
+        Path("dashboard/dist/hydra_ws_token.json"):
+            Path("dashboard/dist/index.html"),
+    }
 
     def __init__(self, host: str = "0.0.0.0", port: int = 8765,
                  compat_mode: bool = True):
@@ -178,6 +198,11 @@ class DashboardBroadcaster:
     def _write_token_files(self) -> None:
         payload = json.dumps({"token": self.auth_token})
         for path in self.TOKEN_FILES:
+            sentinel = self.TOKEN_FILE_SENTINELS.get(path)
+            if sentinel is not None and not sentinel.exists():
+                # Dev-only checkout (no production build); skip silently
+                # so we don't materialize an otherwise-empty dist/ dir.
+                continue
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(payload, encoding="utf-8")

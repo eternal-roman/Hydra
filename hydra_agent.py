@@ -72,6 +72,78 @@ from hydra_ws_server import DashboardBroadcaster
 from hydra_streams import CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
 
 # ═══════════════════════════════════════════════════════════════
+# Regime-gated BUY limit offset
+# ═══════════════════════════════════════════════════════════════
+#
+# Empirical analysis of 200 recent fills (15m candles, post-fill min-low
+# over [t, t+1h]) showed that BUYs landed before the local low at
+# materially different rates per (base, quote_class, regime):
+#
+#   pair       median 1h DD    %went_lower
+#   BTC/USD    -0.33%          93%
+#   SOL/BTC    -0.15%          80%
+#   SOL/USD    -0.63%          100%   <-- structural early-fire
+#
+# The fix rests BUY limits below the live bid by a regime-gated offset,
+# so the order waits for the dip rather than filling on first touch.
+# RANGING and TREND_UP keep offset=0 to avoid missing fills in chop or
+# rallies (the "caveat" — calibration sample was a downtrend window).
+#
+# Keys: (base_asset, quote_class, regime). quote_class collapses
+# USD/USDC/USDT -> "STABLE" via STABLE_QUOTES; non-stable BTC quote
+# stays "BTC". Missing key -> 0 bps (safe fallback).
+_BUY_LIMIT_OFFSET_BPS: Dict[tuple, int] = {
+    # BTC on stable quote: NO offset. Empirical 1h DD == 24h DD == -0.33%
+    # means fills already land at the local floor — there is no later
+    # dip to wait for, and any offset just causes missed fills.
+    # SOL on /BTC: small offset; bid drifts with BTC's own decline.
+    ("SOL", "BTC",    "VOLATILE"):    25,
+    ("SOL", "BTC",    "TREND_DOWN"):  30,
+    # SOL on /USD or /USDC or /USDT — the structural early-fire case
+    # (median 1h DD -0.63%, 100% of fills printed lower in the next hour).
+    ("SOL", "STABLE", "VOLATILE"):    65,
+    ("SOL", "STABLE", "TREND_DOWN"):  90,
+}
+
+
+def _buy_limit_offset_bps(pair: str, regime: Optional[str]) -> int:
+    """Return basis points to drop below the live bid for a BUY limit.
+
+    Returns 0 (no offset) when:
+      - regime is RANGING or TREND_UP (avoid missing fills in chop/rallies)
+      - pair / regime combination is not in the offset table
+      - regime is None or unknown
+
+    Disabled at runtime via env flag HYDRA_BUY_OFFSET_DISABLED=1.
+    """
+    if os.environ.get("HYDRA_BUY_OFFSET_DISABLED") == "1":
+        return 0
+    if not regime or "/" not in pair:
+        return 0
+    base, quote = pair.split("/", 1)
+    base = base.upper()
+    quote_class = "STABLE" if quote.upper() in STABLE_QUOTES else quote.upper()
+    return _BUY_LIMIT_OFFSET_BPS.get((base, quote_class, regime), 0)
+
+
+def _apply_buy_limit_offset(pair: str, bid: float, regime: Optional[str]) -> tuple:
+    """Apply the regime-gated offset to a live bid.
+
+    Returns (adjusted_price, bps_applied). adjusted_price is rounded to
+    the pair's native price_decimals via KrakenCLI._format_price (which
+    is also the formatter the order endpoint uses).
+    """
+    bps = _buy_limit_offset_bps(pair, regime)
+    if bps <= 0 or bid <= 0:
+        return bid, 0
+    raw = bid * (1.0 - bps / 10000.0)
+    # Round through the registry so we never produce a price the
+    # exchange will reject for over-precision.
+    formatted = KrakenCLI._format_price(pair, raw)
+    return float(formatted), bps
+
+
+# ═══════════════════════════════════════════════════════════════
 # HYDRA AGENT (Main Loop)
 # ═══════════════════════════════════════════════════════════════
 
@@ -2605,7 +2677,15 @@ class HydraAgent:
             return False
 
         limit_price = ticker["bid"] if action == "buy" else ticker["ask"]
+        # Regime-gated BUY offset: rest BUY limits below the live bid in
+        # downtrend/volatile regimes to wait for the dip instead of filling
+        # on first touch. SELL stays at raw ask. See _BUY_LIMIT_OFFSET_BPS.
+        offset_bps = 0
+        if action == "buy":
+            regime = state.get("regime") if isinstance(state, dict) else None
+            limit_price, offset_bps = _apply_buy_limit_offset(pair, limit_price, regime)
         entry["intent"]["limit_price"] = limit_price
+        entry["intent"]["buy_offset_bps"] = offset_bps
 
         # ─── Validate ───
         time.sleep(2)
@@ -2625,6 +2705,10 @@ class HydraAgent:
         fresh_ticker = self.ticker_stream.latest_ticker(pair) or {}
         if "error" not in fresh_ticker and "bid" in fresh_ticker:
             limit_price = fresh_ticker["bid"] if action == "buy" else fresh_ticker["ask"]
+            if action == "buy":
+                regime = state.get("regime") if isinstance(state, dict) else None
+                limit_price, offset_bps = _apply_buy_limit_offset(pair, limit_price, regime)
+                entry["intent"]["buy_offset_bps"] = offset_bps
             entry["intent"]["limit_price"] = limit_price
 
         # ─── Place for real ───
@@ -3948,7 +4032,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.20.0",
+            "version": "2.20.1",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
