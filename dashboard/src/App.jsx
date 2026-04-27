@@ -4420,15 +4420,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               </button>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
               <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
-              <StatCard
-                label={portDD ? "Max DD (Current)" : "Max Drawdown"}
-                value={portDD ? `${maxDD.toFixed(2)} (${currentDD.toFixed(2)})` : maxDD.toFixed(2)}
-                unit="%"
-                color={maxDD > 5 ? COLORS.danger : COLORS.warn}
-              />
               <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
             </div>
+            {/* Max DD card removed in v2.20.0 — portfolio-level DD was session-scoped
+                (reset on agent restart) which became inconsistent with the other
+                journal-derived top stats. Per-pair Drawdown remains on the right
+                sidebar cards. A journal-derived equity-curve drawdown that respects
+                the Hydra-only toggle is on the v2.21.0 backlog. */}
             {/* LEFT: Pair panels + equity + trade log */}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {pairNames.map((pair) => {
