@@ -22,6 +22,7 @@ export default function ResearchTab({
   sendMessage,
   coverageData,
   labResult,
+  labProgress,            // T30B — streaming progress array from daemon thread
   releasesList,
   releasesDiff,
   paramsSchema,           // T30A — param schema from research_params_current
@@ -69,7 +70,12 @@ export default function ResearchTab({
         <DatasetPane sendMessage={sendMessage} coverageData={coverageData} />
       )}
       {pane === "LAB" && (
-        <LabPane sendMessage={sendMessage} labResult={labResult} paramsSchema={paramsSchema} />
+        <LabPane
+          sendMessage={sendMessage}
+          labResult={labResult}
+          paramsSchema={paramsSchema}
+          labProgress={labProgress}
+        />
       )}
       {pane === "RELEASES" && (
         <ReleasesPane

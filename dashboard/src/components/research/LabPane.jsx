@@ -8,12 +8,14 @@
 // the range and a numeric readout. The backend handler `research_params_current`
 // is fetched on mount (and on pair change) to populate the schema.
 //
-// IMPORTANT: Mode B run-time is DEFERRED at v2.20.0. The sliders are wired;
-// the backend handler `research_lab_run` returns a structured "deferred" error.
-// The UI surfaces that error clearly and points users at the Releases pane (Mode C).
+// T30B: Mode B is now functional. research_lab_run dispatches a daemon thread;
+// the synchronous ack returns {success, job_id, n_folds, pair}. The daemon
+// streams research_lab_progress per-fold and research_lab_result on completion.
+// labProgress (array|null) is passed down from App.jsx via ResearchTab.
 //
 // Mirrors the props-based ws pattern established by DatasetPane: parent owns
-// the WS, passes `sendMessage` for outbound + `labResult` / `paramsSchema` inbound.
+// the WS, passes `sendMessage` for outbound + `labResult` / `paramsSchema` /
+// `labProgress` inbound.
 
 import React, { useState, useEffect } from "react";
 
@@ -30,7 +32,7 @@ const LABELS = {
   min_confidence_threshold: "Min confidence threshold",
 };
 
-export default function LabPane({ sendMessage, labResult, paramsSchema }) {
+export default function LabPane({ sendMessage, labResult, paramsSchema, labProgress }) {
   const [pair, setPair] = useState("BTC/USD");
   const [baselineValues, setBaselineValues] = useState({});
   const [candidateValues, setCandidateValues] = useState({});
@@ -60,10 +62,22 @@ export default function LabPane({ sendMessage, labResult, paramsSchema }) {
     setCandidateValues((c) => (Object.keys(c).length === 0 ? init : c));
   }, [schema]);
 
-  // Clear running state when a result arrives.
+  // Derive streaming state from labProgress array passed from App.jsx.
+  const progressMsgs = labProgress || [];
+  const startMsg = progressMsgs.find((m) => m.phase === "started");
+  const doneMsg = progressMsgs.find((m) => m.phase === "done");
+  const errorMsg = progressMsgs.find((m) => m.phase === "error");
+  const foldMetricsMsgs = progressMsgs.filter((m) => "fold_idx" in m);
+  const foldsCompleted = new Set(foldMetricsMsgs.map((m) => `${m.fold_idx}|${m.side}`)).size;
+  const totalSteps = (startMsg?.n_folds || labResult?.n_folds || 1) * 2; // both sides
+  // job_id from the synchronous ack.
+  const ackJobId =
+    labResult?.success && labResult.job_id ? labResult.job_id : null;
+
+  // Clear running state when the daemon thread signals done or error.
   useEffect(() => {
-    if (labResult !== null && labResult !== undefined) setRunning(false);
-  }, [labResult]);
+    if (doneMsg || errorMsg) setRunning(false);
+  }, [doneMsg, errorMsg]);
 
   const run = () => {
     setRunning(true);
@@ -76,9 +90,6 @@ export default function LabPane({ sendMessage, labResult, paramsSchema }) {
     });
   };
 
-  const showDeferredNotice =
-    labResult && labResult.success === false && /deferred/i.test(labResult.error || "");
-
   return (
     <div style={{ padding: 16 }}>
       <h3 style={{ marginTop: 0 }}>Hypothesis Lab</h3>
@@ -87,26 +98,7 @@ export default function LabPane({ sendMessage, labResult, paramsSchema }) {
         Sliders show live current values; drag to set candidate.
       </p>
 
-      {showDeferredNotice && (
-        <div
-          style={{
-            background: "#3a2a00",
-            border: "1px solid #6a4a00",
-            color: "#ffd58a",
-            padding: 12,
-            marginBottom: 12,
-            borderRadius: 4,
-            fontSize: 13,
-          }}
-        >
-          <strong>Mode B is deferred to a follow-up release.</strong> Param injection
-          into the per-fold backtest engine is not yet wired. The form is here so the
-          surface is in place; for working regression diffs today, see the{" "}
-          <strong>Releases</strong> pane (Mode C).
-        </div>
-      )}
-
-      {!showDeferredNotice && labResult && labResult.success === false && (
+      {labResult && labResult.success === false && (
         <div
           style={{
             background: "#3a0000",
@@ -262,35 +254,45 @@ export default function LabPane({ sendMessage, labResult, paramsSchema }) {
         {running ? "Running…" : "Run walk-forward"}
       </button>
 
-      {labResult && labResult.success === true && labResult.wilcoxon && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: 12,
-            background: "#1a1a1a",
-            borderRadius: 4,
-          }}
-        >
+      {running && !doneMsg && !errorMsg && (
+        <div style={{ marginTop: 12, padding: 12, background: "#1a1a1a",
+                      borderRadius: 4, color: "#aaa", fontSize: 13 }}>
+          Running walk-forward… {foldsCompleted}/{totalSteps} fold-runs completed
+          {ackJobId && (
+            <span style={{ color: "#888", fontFamily: "monospace", marginLeft: 8 }}>
+              (job {ackJobId})
+            </span>
+          )}
+        </div>
+      )}
+
+      {errorMsg && (
+        <div style={{ marginTop: 12, padding: 12, background: "#3a0000",
+                      border: "1px solid #6a0000", color: "#ffb4b4",
+                      borderRadius: 4, fontSize: 13 }}>
+          <strong>Error:</strong> {errorMsg.error}
+        </div>
+      )}
+
+      {doneMsg && (
+        <div style={{ marginTop: 16, padding: 12, background: "#1a1a1a",
+                      borderRadius: 4 }}>
           <h4 style={{ marginTop: 0 }}>Verdict (paired Wilcoxon, α=0.05)</h4>
-          {Object.entries(labResult.wilcoxon).map(([metric, v]) => {
-            const color =
-              v.verdict === "better"
-                ? "#3aa757"
-                : v.verdict === "worse"
-                ? "#d04545"
-                : "#888";
+          {Object.entries(doneMsg.wilcoxon || {}).map(([metric, v]) => {
+            const color = v.verdict === "better" ? "#3aa757" :
+                          v.verdict === "worse"  ? "#d04545" : "#888";
             return (
               <div key={metric} style={{ fontFamily: "monospace", fontSize: 12 }}>
-                <span style={{ color, fontWeight: 600 }}>
-                  {(v.verdict || "?").toUpperCase()}
-                </span>
-                {" — "}
-                {metric}: candidate wins {v.candidate_wins}/{v.n}, p=
-                {Number(v.p_value).toFixed(4)}, median Δ=
-                {Number(v.median_delta).toFixed(3)}
+                <span style={{ color, fontWeight: 600 }}>{(v.verdict || "?").toUpperCase()}</span>
+                {" — "}{metric}: {v.candidate_wins}/{v.n} wins, p={Number(v.p_value).toFixed(4)},
+                median Δ={Number(v.median_delta).toFixed(3)}
               </div>
             );
           })}
+          <div style={{ marginTop: 8, fontSize: 11, color: "#888" }}>
+            {doneMsg.n_folds_completed} folds completed
+            ({doneMsg.skipped_folds} skipped due to insufficient trades)
+          </div>
         </div>
       )}
     </div>

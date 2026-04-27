@@ -4,7 +4,8 @@ Covers:
   - research_dataset_coverage: returns per-(pair, grain_sec) rows from the store
   - research_releases_list: returns [] when no regression_run rows exist
   - research_releases_diff: returns error when a_run_id or b_run_id is missing
-  - research_lab_run: returns structured "deferred" error (Mode B not wired yet)
+  - research_lab_run: T30B — functional Mode B; synchronous ack returns
+    {success, job_id, n_folds, pair}; daemon thread streams progress
 """
 from __future__ import annotations
 
@@ -28,12 +29,14 @@ from hydra_history_store import CandleRow, HistoryStore  # noqa: E402
 # ═══════════════════════════════════════════════════════════════
 
 class _MockBroadcaster:
-    """Captures register_handler calls so tests can invoke handlers directly."""
+    """Captures register_handler calls so tests can invoke handlers directly.
+    broadcast_message captures into self.broadcasts for T30B async assertions."""
     def __init__(self):
         self.handlers: Dict[str, Callable] = {}
+        self.broadcasts: list = []  # T30B — list of (msg_type, payload) tuples
 
     def broadcast_message(self, msg_type: str, payload: Dict[str, Any]) -> None:
-        pass  # not needed for these read-only route tests
+        self.broadcasts.append((msg_type, payload))
 
     def register_handler(self, msg_type: str, fn: Callable) -> None:
         self.handlers[msg_type] = fn
@@ -140,15 +143,66 @@ class TestResearchReleasesDiff(_ResearchFixture):
 
 
 class TestResearchLabRun(_ResearchFixture):
-    def test_is_deferred(self):
-        reply = self._call("research_lab_run", {"pair": "BTC/USD"})
+    def test_invalid_pair_rejected(self):
+        """Unknown pair returns success=False before touching the store."""
+        reply = self._call("research_lab_run", {"pair": "ETH/USD"})
         self.assertFalse(reply["success"])
-        self.assertIn("deferred", reply["error"].lower())
+        self.assertIn("pair required", reply["error"])
 
-    def test_deferred_with_empty_payload(self):
+    def test_missing_pair_rejected(self):
         reply = self._call("research_lab_run", {})
         self.assertFalse(reply["success"])
-        self.assertIn("deferred", reply["error"].lower())
+        self.assertIn("pair required", reply["error"])
+
+    def test_no_history_rejected(self):
+        """Valid pair but no candles in the store → error before spawning thread."""
+        reply = self._call("research_lab_run", {
+            "pair": "BTC/USD",
+            "baseline_params": {},
+            "candidate_params": {},
+        })
+        self.assertFalse(reply["success"])
+        self.assertIn("no history", reply["error"])
+
+    def test_lab_run_returns_job_id_synchronously(self):
+        """Mode B run is async via daemon thread; the ack returns job_id and
+        n_folds immediately. We don't wait for the run to finish in tests."""
+        # Insert a couple of candles so coverage isn't empty.
+        self.history_store.upsert_candles([
+            CandleRow("BTC/USD", 3600, 1_700_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+            CandleRow("BTC/USD", 3600, 1_800_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+        ])
+        reply = self._call("research_lab_run", {
+            "pair": "BTC/USD",
+            "baseline_params": {"momentum_rsi_upper": 70.0},
+            "candidate_params": {"momentum_rsi_upper": 75.0},
+        })
+        self.assertTrue(reply["success"], reply.get("error"))
+        self.assertIn("job_id", reply)
+        self.assertEqual(reply["pair"], "BTC/USD")
+        self.assertGreaterEqual(reply["n_folds"], 0)
+
+    def test_lab_run_broadcasts_started_message(self):
+        """Daemon thread emits at least the 'started' research_lab_progress
+        broadcast within a short window after the ack."""
+        import time
+        self.history_store.upsert_candles([
+            CandleRow("BTC/USD", 3600, 1_700_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+            CandleRow("BTC/USD", 3600, 1_800_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+        ])
+        reply = self._call("research_lab_run", {
+            "pair": "BTC/USD",
+            "baseline_params": {},
+            "candidate_params": {},
+        })
+        self.assertTrue(reply["success"], reply.get("error"))
+        # Give the daemon thread a moment to emit the started broadcast.
+        time.sleep(0.15)
+        started = [
+            (t, p) for (t, p) in self.bc.broadcasts
+            if t == "research_lab_progress" and p.get("phase") == "started"
+        ]
+        self.assertGreater(len(started), 0, "no 'started' broadcast within 150ms")
 
 
 class TestAllResearchHandlersRegistered(_ResearchFixture):

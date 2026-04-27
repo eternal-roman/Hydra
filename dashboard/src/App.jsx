@@ -3384,6 +3384,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [researchReleasesDiff, setResearchReleasesDiff] = useState(null);
   // T30A — param schema from research_params_current handler.
   const [researchParamsSchema, setResearchParamsSchema] = useState(null);
+  // T30B — streaming progress + final result for Mode B walk-forward.
+  const [researchLabProgress, setResearchLabProgress] = useState(null);
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -3835,6 +3837,16 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               return;
             case "research_lab_run_ack":
               setResearchLabResult(msg);
+              return;
+            case "research_lab_progress":
+              setResearchLabProgress((prev) => {
+                const arr = prev || [];
+                return [...arr, msg];
+              });
+              return;
+            case "research_lab_result":
+              setResearchLabResult(msg);
+              setResearchLabProgress(null);  // clear progress accumulator
               return;
             case "research_params_current_ack":
               setResearchParamsSchema(msg);
@@ -4288,6 +4300,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 sendMessage={sendMessage}
                 coverageData={researchCoverage}
                 labResult={researchLabResult}
+                labProgress={researchLabProgress}
                 releasesList={researchReleasesList}
                 releasesDiff={researchReleasesDiff}
                 paramsSchema={researchParamsSchema}

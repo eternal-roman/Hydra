@@ -718,15 +718,152 @@ def mount_backtest_routes(
             return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
     def _research_lab_run(payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Deferred — Mode B walk-forward needs param injection that v2.20.0
-        doesn't have wired (the BacktestRunner doesn't read arbitrary param
-        overrides per fold). Returns a structured error so the UI can render
-        a clear pending state without crashing."""
-        return {
-            "success": False,
-            "error": "Lab Mode B is deferred to a follow-up release. Mode C "
-                     "(release regression) is fully wired — see the Releases pane.",
-        }
+        """Mode B walk-forward — async via daemon thread, streams progress."""
+        import uuid
+        from hydra_history_store import HistoryStore
+        from hydra_walk_forward import (
+            run_walk_forward, WalkForwardSpec, FoldMetrics, build_quarterly_folds,
+        )
+        pair = payload.get("pair")
+        if pair not in ("BTC/USD", "SOL/USD", "SOL/BTC"):
+            return {"success": False, "error": "pair required (BTC/USD|SOL/USD|SOL/BTC)"}
+        baseline_params = payload.get("baseline_params") or {}
+        candidate_params = payload.get("candidate_params") or {}
+        if not isinstance(baseline_params, dict) or not isinstance(candidate_params, dict):
+            return {"success": False, "error": "baseline_params and candidate_params must be objects"}
+
+        db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+        store = HistoryStore(db_path)
+        cov = store.coverage(pair, 3600)
+        if cov.first_ts is None:
+            return {"success": False, "error": f"no history for {pair}"}
+
+        job_id = uuid.uuid4().hex[:12]
+        spec_dict = payload.get("spec") or {}
+        spec = WalkForwardSpec(**{k: v for k, v in spec_dict.items()
+                                  if k in ("fold_kind", "is_lookback_quarters", "min_oos_trades")})
+        # Probe fold count up-front for the progress UI.
+        n_folds = len(build_quarterly_folds(cov.first_ts, cov.last_ts, spec))
+
+        def _broadcast(msg_type: str, data: Dict[str, Any]) -> None:
+            try:
+                broadcaster.broadcast_message(msg_type, {**data, "job_id": job_id})
+            except Exception as e:
+                print(f"  [LAB] broadcast error: {type(e).__name__}: {e}")
+
+        def _runner_factory(side: str, overrides: Dict[str, float]):
+            def _run(pair_arg, params, fold) -> "FoldMetrics":
+                from hydra_backtest import BacktestConfig, BacktestRunner
+                cfg = BacktestConfig(
+                    name=f"lab-{job_id}-{side}-{fold.idx}",
+                    pairs=(pair_arg,),
+                    data_source="sqlite",
+                    data_source_params_json=json.dumps({
+                        "db_path": db_path, "grain_sec": 3600,
+                        "start_ts": fold.is_start, "end_ts": fold.oos_end,
+                    }),
+                    param_overrides_json=json.dumps({pair_arg: overrides}),
+                    brain_mode="stub",
+                )
+                result = BacktestRunner(cfg).run()
+                m = result.metrics
+                return FoldMetrics(
+                    sharpe=getattr(m, "sharpe", 0.0),
+                    total_return_pct=getattr(m, "total_return_pct", 0.0),
+                    max_dd_pct=getattr(m, "max_dd_pct", 0.0),
+                    fee_adj_return_pct=getattr(m, "fee_adj_return_pct",
+                                              getattr(m, "total_return_pct", 0.0)),
+                    n_trades=getattr(m, "n_trades", getattr(m, "trade_count", 0)),
+                )
+            return _run
+
+        # Walk-forward calls runner(pair, params, fold) once per fold per side.
+        # We tag the params dicts with _lab_side to route inside the shared
+        # wrapper. HydraEngine.apply_tuned_params ignores unknown keys, so
+        # _lab_side is harmless when passed through to the engine.
+        baseline_tagged = {**baseline_params, "_lab_side": "baseline"}
+        candidate_tagged = {**candidate_params, "_lab_side": "candidate"}
+        baseline_runner_fn = _runner_factory("baseline", baseline_params)
+        candidate_runner_fn = _runner_factory("candidate", candidate_params)
+
+        def _runner(pair_arg, params, fold) -> "FoldMetrics":
+            side = params.get("_lab_side", "?")
+            fn = baseline_runner_fn if side == "baseline" else candidate_runner_fn
+            metrics = fn(pair_arg, params, fold)
+            # Per-fold-per-side progress broadcast.
+            _broadcast("research_lab_progress", {
+                "pair": pair_arg, "fold_idx": fold.idx, "n_folds": n_folds,
+                "side": side, "is_start": fold.is_start, "is_end": fold.is_end,
+                "oos_start": fold.oos_start, "oos_end": fold.oos_end,
+                "metrics": {
+                    "sharpe": metrics.sharpe,
+                    "total_return_pct": metrics.total_return_pct,
+                    "max_dd_pct": metrics.max_dd_pct,
+                    "fee_adj_return_pct": metrics.fee_adj_return_pct,
+                    "n_trades": metrics.n_trades,
+                },
+            })
+            return metrics
+
+        def _worker():
+            try:
+                _broadcast("research_lab_progress", {
+                    "phase": "started", "pair": pair, "n_folds": n_folds,
+                    "baseline_params": baseline_params,
+                    "candidate_params": candidate_params,
+                })
+                result = run_walk_forward(
+                    pair=pair, history_start_ts=cov.first_ts,
+                    history_end_ts=cov.last_ts,
+                    baseline_params=baseline_tagged,
+                    candidate_params=candidate_tagged,
+                    spec=spec, runner=_runner,
+                )
+                _broadcast("research_lab_result", {
+                    "phase": "done",
+                    "pair": pair,
+                    "skipped_folds": result.skipped_folds,
+                    "n_folds_completed": len(result.folds),
+                    "wilcoxon": {
+                        m: {
+                            "verdict": v.verdict,
+                            "p_value": v.p_value,
+                            "candidate_wins": v.candidate_wins,
+                            "n": v.n,
+                            "median_delta": v.median_delta,
+                        } for m, v in result.wilcoxon.items()
+                    },
+                    "folds": [
+                        {
+                            "idx": fr.fold.idx,
+                            "oos_start": fr.fold.oos_start,
+                            "oos_end": fr.fold.oos_end,
+                            "deltas": fr.deltas,
+                            "baseline": {
+                                "sharpe": fr.baseline.sharpe,
+                                "total_return_pct": fr.baseline.total_return_pct,
+                                "n_trades": fr.baseline.n_trades,
+                            },
+                            "candidate": {
+                                "sharpe": fr.candidate.sharpe,
+                                "total_return_pct": fr.candidate.total_return_pct,
+                                "n_trades": fr.candidate.n_trades,
+                            },
+                        }
+                        for fr in result.folds
+                    ],
+                })
+            except Exception as e:
+                import traceback as _tb
+                _tb.print_exc()
+                _broadcast("research_lab_result", {
+                    "phase": "error",
+                    "error": f"{type(e).__name__}: {e}",
+                })
+
+        threading.Thread(target=_worker, name=f"LabRun-{job_id}",
+                         daemon=True).start()
+        return {"success": True, "job_id": job_id, "n_folds": n_folds, "pair": pair}
 
     def _research_params_current(payload: Dict[str, Any]) -> Dict[str, Any]:
         """Return the tunable param schema (bounds + current values per pair).
