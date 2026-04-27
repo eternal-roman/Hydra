@@ -752,15 +752,22 @@ def mount_backtest_routes(
                 print(f"  [LAB] broadcast error: {type(e).__name__}: {e}")
 
         def _runner_factory(side: str, overrides: Dict[str, float]):
+            # OOS isolation (option 3): warmup-pad before oos_start.
+            # See tools/run_regression.py for the same pattern + rationale.
+            _WARMUP_PAD_CANDLES = 60
             def _run(pair_arg, params, fold) -> "FoldMetrics":
                 from hydra_backtest import BacktestConfig, BacktestRunner
+                warmup_padded_start = max(
+                    fold.is_start,
+                    fold.oos_start - _WARMUP_PAD_CANDLES * 3600,
+                )
                 cfg = BacktestConfig(
                     name=f"lab-{job_id}-{side}-{fold.idx}",
                     pairs=(pair_arg,),
                     data_source="sqlite",
                     data_source_params_json=json.dumps({
                         "db_path": db_path, "grain_sec": 3600,
-                        "start_ts": fold.is_start, "end_ts": fold.oos_end,
+                        "start_ts": warmup_padded_start, "end_ts": fold.oos_end,
                     }),
                     param_overrides_json=json.dumps({pair_arg: overrides}),
                     brain_mode="stub",

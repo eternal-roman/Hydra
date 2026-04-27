@@ -97,3 +97,22 @@ def test_coverage_with_gap(tmp_path):
     assert cov.candle_count == 4
     assert cov.gap_count == 1
     assert cov.max_gap_sec == 7200
+
+
+def test_list_pairs_returns_distinct_sorted(tmp_path):
+    """list_pairs powers DATASET pane coverage rows; must be distinct + sorted."""
+    store = HistoryStore(str(tmp_path / "h.sqlite"))
+    store.upsert_candles([
+        CandleRow("BTC/USD", 3600, 1_700_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+        CandleRow("BTC/USD", 3600, 1_700_003_600, 1, 1, 1, 1, 1, "kraken_archive"),
+        CandleRow("BTC/USD",  900, 1_700_000_000, 1, 1, 1, 1, 1, "tape"),
+        CandleRow("SOL/USD", 3600, 1_700_000_000, 1, 1, 1, 1, 1, "kraken_archive"),
+    ])
+    pairs = store.list_pairs()
+    # Distinct (pair, grain_sec); sorted by pair then grain_sec.
+    assert pairs == [("BTC/USD", 900), ("BTC/USD", 3600), ("SOL/USD", 3600)]
+
+
+def test_list_pairs_empty(tmp_path):
+    store = HistoryStore(str(tmp_path / "h.sqlite"))
+    assert store.list_pairs() == []

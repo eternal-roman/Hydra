@@ -256,7 +256,18 @@ class CandleStream(BaseStream):
 
     def on_candle(self, callback) -> None:
         """Register a callback fired on each push: callback(pair: str, candle: dict).
-        Callbacks must be fast and non-blocking — they run inside the WS thread."""
+
+        Callbacks must be fast and non-blocking — they run inside the WS thread,
+        wrapped in try/except so a bad subscriber cannot kill the stream.
+
+        Registration order:
+        - Safe to call BEFORE start(): callbacks accumulate in _candle_callbacks
+          and fire as soon as the WS connection delivers its first candle. No
+          startup race; no "missed early candles" failure mode.
+        - Safe to call AFTER start(): the dispatch loop snapshots the list under
+          lock on every message, so newly-registered callbacks pick up on the
+          next candle.
+        """
         with self._lock:
             self._candle_callbacks.append(callback)
 

@@ -32,18 +32,23 @@ const LABELS = {
   min_confidence_threshold: "Min confidence threshold",
 };
 
-export default function LabPane({ sendMessage, labResult, paramsSchema, labProgress }) {
+export default function LabPane({ sendMessage, labResult, paramsSchema, labProgress, clearLabRunState }) {
   const [pair, setPair] = useState("BTC/USD");
   const [baselineValues, setBaselineValues] = useState({});
   const [candidateValues, setCandidateValues] = useState({});
   const [running, setRunning] = useState(false);
 
-  // Whenever the pair changes (or on mount), re-fetch the schema for it.
+  // Whenever the pair changes (or on mount), re-fetch the schema for it
+  // AND clear any stale lab-run state from a previous pair.
   useEffect(() => {
     sendMessage({ type: "research_params_current", pair });
     setBaselineValues({});
     setCandidateValues({});
-  }, [pair, sendMessage]);
+    if (typeof clearLabRunState === "function") {
+      clearLabRunState();
+    }
+    setRunning(false);
+  }, [pair, sendMessage, clearLabRunState]);
 
   // When the schema arrives for the active pair, populate both sides with
   // the current live values. User can then drag sliders to diff candidate.

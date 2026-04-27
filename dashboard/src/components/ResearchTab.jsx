@@ -26,6 +26,7 @@ export default function ResearchTab({
   releasesList,
   releasesDiff,
   paramsSchema,           // T30A — param schema from research_params_current
+  clearLabRunState,       // T26 audit fix — clear stale lab state on pair change
 }) {
   const [pane, setPane] = useState("DATASET");
 
@@ -75,6 +76,7 @@ export default function ResearchTab({
           labResult={labResult}
           paramsSchema={paramsSchema}
           labProgress={labProgress}
+          clearLabRunState={clearLabRunState}
         />
       )}
       {pane === "RELEASES" && (

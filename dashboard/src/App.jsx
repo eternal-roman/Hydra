@@ -4304,6 +4304,10 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 releasesList={researchReleasesList}
                 releasesDiff={researchReleasesDiff}
                 paramsSchema={researchParamsSchema}
+                clearLabRunState={() => {
+                  setResearchLabResult(null);
+                  setResearchLabProgress(null);
+                }}
               />
             )}
             {activeTab === "THESIS" && (

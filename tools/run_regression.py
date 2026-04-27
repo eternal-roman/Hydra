@@ -113,15 +113,33 @@ def main() -> int:
         run_walk_forward, WalkForwardSpec, FoldMetrics
     )
 
+    # OOS isolation (option 3 — warmup-pad pre-OOS): pass enough IS data to
+    # cover engine warmup_candles=50, then start scoring at oos_start. This
+    # gives mostly-OOS scoring without a BacktestConfig refactor. Imperfect
+    # — the warmup-region's metrics still leak into totals — but bounded.
+    # True per-window scoring deferred to v2.20.1 (would add `score_start_ts`
+    # to BacktestConfig + BacktestRunner.metrics computation). Tracked in
+    # docs/superpowers/notes/2026-04-26-research-tab-build-log.md §12 item 7.
+    _WARMUP_PAD_CANDLES = 60   # > engine warmup_candles=50; safety margin
+    # KNOWN LIMITATION: baseline_params and candidate_params here are not
+    # currently differentiated — `is_baseline=True/False` is a placeholder
+    # that the engine ignores. Real baseline-vs-candidate diff requires
+    # loading prior version's snapshot params from regression_run rows; that
+    # wiring lands in v2.20.1 once a v2.20.0 snapshot exists to compare against.
+
     def _runner_from_backtest(pair, params, fold) -> "FoldMetrics":
         from hydra_backtest import BacktestConfig, BacktestRunner
+        warmup_padded_start = max(
+            fold.is_start,
+            fold.oos_start - _WARMUP_PAD_CANDLES * args.grain_sec,
+        )
         cfg = BacktestConfig(
             name=f"reg-{args.version}-{pair}-{fold.idx}",
             pairs=(pair,),
             data_source="sqlite",
             data_source_params_json=json.dumps({
                 "db_path": args.db, "grain_sec": args.grain_sec,
-                "start_ts": fold.is_start, "end_ts": fold.oos_end,
+                "start_ts": warmup_padded_start, "end_ts": fold.oos_end,
             }),
             brain_mode="stub",
         )
