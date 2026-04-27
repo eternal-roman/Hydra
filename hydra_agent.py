@@ -21,6 +21,7 @@ import sys
 import os
 import argparse
 import signal as sig
+import textwrap
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -1603,7 +1604,18 @@ class HydraAgent:
                     guidance = self.brain.run_portfolio_review(review_state)
                     if guidance:
                         self._portfolio_guidance = guidance
-                        print(f"  [PORTFOLIO] New guidance: {guidance[:100]}...")
+                        # Print the FULL guidance, wrapped at 100 cols with
+                        # continuation lines aligned under the message body
+                        # so multi-sentence Grok output reads cleanly next to
+                        # the surrounding [BRAIN] / [SWAP] / [COMPANION] lines.
+                        _prefix = "  [PORTFOLIO] New guidance: "
+                        _cont = " " * len(_prefix)
+                        for _line in textwrap.wrap(guidance, width=100,
+                                                   initial_indent=_prefix,
+                                                   subsequent_indent=_cont,
+                                                   break_long_words=False,
+                                                   break_on_hyphens=False):
+                            print(_line)
                     self._portfolio_epoch_count = 0
                     self._last_portfolio_review_regimes = {
                         p: (engine_states.get(p) or {}).get("regime", "RANGING")
