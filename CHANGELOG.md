@@ -6,6 +6,83 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.20.0] — 2026-04-26
+
+Research tab redesign — replaces synthetic-data backtests with a real-history
+SQLite store (Kraken trade-archive bootstrap + live tape capture), an
+anchored quarterly walk-forward + paired Wilcoxon methodology that powers
+both Mode B (hypothesis lab) and Mode C (release regression snapshots), and
+a `/release` regression gate.
+
+### Added
+
+- **`hydra_history_store.py`** — canonical SQLite OHLC store with `(pair,
+  grain_sec, ts)` PK, source-tier policy (`kraken_archive` immutable;
+  `kraken_rest` and `tape` refresh trailing edge), gap detection.
+- **`tools/bootstrap_history.py`** — one-time roll of Kraken trade-archive
+  CSVs into 1h candles. BTC/USD ~99k candles (2013-10 → present), SOL/USD +
+  SOL/BTC ~42k each (2021-06 → present).
+- **`tools/refresh_history.py`** — daily REST refresh of trailing window;
+  detects unfillable-via-OHLC deep gaps and warns explicitly. (Deep
+  historical gaps require a fresh trade-archive zip — Kraken's REST OHLC
+  cannot paginate older than ~720 candles.)
+- **`hydra_tape_capture.py`** — live closed-candle writer; bounded queue +
+  daemon writer thread. Default ON via `HYDRA_TAPE_CAPTURE=1`. Live tape
+  fills any future gap automatically.
+- **`hydra_walk_forward.py`** — anchored quarterly fold construction +
+  exact stdlib Wilcoxon signed-rank for n≤25 (normal approx for larger n).
+  Scipy cross-checked: `wilcoxon([1,2,3,4,5]).pvalue == 0.0625` matches.
+- **`tools/run_regression.py`** — Mode C orchestrator. Per-pair walk-forward
+  vs prior version's snapshot; persists rows into the new `regression_run`,
+  `regression_metrics`, `regression_equity_curve`, `regression_trade`
+  tables. Brain stubbed (`brain_mode='stub'`); no LLM calls.
+- **Dashboard Research tab** — three structured panes:
+  - `DATASET` — read-only canonical store inspector (coverage, gaps,
+    stale-row highlight).
+  - `LAB` — Mode B hypothesis lab. 8 sliders per side from
+    `hydra_tuner.PARAM_BOUNDS`; live current values pre-filled.
+    Daemon-thread async dispatch with per-fold streaming progress.
+  - `RELEASES` — Mode C snapshot list + 2-pick diff selector with
+    side-by-side metrics table.
+- **`/release` regression gate** — Wilcoxon WORSE p<0.05 on any pair × any
+  headline metric blocks the tag step. Override with `--accept-regression
+  "<reason>"`; reason persists into `regression_run.override_reason`.
+- **New env flags:**
+  - `HYDRA_TAPE_CAPTURE` (default `1`) — live tape write
+  - `HYDRA_HISTORY_DB` — path override (default `hydra_history.sqlite`)
+  - `HYDRA_REGRESSION_GATE` (default `1`) — gate the `/release` skill
+
+### Changed
+
+- `BacktestConfig.data_source` default: `"synthetic"` → `"sqlite"` (reads
+  from `hydra_history.sqlite` via the new `SqliteSource`). The old
+  `KrakenHistoricalSource` (single REST call, ~720 candles) is deprecated;
+  `SyntheticSource` retained for unit tests but no longer the default.
+- `BacktestConfig.brain_mode` (NEW; default `"stub"`) — only stub is wired
+  in v2.20.0. `replay` and `live` raise `NotImplementedError` at runtime.
+
+### Migration
+
+`hydra_history.sqlite` schema bumped from v1 to v2 (regression tables added).
+Existing v1 DBs upgrade silently on first open. Schema version now
+`SCHEMA_VERSION = 2` independent of `HYDRA_VERSION`.
+
+### Footer / CHANGELOG sites
+
+- Dashboard footer `HYDRA v2.19.1` → `HYDRA v2.20.0`.
+- `hydra_backtest.HYDRA_VERSION` → `2.20.0`.
+- `dashboard/package.json`, `dashboard/package-lock.json` (×2),
+  `hydra_agent.py:_export_competition_results`, `CLAUDE.md` version pin.
+
+### Known follow-ups (NOT shipping in v2.20.0)
+
+- Live P&L accounting audit (separate `fix/live-pnl-accounting-audit`
+  branch). Top contributor: maker fees not netted from realized P&L
+  (~32 bps round-trip × cumulative notional). Likely v2.19.2 patch.
+- Block-bootstrap CIs on top of walk-forward (rigor toggle, not a
+  predictiveness improvement).
+- "With-AI-brain" expensive harness mode (`brain_mode="live"`) — deferred.
+
 ## [2.19.1] — 2026-04-26
 
 ### Fixed
