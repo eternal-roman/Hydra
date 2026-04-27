@@ -24,8 +24,12 @@ a `/release` regression gate. Also bundles the live P&L accounting fix
     silo manufactured fictitious P&L when inventory crossed stable-quoted
     siblings — e.g. a SOL/USD SELL with no SOL/USD BUYs in journal would
     report proceeds with zero cost basis.
-  - **Rolling 90-day window:** dashboard headline P&L now reflects only the
-    last 90 days of trade activity, not the full journal history.
+  - **Hydra-only top-card toggle:** dashboard top StatCards (P&L, Fills,
+    Win Rate) now have a toggle button. ON excludes journal entries with
+    `source='kraken_backfill'` (manual / pre-Hydra trades reconstructed
+    from `kraken trades-history`); OFF shows full history. Persisted to
+    localStorage. Right-sidebar per-pair cards always read full history
+    and are unaffected by the toggle.
   - Pairs with non-stable quotes (SOL/BTC) keep per-pair accounting because
     BTC is a real volatile quote, not a $1 stable.
 

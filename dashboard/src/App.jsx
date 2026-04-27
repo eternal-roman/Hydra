@@ -3386,6 +3386,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [researchParamsSchema, setResearchParamsSchema] = useState(null);
   // T30B — streaming progress + final result for Mode B walk-forward.
   const [researchLabProgress, setResearchLabProgress] = useState(null);
+  // v2.20.0 — top StatCards "Hydra-only" toggle. ON excludes journal entries
+  // with source='kraken_backfill' (manual / pre-Hydra trades); OFF shows
+  // full history. Persisted to localStorage so the user's choice survives
+  // refreshes. Right-sidebar per-pair cards always read full history.
+  const [hydraOnly, setHydraOnly] = useState(() => {
+    try { return localStorage.getItem("hydra.statcards.hydra_only") === "1"; }
+    catch { return false; }
+  });
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -4177,9 +4185,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
-  // across --resume (engine pnl_pct resets because initial_balance gets re-split).
-  const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
+  // P&L journalPnlUsd is computed below alongside the hydra-only-toggle
+  // sourced fields so the toggle gate them in lockstep.
   // Max drawdown: v2.16.2+ — agent tracks portfolio-level peak/max via
   // balance_usd.total_usd and persists across --resume. Falls back to the
   // legacy max-of-per-pair + in-session history if the agent hasn't sent
@@ -4204,10 +4211,22 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const engineWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
   // Journal fill stats — computed from FULL journal on the backend (not the
   // 20-entry window shown in the order list). Reflects actual exchange activity.
+  // v2.20.0 — top StatCards have a "Hydra-only" toggle: ON excludes
+  // entries with source='kraken_backfill' (manual / pre-Hydra trades);
+  // OFF shows full history including backfill. Right-sidebar per-pair
+  // cards always read full-history (`fillsByPair`, `pnl_by_pair`) — they
+  // are not affected by the toggle.
   const jStats = state?.journal_stats || {};
-  const totalFills = jStats.total_fills || 0;
   const fillsByPair = jStats.fills_by_pair || {};
-  const fillWinRate = jStats.fill_win_rate || 0;
+  const totalFills = hydraOnly
+    ? (jStats.total_fills_hydra_only || 0)
+    : (jStats.total_fills || 0);
+  const fillWinRate = hydraOnly
+    ? (jStats.fill_win_rate_hydra_only || 0)
+    : (jStats.fill_win_rate || 0);
+  const journalPnlUsd = hydraOnly
+    ? (jStats.total_pnl_usd_hydra_only ?? 0)
+    : (jStats.total_pnl_usd ?? 0);
   // Win rate: use journal fill-derived rate when available so it reflects partial closes,
   // falling back to engine round-trip rate.
   const overallWinRate = totalFills > 0 ? fillWinRate : engineWinRate;
@@ -4359,8 +4378,46 @@ export function HydraDashboard({ jwtToken, onLogout }) {
           <style>{`@keyframes hc-dashboard-fade-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
-            {/* Stats Row — spans both columns for edge-to-edge alignment */}
-            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+            {/* Stats Row — spans both columns for edge-to-edge alignment.
+                Hydra-only toggle gates Fills / Win Rate / P&L cards. */}
+            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "stretch" }}>
+              <button
+                onClick={() => {
+                  const next = !hydraOnly;
+                  setHydraOnly(next);
+                  try { localStorage.setItem("hydra.statcards.hydra_only", next ? "1" : "0"); } catch { /* ignore */ }
+                }}
+                title={hydraOnly
+                  ? "Showing Hydra-placed trades only (excludes kraken_backfill source). Click to show all trades."
+                  : "Showing all trades (full history including backfill). Click to filter to Hydra-only."}
+                style={{
+                  padding: "0 14px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: mono,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  background: hydraOnly ? `${COLORS.accent}18` : "transparent",
+                  color: hydraOnly ? COLORS.accent : COLORS.textDim,
+                  border: `1px solid ${hydraOnly ? `${COLORS.accent}60` : COLORS.panelBorder}`,
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  outline: "none",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: 7, height: 7, borderRadius: "50%",
+                    background: hydraOnly ? COLORS.accent : COLORS.textDim,
+                    boxShadow: hydraOnly ? `0 0 8px ${COLORS.accent}80` : "none",
+                  }}
+                />
+                {hydraOnly ? "Hydra-only" : "All trades"}
+              </button>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
               <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
               <StatCard
