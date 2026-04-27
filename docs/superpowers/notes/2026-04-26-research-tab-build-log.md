@@ -479,4 +479,107 @@ e880f7b fix(history): drop redundant ix_ohlc_pair_grain_ts (PK auto-index covers
 
 ---
 
-*This log will be updated as Phase 5 (T20-T23) and Phase 6 (T24-T28) complete. Last updated: end of T19.*
+## Phase 5 follow-ons added at the Phase 5 checkpoint
+
+User feedback at the Phase 5 checkpoint surfaced three substantive issues:
+1. "I have no idea what to do in the Lab tab" — JSON textareas were undiscoverable
+2. Coverage shows 2025-12-31 ⚠ stale, want gap-filling to "happen naturally"
+3. Live P&L of +$221.98 is suspect — needs accounting audit
+
+Three follow-on tasks were added (T29 / T30A / T30B), one separate-branch audit (T31).
+
+### T29: Gap-filling via paginated `since` cursor (`855e10e` + `d58a465`)
+
+Extended `KrakenCLI.ohlc_paged()` to expose the next-page cursor. Refresh
+walks `coverage().last_ts` forward respecting the 2s REST floor.
+
+**Discovery:** Kraken's public OHLC REST does NOT paginate deep history — `since` is filtered against the trailing ~720 candles regardless. The Jan-Mar 2026 hole between archive end and REST trailing window is unfillable via this path. Patched the code to detect the unfillable case explicitly and log a one-shot warning per (pair, grain) instead of silently claiming success.
+
+The trailing 30-day refresh works correctly and is the new authoritative path for the rolling window.
+
+### T29B → Q1 archive fill (one-shot, no permanent code)
+
+User found a Kraken Q1 2026 archive zip and asked to fill the gap from it instead of implementing Trades-REST pagination. The Q1 archive turned out to have **a different format** from the original full-history zip:
+- Header row: `Price,Volume,Timestamp,Type,Misc,TradeID`
+- **Different column order** — price/volume/ts (not ts/price/volume)
+- Files at zip root, not under `TimeAndSales_Combined/`
+
+First fill attempt with the existing `_iter_trades` helper produced garbage (header was filtered but column-order mis-parse interpreted price as ts → 1970-01-01 phantom rows). Cleaned 14 corrupted rows (`DELETE WHERE source='kraken_archive' AND ts < 1_000_000_000`) and re-ran with a corrected one-shot inline rollup script.
+
+**Final fill:** 2160 candles per pair (90 days × 24h, exactly Q1). Deep gap GONE. The throwaway code is not committed; the SQLite store is the source of truth as per the user's explicit instruction.
+
+Final coverage state:
+
+| Pair | Archive | Q1 fill | Trailing REST | Total |
+|---|---|---|---|---|
+| BTC/USD | 96,382 (2013-10 → 2025-12) | +2,160 | 625 (Apr 1 → Apr 27) | 99,167 |
+| SOL/USD | 39,743 (2021-06 → 2025-12) | +2,160 | 625 | 42,528 |
+| SOL/BTC | 39,679 (2021-06 → 2025-12) | +2,160 | 625 | 42,464 |
+
+Remaining gaps: small historical only (2014 BTC outages 2-3 days; 2021-06 SOL launch hours; max 27h on SOL/USD).
+
+### T30A: Schema-driven Lab UI (`a075a55`)
+
+Replaced the JSON textareas with 8 sliders per side, sourced from `hydra_tuner.PARAM_BOUNDS` and the live per-pair `hydra_params_<pair>.json`. New backend handler `research_params_current` returns `{param: {min, max, default, current, step}}`. Sliders pre-fill with current live values; user drags to set candidate. Step size auto-derived from the param's range magnitude (1.0 for RSI integers, 0.01 for fee/confidence, 0.001 for fine ratios).
+
+### T30B: Functional Lab Mode B (`84c1ce4`)
+
+Replaced the deferred-error stub with a real walk-forward runner:
+- `param_overrides` plumbing already existed (`hydra_backtest.py:631` calls `engine.apply_tuned_params`); just had to populate it from the slider state.
+- Mode B's heavy run (~5-15 min/pair) now dispatches to a dedicated daemon thread, returns `{success, job_id, n_folds}` synchronously.
+- Per-fold-per-side completion broadcasts as `research_lab_progress`.
+- Final result broadcasts as `research_lab_result`.
+- LabPane renders streaming "X/Y fold-runs completed" + final Wilcoxon verdict card.
+
+**Tagging trick:** the walk-forward runner takes one `runner` callback for both baseline and candidate sides. We tag the params dict with `_lab_side: "baseline"|"candidate"` so the runner can route. `apply_tuned_params` ignores unknown keys → harmless.
+
+### T31: Live P&L audit (separate branch — NOT on v2.20.0)
+
+User reported dashboard "P&L: +$221.98" looks wrong. Investigation lives on `fix/live-pnl-accounting-audit` branch (worktree at `../Hydra-pnl-audit`), discovery report at `docs/audit/2026-04-26-pnl-discovery.md` (commit `92ba22c` on that branch).
+
+**Six findings, top three:**
+- F1: Label says "P&L"; value is `realized + unrealized` (mark-to-market). User expected realized only.
+- F2: `order_journal` is Hydra-only — manual user trades placed via Kraken UI are invisible to accounting. User asked to impute these from Kraken trade history with a standard journal note.
+- F3: **Fees not netted from realized P&L.** Maker fee 16 bps per side → 32 bps round-trip. ~$69k cumulative round-trip notional fictitiously inflates P&L by ~$221. Likely the dominant contributor.
+
+This is independent from v2.20.0 and ships on its own branch. Will likely be released as v2.19.2 patch before v2.20.0.
+
+## Commit log (Phase 1-5 complete)
+
+```
+84c1ce4 feat(dashboard): T30B — functional Lab Mode B run via daemon thread       T30B
+a075a55 feat(dashboard): schema-driven Lab UI — sliders from PARAM_BOUNDS         T30A
+d58a465 fix(history): detect & log unfillable-via-REST gaps                       T29 fix
+855e10e feat(history): paginated gap-fill via Kraken REST since cursor            T29
+9a6df5e feat(dashboard): ResearchTab wired into App (v2.20.0 swap)                T23
+ab8d834 feat(dashboard): ReleasesPane — Mode C snapshot diff UI                   T22
+fc9d76a feat(dashboard): LabPane — Mode B form (deferred-aware)                   T21
+d3f6ce5 feat(dashboard): DatasetPane — read-only coverage inspector               T20
+02c1210 docs: canonical build log for research tab redesign                       (this file)
+8b498d8 feat(server): research tab WS routes (dataset, releases, lab-deferred)    T19
+63878cf chore(audit): Phase 4 Rule-4 self-audit pass                              T18
+7e9fe24 feat(regression): snapshot tables + run_regression orchestrator           T17
+e5b3ef3 feat(backtest): brain_mode='stub' for deterministic regression/lab        T16
+7b5b7c7 feat(backtest): SqliteSource (default in v2.20.0)                         T15
+176ee1e feat(walk-forward): runner with paired Wilcoxon per metric                T13
+4fc10f3 feat(walk-forward): anchored quarterly fold construction                  T12
+6694b3c feat(walk-forward): exact Wilcoxon signed-rank (stdlib)                   T11
+ecd900b feat(agent): wire tape capture under HYDRA_TAPE_CAPTURE                   T10
+e435441 feat(history): live tape capture writer (bounded queue + worker)          T9
+cc29869 feat(streams): CandleStream.on_candle callback hook                       T8
+dec9f41 feat(history): REST trailing-window refresh                               T7
+71965a9 chore(history): gitignore canonical store + WAL files                     T6
+77bc6b0 fix(bootstrap): use ASCII arrow in console output (cp1252 Windows)        T5 fix
+9bb144b feat(history): bootstrap from Kraken trade archive                        T5
+249cd8c feat(history): explicit schema-version mismatch error                     T4
+a419f7e style(history): consolidate Coverage import at top of test file           T3 style
+5beebf8 feat(history): coverage + gap detection                                   T3
+5a2bd2f fix(history): fetch materializes rows before connection closes            T2 fix
+2d03793 feat(history): tier-aware upsert + fetch                                  T2
+e880f7b fix(history): drop redundant ix_ohlc_pair_grain_ts                        T1 fix
+9b18e66 feat(history): SQLite store skeleton + schema v1                          T1
+```
+
+---
+
+*Last updated: end of T30B, before Phase 6 release work.*
