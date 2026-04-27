@@ -278,13 +278,32 @@ class KrakenCLI:
     @classmethod
     def ohlc(cls, pair: str, interval: int = 1) -> list:
         """Fetch OHLC candles. Returns list of candle dicts."""
+        return cls.ohlc_paged(pair, interval=interval, since=0)[0]
+
+    @classmethod
+    def ohlc_paged(cls, pair: str, interval: int = 1, since: int = 0) -> tuple:
+        """Like ohlc() but exposes the `last` cursor for pagination.
+
+        Returns (candles: list, last_cursor: int). last_cursor is the timestamp
+        of the most recent candle returned; pass it back as `since` for the
+        next page. Returns (candles, 0) if no more data.
+        """
         p = cls._resolve_pair(pair)
-        data = cls._run(["ohlc", p, "--interval", str(interval)])
+        args = ["ohlc", p, "--interval", str(interval)]
+        if since > 0:
+            args += ["--since", str(int(since))]
+        data = cls._run(args)
         if isinstance(data, dict) and "error" in data:
             print(f"  [WARN] OHLC fetch error for {pair}: {data['error']}")
-            return []
+            return [], 0
         candles = []
+        last_cursor = 0
         if isinstance(data, dict):
+            if "last" in data:
+                try:
+                    last_cursor = int(data["last"])
+                except (TypeError, ValueError):
+                    last_cursor = 0
             for key, values in data.items():
                 if key in ("error", "last"):
                     continue
@@ -299,7 +318,7 @@ class KrakenCLI:
                                 "close": float(row[4]),
                                 "volume": float(row[6]),
                             })
-        return candles
+        return candles, last_cursor
 
     # ─── Private Account ───
 
