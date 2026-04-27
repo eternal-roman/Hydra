@@ -90,3 +90,12 @@ fix_host.py
 hydra_history.sqlite
 hydra_history.sqlite-shm
 hydra_history.sqlite-wal
+
+# Kraken personal trade history store + raw dumps (rebuild via tools/sync_kraken_trades.py)
+hydra_kraken_trades.sqlite
+hydra_kraken_trades.sqlite-shm
+hydra_kraken_trades.sqlite-wal
+kraken_trades_dump.json
+
+# Journal backfill backups (one per --apply run; safe to delete after verification)
+hydra_order_journal.json.backup-*
