@@ -95,6 +95,8 @@ class BacktestConfig:
     max_ticks: int = DEFAULT_MAX_TICKS
 
     brain_mode: str = "stub"   # "stub" | "replay" | "live" — only "stub" wired in v2.20.0
+    # FIXME(v2.20.1): if no consumer materializes for "replay"/"live", delete those
+    # branches and collapse this field. Currently dead-but-guarded by _validate_brain_mode().
 
     # Stamps
     git_sha: str = ""
