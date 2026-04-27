@@ -40,7 +40,7 @@ import queue
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,7 +51,6 @@ from hydra_backtest import (
     _iso_utc_now,
 )
 from hydra_experiments import (
-    DEFAULT_STORE_ROOT,
     Experiment,
     ExperimentStore,
     new_experiment,
@@ -590,6 +589,320 @@ def mount_backtest_routes(
     broadcaster.register_handler("experiment_compare_request", _compare)
     broadcaster.register_handler("experiment_delete", _deny_delete)
     broadcaster.register_handler("review_request", _review_request)
+
+    # ── v2.20.0 — Research tab WS routes ──────────────────────────────
+    # Read-only handlers backed by the canonical hydra_history.sqlite store.
+    # Lab (Mode B) is deferred: walk-forward in-handler would block the WS
+    # thread for minutes per pair, and Mode C (releases) carries the user's
+    # operational priority. Lab gets a clear "deferred" error so the UI can
+    # render the same way today and tomorrow.
+
+    def _research_dataset_coverage(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only: per (pair, grain_sec) coverage of the canonical store."""
+        try:
+            from hydra_history_store import HistoryStore
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            store = HistoryStore(db_path)
+            rows = []
+            for pair, grain_sec in store.list_pairs():
+                c = store.coverage(pair, grain_sec)
+                rows.append({
+                    "pair": pair,
+                    "grain_sec": grain_sec,
+                    "candle_count": c.candle_count,
+                    "first_ts": c.first_ts,
+                    "last_ts": c.last_ts,
+                    "gap_count": c.gap_count,
+                    "max_gap_sec": c.max_gap_sec,
+                })
+            return {"success": True, "data": rows}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_releases_list(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only: list every regression_run row with a per-pair verdict
+        summary derived from aggregate Wilcoxon p-values."""
+        try:
+            import sqlite3 as _sql3
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            # Just connect — HistoryStore() would re-init schema; we already know it's there.
+            conn = _sql3.connect(db_path, timeout=10.0)
+            try:
+                runs = conn.execute(
+                    """SELECT run_id, hydra_version, pair, grain_sec, created_at,
+                              override_reason
+                       FROM regression_run
+                       ORDER BY created_at DESC"""
+                ).fetchall()
+                # Build verdict summary per run from aggregate (fold_idx=-1) Wilcoxon p-values.
+                # If any p<0.05 with median<0 -> "worse"; with median>0 -> "better"; else "equivocal".
+                # We don't have median stored separately, so summary just reports the smallest p.
+                summaries = {}
+                for run_id, *_ in runs:
+                    ps = [
+                        v for (v,) in conn.execute(
+                            """SELECT value FROM regression_metrics
+                               WHERE run_id=? AND fold_idx=-1 AND metric LIKE 'wilcoxon_p_%'""",
+                            (run_id,),
+                        )
+                    ]
+                    if not ps:
+                        summaries[run_id] = "no folds"
+                    else:
+                        min_p = min(ps)
+                        summaries[run_id] = "equivocal" if min_p >= 0.05 else "significant"
+            finally:
+                conn.close()
+            data = [
+                {
+                    "run_id": r[0],
+                    "hydra_version": r[1],
+                    "pair": r[2],
+                    "grain_sec": r[3],
+                    "created_at": r[4],
+                    "override_reason": r[5],
+                    "verdict_summary": summaries.get(r[0], "?"),
+                }
+                for r in runs
+            ]
+            return {"success": True, "data": data}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_releases_diff(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare two regression runs side-by-side. Returns aggregate metrics
+        for both run_ids and the per-fold metric rows (if any)."""
+        a_id = payload.get("a_run_id")
+        b_id = payload.get("b_run_id")
+        if not (a_id and b_id):
+            return {"success": False, "error": "a_run_id and b_run_id required"}
+        try:
+            import sqlite3 as _sql3
+            db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+            conn = _sql3.connect(db_path, timeout=10.0)
+            try:
+                def _load(run_id):
+                    row = conn.execute(
+                        """SELECT hydra_version, pair, grain_sec, created_at, override_reason
+                           FROM regression_run WHERE run_id=?""",
+                        (run_id,),
+                    ).fetchone()
+                    if not row:
+                        return None
+                    metrics = [
+                        {"fold_idx": fi, "metric": m, "value": v}
+                        for (fi, m, v) in conn.execute(
+                            """SELECT fold_idx, metric, value FROM regression_metrics
+                               WHERE run_id=? ORDER BY fold_idx, metric""",
+                            (run_id,),
+                        )
+                    ]
+                    return {
+                        "run_id": run_id,
+                        "hydra_version": row[0],
+                        "pair": row[1],
+                        "grain_sec": row[2],
+                        "created_at": row[3],
+                        "override_reason": row[4],
+                        "metrics": metrics,
+                    }
+                a = _load(a_id)
+                b = _load(b_id)
+            finally:
+                conn.close()
+            if a is None or b is None:
+                return {"success": False, "error": "one or both run_ids not found"}
+            return {"success": True, "a": a, "b": b}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _research_lab_run(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Mode B walk-forward — async via daemon thread, streams progress."""
+        import uuid
+        from hydra_history_store import HistoryStore
+        from hydra_walk_forward import (
+            run_walk_forward, WalkForwardSpec, FoldMetrics, build_quarterly_folds,
+        )
+        pair = payload.get("pair")
+        if pair not in ("BTC/USD", "SOL/USD", "SOL/BTC"):
+            return {"success": False, "error": "pair required (BTC/USD|SOL/USD|SOL/BTC)"}
+        baseline_params = payload.get("baseline_params") or {}
+        candidate_params = payload.get("candidate_params") or {}
+        if not isinstance(baseline_params, dict) or not isinstance(candidate_params, dict):
+            return {"success": False, "error": "baseline_params and candidate_params must be objects"}
+
+        db_path = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+        store = HistoryStore(db_path)
+        cov = store.coverage(pair, 3600)
+        if cov.first_ts is None:
+            return {"success": False, "error": f"no history for {pair}"}
+
+        job_id = uuid.uuid4().hex[:12]
+        spec_dict = payload.get("spec") or {}
+        spec = WalkForwardSpec(**{k: v for k, v in spec_dict.items()
+                                  if k in ("fold_kind", "is_lookback_quarters", "min_oos_trades")})
+        # Probe fold count up-front for the progress UI.
+        n_folds = len(build_quarterly_folds(cov.first_ts, cov.last_ts, spec))
+
+        def _broadcast(msg_type: str, data: Dict[str, Any]) -> None:
+            try:
+                broadcaster.broadcast_message(msg_type, {**data, "job_id": job_id})
+            except Exception as e:
+                print(f"  [LAB] broadcast error: {type(e).__name__}: {e}")
+
+        def _runner_factory(side: str, overrides: Dict[str, float]):
+            # OOS isolation (option 3): warmup-pad before oos_start.
+            # See tools/run_regression.py for the same pattern + rationale.
+            _WARMUP_PAD_CANDLES = 60
+            def _run(pair_arg, params, fold) -> "FoldMetrics":
+                from hydra_backtest import BacktestConfig, BacktestRunner
+                warmup_padded_start = max(
+                    fold.is_start,
+                    fold.oos_start - _WARMUP_PAD_CANDLES * 3600,
+                )
+                cfg = BacktestConfig(
+                    name=f"lab-{job_id}-{side}-{fold.idx}",
+                    pairs=(pair_arg,),
+                    data_source="sqlite",
+                    data_source_params_json=json.dumps({
+                        "db_path": db_path, "grain_sec": 3600,
+                        "start_ts": warmup_padded_start, "end_ts": fold.oos_end,
+                    }),
+                    param_overrides_json=json.dumps({pair_arg: overrides}),
+                    brain_mode="stub",
+                )
+                result = BacktestRunner(cfg).run()
+                m = result.metrics
+                return FoldMetrics(
+                    sharpe=getattr(m, "sharpe", 0.0),
+                    total_return_pct=getattr(m, "total_return_pct", 0.0),
+                    max_dd_pct=getattr(m, "max_dd_pct", 0.0),
+                    fee_adj_return_pct=getattr(m, "fee_adj_return_pct",
+                                              getattr(m, "total_return_pct", 0.0)),
+                    n_trades=getattr(m, "n_trades", getattr(m, "trade_count", 0)),
+                )
+            return _run
+
+        # Walk-forward calls runner(pair, params, fold) once per fold per side.
+        # We tag the params dicts with _lab_side to route inside the shared
+        # wrapper. HydraEngine.apply_tuned_params ignores unknown keys, so
+        # _lab_side is harmless when passed through to the engine.
+        baseline_tagged = {**baseline_params, "_lab_side": "baseline"}
+        candidate_tagged = {**candidate_params, "_lab_side": "candidate"}
+        baseline_runner_fn = _runner_factory("baseline", baseline_params)
+        candidate_runner_fn = _runner_factory("candidate", candidate_params)
+
+        def _runner(pair_arg, params, fold) -> "FoldMetrics":
+            side = params.get("_lab_side", "?")
+            fn = baseline_runner_fn if side == "baseline" else candidate_runner_fn
+            metrics = fn(pair_arg, params, fold)
+            # Per-fold-per-side progress broadcast.
+            _broadcast("research_lab_progress", {
+                "pair": pair_arg, "fold_idx": fold.idx, "n_folds": n_folds,
+                "side": side, "is_start": fold.is_start, "is_end": fold.is_end,
+                "oos_start": fold.oos_start, "oos_end": fold.oos_end,
+                "metrics": {
+                    "sharpe": metrics.sharpe,
+                    "total_return_pct": metrics.total_return_pct,
+                    "max_dd_pct": metrics.max_dd_pct,
+                    "fee_adj_return_pct": metrics.fee_adj_return_pct,
+                    "n_trades": metrics.n_trades,
+                },
+            })
+            return metrics
+
+        def _worker():
+            try:
+                _broadcast("research_lab_progress", {
+                    "phase": "started", "pair": pair, "n_folds": n_folds,
+                    "baseline_params": baseline_params,
+                    "candidate_params": candidate_params,
+                })
+                result = run_walk_forward(
+                    pair=pair, history_start_ts=cov.first_ts,
+                    history_end_ts=cov.last_ts,
+                    baseline_params=baseline_tagged,
+                    candidate_params=candidate_tagged,
+                    spec=spec, runner=_runner,
+                )
+                _broadcast("research_lab_result", {
+                    "phase": "done",
+                    "pair": pair,
+                    "skipped_folds": result.skipped_folds,
+                    "n_folds_completed": len(result.folds),
+                    "wilcoxon": {
+                        m: {
+                            "verdict": v.verdict,
+                            "p_value": v.p_value,
+                            "candidate_wins": v.candidate_wins,
+                            "n": v.n,
+                            "median_delta": v.median_delta,
+                        } for m, v in result.wilcoxon.items()
+                    },
+                    "folds": [
+                        {
+                            "idx": fr.fold.idx,
+                            "oos_start": fr.fold.oos_start,
+                            "oos_end": fr.fold.oos_end,
+                            "deltas": fr.deltas,
+                            "baseline": {
+                                "sharpe": fr.baseline.sharpe,
+                                "total_return_pct": fr.baseline.total_return_pct,
+                                "n_trades": fr.baseline.n_trades,
+                            },
+                            "candidate": {
+                                "sharpe": fr.candidate.sharpe,
+                                "total_return_pct": fr.candidate.total_return_pct,
+                                "n_trades": fr.candidate.n_trades,
+                            },
+                        }
+                        for fr in result.folds
+                    ],
+                })
+            except Exception as e:
+                import traceback as _tb
+                _tb.print_exc()
+                _broadcast("research_lab_result", {
+                    "phase": "error",
+                    "error": f"{type(e).__name__}: {e}",
+                })
+
+        threading.Thread(target=_worker, name=f"LabRun-{job_id}",
+                         daemon=True).start()
+        return {"success": True, "job_id": job_id, "n_folds": n_folds, "pair": pair}
+
+    def _research_params_current(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the tunable param schema (bounds + current values per pair).
+
+        Reads PARAM_BOUNDS from hydra_tuner and the per-pair current params
+        from hydra_params_<pair>.json. Falls back to DEFAULT_PARAMS when no
+        per-pair file exists. Pure read; no mutation."""
+        try:
+            from hydra_tuner import PARAM_BOUNDS, DEFAULT_PARAMS, ParameterTracker
+            pair = payload.get("pair") or "BTC/USD"
+            tracker = ParameterTracker(pair)
+            current = tracker.get_tunable_params()
+            schema = {}
+            for name, (lo, hi) in PARAM_BOUNDS.items():
+                schema[name] = {
+                    "min": lo,
+                    "max": hi,
+                    "default": DEFAULT_PARAMS.get(name),
+                    "current": current.get(name, DEFAULT_PARAMS.get(name)),
+                    # Step size: 0.001 for fine ratios, 0.01 for confidences,
+                    # 1.0 for RSI thresholds. Heuristic from the magnitude
+                    # of (hi - lo).
+                    "step": 0.001 if (hi - lo) < 0.05 else (0.01 if (hi - lo) < 0.5 else 1.0),
+                }
+            return {"success": True, "pair": pair, "data": schema}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    broadcaster.register_handler("research_dataset_coverage", _research_dataset_coverage)
+    broadcaster.register_handler("research_releases_list", _research_releases_list)
+    broadcaster.register_handler("research_releases_diff", _research_releases_diff)
+    broadcaster.register_handler("research_lab_run", _research_lab_run)
+    broadcaster.register_handler("research_params_current", _research_params_current)
 
 
 def _compact(exp: Experiment) -> Dict[str, Any]:

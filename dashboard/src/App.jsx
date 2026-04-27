@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
+import ResearchTab from "./components/ResearchTab";
 
 // ═══════════════════════════════════════════════════════════════
 // HYDRA Live Dashboard — Connects to hydra_agent.py WebSocket
@@ -1049,323 +1050,6 @@ function Checkbox({ checked, onChange, label, hint }) {
   );
 }
 
-function BacktestControlPanel({ onSubmit, connected, disabled, stagedProposal }) {
-  const [preset, setPreset] = useState("default");
-  const [hypothesis, setHypothesis] = useState("");
-  const [pairs, setPairs] = useState("SOL/USDC");
-  const [nCandles, setNCandles] = useState(500);
-  const [seed, setSeed] = useState(42);
-  const [withMC, setWithMC] = useState(true);
-  const [withWF, setWithWF] = useState(false);
-
-  useEffect(() => {
-    if (stagedProposal && stagedProposal.hypothesis) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHypothesis(stagedProposal.hypothesis);
-      if (stagedProposal.pair) {
-        setPairs(stagedProposal.pair);
-      }
-    }
-  }, [stagedProposal]);
-
-  const hypothesisValid = hypothesis.trim().length >= 8;
-  const nCandlesNum = Number(nCandles);
-  const nCandlesValid = Number.isFinite(nCandlesNum) && nCandlesNum >= 50 && nCandlesNum <= 20000;
-  const canSubmit = connected && !disabled && hypothesisValid && nCandlesValid;
-
-  const submit = () => {
-    if (!canSubmit) return;
-    // Mirrors hydra_backtest_server._start handler payload.
-    // BacktestConfig requires JSON-encoded dict fields (frozen-safe) — this
-    // keeps `config` shape identical to what `BacktestConfig(...)` accepts.
-    const config = {
-      name: `dashboard:${preset}`,
-      description: "dashboard-submitted run",
-      hypothesis: hypothesis.trim(),
-      pairs: pairs.split(",").map(p => p.trim()).filter(Boolean),
-      initial_balance_per_pair: 100.0,
-      candle_interval: 15,
-      mode: preset === "aggressive" ? "competition" : "conservative",
-      param_overrides_json: "{}",
-      coordinator_enabled: true,
-      data_source: "synthetic",
-      data_source_params_json: JSON.stringify({
-        kind: "gbm", n_candles: nCandlesNum, seed: Number(seed), volatility: 0.02,
-      }),
-      fill_model: "realistic",
-      maker_fee_bps: 16.0,
-      real_time_factor: 0.0,
-      random_seed: Number(seed),
-      max_ticks: 200000,
-    };
-    onSubmit({
-      type: "backtest_start",
-      config,
-      hypothesis: hypothesis.trim(),
-      triggered_by: "dashboard",
-      tags: ["caller:dashboard", `preset:${preset}`, ...(withMC ? ["mc"] : []), ...(withWF ? ["wf"] : [])],
-    });
-  };
-
-  return (
-    <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`,
-                  borderRadius: 8, padding: 20, alignSelf: "stretch",
-                  overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700, color: COLORS.text,
-                    marginBottom: 18, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <span style={{ color: COLORS.blue }}>▶</span> Run Backtest
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 20, flex: 1 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <FieldLabel labelSize={11} hintSize={12}>Preset</FieldLabel>
-              <StyledSelect value={preset} onChange={setPreset} options={PRESET_OPTIONS} fontSize={14} padding="8px 10px" />
-            </div>
-            <div>
-              <FieldLabel labelSize={11} hintSize={12}>Pairs</FieldLabel>
-              <StyledInput value={pairs} onChange={setPairs} placeholder="SOL/USDC" fontSize={14} padding="8px 10px" />
-            </div>
-          </div>
-
-          <div>
-            <FieldLabel labelSize={11} hintSize={11} hint="Min 8 chars · AI-reviewed.">Hypothesis *</FieldLabel>
-            <StyledTextarea
-              value={hypothesis}
-              onChange={setHypothesis}
-              placeholder="e.g., tighter RSI upper should reduce false BUYs in VOLATILE regime"
-              fontSize={14}
-              padding="9px 12px"
-            />
-            {!hypothesisValid && hypothesis.length > 0 && (
-              <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 4 }}>
-                {8 - hypothesis.trim().length} more character(s) required
-              </div>
-            )}
-          </div>
-
-          {/* Candles + Seed: label row, input row, hint row — each grid row aligned
-              so the two inputs sit on the same Y regardless of hint wrapping. */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
-                        columnGap: 12, rowGap: 6 }}>
-            <FieldLabel labelSize={11} hintSize={12}>
-              <span title="Number of simulated 15-minute candles the synthetic GBM generator will produce for this run. Not historical market data.">
-                Synthetic Candles ⓘ
-              </span>
-            </FieldLabel>
-            <FieldLabel labelSize={11} hintSize={12}>
-              <span title="Experiment seed for the synthetic (GBM) price generator. Identical seed + identical params reproduce an identical candle series, so two runs are directly comparable.">
-                Experiment Seed ⓘ
-              </span>
-            </FieldLabel>
-
-            <StyledInput value={nCandles} onChange={setNCandles} type="number" fontSize={14} padding="8px 12px" />
-            <StyledInput value={seed} onChange={setSeed} type="number" fontSize={14} padding="8px 12px" />
-
-            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
-              Synthetic (GBM) — not historical Kraken data.
-              {!nCandlesValid && (
-                <div style={{ color: COLORS.danger, marginTop: 2 }}>50–20000</div>
-              )}
-            </div>
-            <div style={{ fontSize: 11, color: COLORS.textMuted, fontFamily: mono, lineHeight: 1.4 }}>
-              PRNG seed — same seed = same price path.
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-            <Checkbox
-              checked={withMC} onChange={setWithMC}
-              label="Monte Carlo bootstrap"
-              hint="Block-resample trade profits; computes CIs for the rigor gates."
-            />
-            <Checkbox
-              checked={withWF} onChange={setWithWF}
-              label="Walk-forward re-test"
-              hint="Slides train/test windows; slower but required for wf_majority_improved gate."
-            />
-          </div>
-
-        </div>
-        
-        <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${COLORS.panelBorder}` }}>
-          <button
-            onClick={submit}
-            disabled={!canSubmit}
-            style={{
-              width: "100%",
-              padding: "14px 18px",
-              fontSize: 14,
-              fontWeight: 700,
-              fontFamily: mono,
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              background: canSubmit ? COLORS.blue : COLORS.panelBorder,
-              color: canSubmit ? "#0a0a0f" : COLORS.textMuted,
-              border: `1px solid ${canSubmit ? COLORS.blue : COLORS.panelBorder}`,
-              borderRadius: 4,
-              cursor: canSubmit ? "pointer" : "not-allowed",
-              outline: "none",
-              boxShadow: canSubmit ? `0 0 10px ${COLORS.blue}40` : "none",
-              transition: "all 0.15s ease",
-            }}
-          >
-            Run Backtest
-          </button>
-
-          {!connected && (
-            <div style={{ fontSize: 12, color: COLORS.danger, fontFamily: mono, marginTop: 12, textAlign: "center" }}>
-              Disconnected — start hydra_agent.py to enable.
-            </div>
-          )}
-        </div>
-    </div>
-  );
-}
-
-function BacktestResults({ 
-  ackMsg, observerProgress, observerResult, observerReview, 
-  observerEquity, observerTotalTicks, completedCount, 
-  onObserverClose, onApplyOptimizations, onCompareThisRun 
-}) {
-  const stage = observerProgress?.stage;
-  const runState =
-    ackMsg && ackMsg.success === false ? "rejected" :
-    observerResult ? "complete" :
-    (observerProgress && (stage === "running" || stage === "started")) ? "running" :
-    ackMsg?.success ? "queued" :
-    "idle";
-
-  const paletteByState = {
-    idle:     { dot: COLORS.textMuted, fg: COLORS.textDim, label: "Idle" },
-    queued:   { dot: COLORS.blue,      fg: COLORS.blue,    label: "Queued" },
-    running:  { dot: COLORS.blue,      fg: COLORS.blue,    label: "Running" },
-    complete: { dot: COLORS.accent,    fg: COLORS.accent,  label: "Complete" },
-    rejected: { dot: COLORS.danger,    fg: COLORS.danger,  label: "Rejected" },
-  };
-  const p = paletteByState[runState];
-
-  const bodyByState = {
-    idle: "Fill in the form on the left and click Run Backtest. This panel will track the run from submit → queued → running → complete.",
-    queued: "Accepted by the server. Waiting for a worker slot to pick it up.",
-    running: observerProgress
-      ? `Tick ${observerProgress.tick ?? 0}${observerTotalTicks ? ` of ${observerTotalTicks}` : ""} — live data streams into the Observer chart below.`
-      : "Executing. Live data streams into the Observer chart below.",
-    complete: "Finished. Metrics are in Last Result, Rigor Gates reflect which checks passed, and the equity curve is in the Observer below. This run is now saved in the Compare tab's library — use the button below to open it side-by-side with other runs.",
-    rejected: ackMsg?.error || "Server refused the submission. Check the error below and adjust the form.",
-  };
-
-  const expId = observerResult?.experiment_id
-             || observerProgress?.experiment_id
-             || ackMsg?.experiment_id;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, alignSelf: "stretch", minHeight: 0, height: "100%" }}>
-      {/* Horizontal Tri-panel */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, flex: "0 0 auto" }}>
-        
-        {/* Last Result */}
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 12 }}>Last Result</div>
-          {observerResult?.metrics ? (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 6, columnGap: 12, fontFamily: mono, fontSize: 12 }}>
-              <span style={{ color: COLORS.textDim }}>Trades</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{observerResult.metrics.total_trades}</span>
-              <span style={{ color: COLORS.textDim }}>Return</span>
-              <span style={{ textAlign: "right", color: (observerResult.metrics.total_return_pct || 0) >= 0 ? COLORS.accent : COLORS.danger }}>
-                {(observerResult.metrics.total_return_pct || 0) >= 0 ? "+" : ""}
-                {(observerResult.metrics.total_return_pct || 0).toFixed(2)}%
-              </span>
-              <span style={{ color: COLORS.textDim }}>Sharpe</span>
-              <span style={{ color: COLORS.text, textAlign: "right" }}>{fmtInd(observerResult.metrics.sharpe)}</span>
-              <span style={{ color: COLORS.textDim }}>Max DD</span>
-              <span style={{ color: COLORS.warn, textAlign: "right" }}>{(observerResult.metrics.max_drawdown_pct || 0).toFixed(2)}%</span>
-            </div>
-          ) : (
-            <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim }}>No completed backtest yet this session.</div>
-          )}
-          {observerResult?.experiment_id && completedCount >= 2 && onCompareThisRun && (
-            <div style={{ marginTop: 12 }}>
-              <button onClick={() => onCompareThisRun(observerResult.experiment_id)}
-                      style={{ padding: "4px 8px", fontSize: 10, fontFamily: mono, background: "transparent", color: COLORS.blue, border: `1px solid ${COLORS.blue}40`, borderRadius: 4, cursor: "pointer", textTransform: "uppercase" }}>
-                Compare in Library
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Run Status */}
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 4 }}>Run Status</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-            <span style={{ width: 10, height: 10, borderRadius: "50%", background: p.dot, boxShadow: runState === "running" ? `0 0 8px ${p.dot}, 0 0 4px ${p.dot}` : `0 0 4px ${p.dot}80`, animation: runState === "running" ? "pulse 1.4s ease-in-out infinite" : "none" }} />
-            <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 700, color: p.fg, letterSpacing: "0.04em" }}>{p.label}</span>
-          </div>
-          <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, lineHeight: 1.5, marginBottom: expId ? 10 : 0 }}>{bodyByState[runState]}</div>
-        </div>
-
-        {/* Rigor Gates */}
-        <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.panelBorder}`, borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 14, fontFamily: heading, fontWeight: 700, color: COLORS.text, marginBottom: 10 }}>Rigor Gates</div>
-          {(() => {
-            const gp = observerReview?.gates_passed;
-            const hasReview = gp && typeof gp === "object";
-            const summary = hasReview
-              ? (() => {
-                  const pass = RIGOR_GATES.filter(g => gp[g.key] === true).length;
-                  const fail = RIGOR_GATES.filter(g => gp[g.key] === false).length;
-                  return `${pass}/${RIGOR_GATES.length} passed${fail > 0 ? ` · ${fail} failed` : ""}`;
-                })()
-              : "No review yet — hover a pill for what it checks.";
-            return (
-              <>
-                <div style={{ fontFamily: mono, fontSize: 11, color: COLORS.textDim, marginBottom: 10 }}>{summary}</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {RIGOR_GATES.map(g => {
-                    const state = !hasReview ? "neutral" : gp[g.key] === true ? "pass" : gp[g.key] === false ? "fail" : "neutral";
-                    const bg = state === "pass" ? `${COLORS.accent}18` : state === "fail" ? `${COLORS.danger}18` : COLORS.bg;
-                    const border = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.panelBorder;
-                    const fg = state === "pass" ? COLORS.accent : state === "fail" ? COLORS.danger : COLORS.textDim;
-                    const icon = state === "pass" ? "✓" : state === "fail" ? "✗" : "○";
-                    return (
-                      <span key={g.key} title={`${g.label} (${g.key})
-
-${g.why}`}
-                            style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 999, background: bg, border: `1px solid ${border}`, color: fg, fontFamily: mono, fontSize: 11, fontWeight: 600, cursor: "help", whiteSpace: "nowrap" }}>
-                        <span style={{ fontSize: 10 }}>{icon}</span>{g.label}
-                      </span>
-                    );
-                  })}
-                </div>
-              </>
-            );
-          })()}
-        </div>
-      </div>
-
-      {/* Observer Chart / Modal */}
-      {(observerProgress || observerResult) ? (
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <ObserverModal
-            progress={observerProgress}
-            result={observerResult}
-            review={observerReview}
-            equityHistory={observerEquity}
-            totalTicks={observerTotalTicks}
-            variant="dock"
-            onClose={onObserverClose}
-            onApplyOptimizations={onApplyOptimizations}
-          />
-        </div>
-      ) : (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", border: `1px dashed ${COLORS.panelBorder}`, borderRadius: 8, background: `${COLORS.panel}40`, color: COLORS.textMuted, fontFamily: mono, fontSize: 12 }}>
-          Submit a backtest to observe live metrics.
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Shared visual primitives (live + observer — prevents drift)
 // ═══════════════════════════════════════════════════════════════
@@ -2229,200 +1913,6 @@ function CompareStep({ n, title, body, active, done }) {
           {body}
         </div>
       </div>
-    </div>
-  );
-}
-
-function CompareView({ experiments, selectedIds, onToggleSelect, onClearSelection, onRefresh,
-                       onView, onCompare, compareReport, loading,
-                       compareInFlight, onGoToBacktest, totalInStore, onDismissReport }) {
-  const canCompare = selectedIds.length >= 2 && selectedIds.length <= 8 && !compareInFlight;
-  // Step 1's "do you have any experiments" check is against the full store,
-  // not the filtered subset, so active filters don't mask a populated library.
-  const expCount = totalInStore != null ? totalInStore : (experiments?.length || 0);
-  const hasEnoughForCompare = expCount >= 2;
-
-  // Derive the current step so the banner can highlight where the user is.
-  // 1 = need more backtests, 2 = browse/filter, 3 = select 2–8, 4 = click Compare
-  const currentStep = !hasEnoughForCompare ? 1
-                    : selectedIds.length < 2 ? 2
-                    : canCompare ? 3
-                    : 0;
-
-
-  return (
-    // Bound the whole CompareView to the viewport height (minus the top tab
-    // bar + page padding). With this, no element scrolls the window — the
-    // library's internal row list is the single flexible child and absorbs
-    // whatever vertical space remains. Kills the "vertical wobble" caused by
-    // multiple elements competing for page height.
-    <div style={{ display: "flex", flexDirection: "column",
-                   height: "calc(100vh - 160px)", minHeight: 0, gap: 0,
-                   overflow: "hidden" }}>
-      {/* How-it-works banner — spells out the COMPARE workflow as discrete,
-          left-justified steps so a first-time user knows what to do.
-          Stays visible even after running a comparison — the stepper doubles
-          as live status (completed step ticks, active step highlights). */}
-      <div style={{ marginBottom: 12, padding: "14px 18px",
-                    background: `${COLORS.purple}10`, border: `1px solid ${COLORS.purple}40`,
-                    borderRadius: 8 }}>
-        <div style={{ fontSize: 15, fontFamily: heading, fontWeight: 700,
-                      color: COLORS.purple, marginBottom: 4, letterSpacing: "0.02em" }}>
-          Compare Past Backtests
-        </div>
-        <div style={{ fontFamily: mono, fontSize: 12, color: COLORS.textDim,
-                      lineHeight: 1.55, marginBottom: 10 }}>
-          Rank two or more completed backtests side-by-side on Return, Sharpe,
-          Max DD, and Profit Factor — and see which Sharpe differences are real
-          signal vs. noise via paired-bootstrap p-values.
-        </div>
-
-        <CompareStep
-          n={1}
-          active={currentStep === 1}
-          done={currentStep > 1}
-          title="Run some backtests first"
-          body={
-            hasEnoughForCompare ? (
-              <>
-                <span style={{ color: COLORS.accent }}>{expCount}</span>{" "}
-                experiment{expCount === 1 ? "" : "s"} available in the library below.
-              </>
-            ) : (
-              <>
-                You need at least 2 completed runs before you can compare.
-                Head to the <span style={{ color: COLORS.blue, fontWeight: 700 }}>BACKTEST</span> tab,
-                submit a run, wait for it to finish, then come back here.
-                Currently: <span style={{ color: COLORS.warn }}>{expCount}</span> in the library.
-              </>
-            )
-          }
-        />
-        <CompareStep
-          n={2}
-          active={currentStep === 2}
-          done={currentStep > 2}
-          title="Filter and find the experiments you want"
-          body="Use the Status / Triggered-By / Tag filters in the library below to narrow the list. Click Refresh if you just finished a run and don't see it."
-        />
-        <CompareStep
-          n={3}
-          active={currentStep === 3}
-          done={compareReport?.success}
-          title="Select 2–8 and click Compare"
-          body={
-            selectedIds.length === 0 ? (
-              "Tick the checkbox on each row you want to include. Maximum 8."
-            ) : selectedIds.length === 1 ? (
-              <>
-                <span style={{ color: COLORS.warn }}>1 selected</span> — pick at least one more.
-              </>
-            ) : (
-              <>
-                <span style={{ color: COLORS.purple, fontWeight: 700 }}>{selectedIds.length}</span>
-                {" "}selected · hit the <span style={{ color: COLORS.purple, fontWeight: 700 }}>Compare →</span>
-                {" "}button under the library to run the analysis.
-              </>
-            )
-          }
-        />
-      </div>
-
-      {/* Hide the library when a successful comparison is on screen —
-          the results panel is the focus; user can hit Change Selection to
-          bring the library back. Failed reports keep the library visible
-          so the user can adjust their selection without losing the grid. */}
-      {!(compareReport && compareReport.success) && (
-        <ExperimentLibrary
-          experiments={experiments}
-          selectedIds={selectedIds}
-          onToggleSelect={onToggleSelect}
-          onClearSelection={onClearSelection}
-          onRefresh={onRefresh}
-          onView={onView}
-          loading={loading}
-          onCompare={onCompare}
-          canCompare={canCompare}
-          compareInFlight={compareInFlight}
-          onGoToBacktest={onGoToBacktest}
-          totalInStore={totalInStore}
-          compact={!!compareReport}
-        />
-      )}
-
-      {/* Compare action row removed — the inline Compare button in the
-          library header + the selection chip bar + the guided stepper Step 3
-          already cover both the action and the "N selected · ready" status,
-          so the separate action-row panel was just eating vertical room. */}
-
-      {compareReport && compareReport.success ? (
-        <CompareResults report={compareReport}
-                        experimentsById={Object.fromEntries(experiments.map(e => [e.id, e]))}
-                        onDismiss={onDismissReport} />
-      ) : compareReport && !compareReport.success ? (
-        <div style={{ marginTop: 10, padding: "12px 16px", background: COLORS.panel,
-                      border: `1px solid ${COLORS.warn}60`, borderRadius: 6,
-                      fontFamily: mono, fontSize: 12, lineHeight: 1.5,
-                      display: "flex", gap: 12, alignItems: "flex-start" }}>
-          <span style={{ fontSize: 18, lineHeight: 1 }}>⚠</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ color: COLORS.warn, fontWeight: 700, marginBottom: 4 }}>
-              Comparison couldn't be computed
-            </div>
-            <div style={{ color: COLORS.textDim }}>
-              {compareReport.missing_ids && compareReport.missing_ids.length > 0 ? (
-                <>
-                  One or more of the selected experiments are no longer in the
-                  store. Click <span style={{ color: COLORS.blue, fontWeight: 700 }}>Refresh</span>{" "}
-                  on the library header to resync, then re-select.
-                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>
-                    Missing: {compareReport.missing_ids.join(", ")}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {compareReport.error || "Unknown error."}
-                  <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 6,
-                                lineHeight: 1.5 }}>
-                    This almost always means one of the selected experiments
-                    is a <b>legacy run</b> from before the metrics-sanitiser fix
-                    — its on-disk metrics contain non-finite values that compare()
-                    can't rank. Try:
-                    <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
-                      <li>Pick a different pair of experiments, or</li>
-                      <li>Re-run one of them from the BACKTEST tab to refresh
-                          it with the fixed sanitiser.</li>
-                    </ul>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-          <button
-            onClick={onClearSelection}
-            style={{ background: "transparent", border: "none", color: COLORS.textDim,
-                     cursor: "pointer", fontFamily: mono, fontSize: 11,
-                     letterSpacing: "0.08em", textTransform: "uppercase",
-                     padding: "4px 8px" }}
-            title="Clear the current selection to pick a different set."
-          >
-            Reset
-          </button>
-        </div>
-      ) : null}
-
-      {/* Tip — reading guide for first-time users once a comparison is pending */}
-      {!compareReport && (
-        <div style={{ marginTop: 12, padding: "12px 16px",
-                      background: COLORS.bg, border: `1px solid ${COLORS.panelBorder}`,
-                      borderRadius: 6, fontSize: 12, fontFamily: mono, color: COLORS.textDim,
-                      lineHeight: 1.55 }}>
-          <span style={{ color: COLORS.text, fontWeight: 600 }}>How to read results:</span>{" "}
-          per-metric winners are marked with <span style={{ color: COLORS.accent }}>★</span>.
-          Pairwise p-values use a paired bootstrap on per-tick return diffs —
-          <span style={{ color: COLORS.accent }}> p&lt;0.05</span> means the sharpe gap isn't just noise.
-        </div>
-      )}
     </div>
   );
 }
@@ -3376,6 +2866,23 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [loadingOpacity, setLoadingOpacity] = useState(1);
   // Phase 8: tab switcher + backtest message stash
   const [activeTab, setActiveTab] = useState("LIVE");   // LIVE | RESEARCH | THESIS | SETTINGS
+  // v2.20.0 Research tab state — populated by ws.onmessage cases below.
+  const [researchCoverage, setResearchCoverage] = useState(null);
+  const [researchLabResult, setResearchLabResult] = useState(null);
+  const [researchReleasesList, setResearchReleasesList] = useState(null);
+  const [researchReleasesDiff, setResearchReleasesDiff] = useState(null);
+  // T30A — param schema from research_params_current handler.
+  const [researchParamsSchema, setResearchParamsSchema] = useState(null);
+  // T30B — streaming progress + final result for Mode B walk-forward.
+  const [researchLabProgress, setResearchLabProgress] = useState(null);
+  // v2.20.0 — top StatCards "Hydra-only" toggle. ON excludes journal entries
+  // with source='kraken_backfill' (manual / pre-Hydra trades); OFF shows
+  // full history. Persisted to localStorage so the user's choice survives
+  // refreshes. Right-sidebar per-pair cards always read full history.
+  const [hydraOnly, setHydraOnly] = useState(() => {
+    try { return localStorage.getItem("hydra.statcards.hydra_only") === "1"; }
+    catch { return false; }
+  });
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -3516,8 +3023,6 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   }, []);
 
   const [wsUrl, setWsUrl] = useState(() => sanitizeWsUrl(localStorage.getItem("hydra_ws_url")));
-
-  const [researchTab, setResearchTab] = useState("LATEST_RUN");
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
@@ -3816,6 +3321,31 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 setWsUrl(newUrl);
               }
               return;
+            case "research_dataset_coverage_ack":
+              setResearchCoverage(msg);
+              return;
+            case "research_releases_list_ack":
+              setResearchReleasesList(msg);
+              return;
+            case "research_releases_diff_ack":
+              setResearchReleasesDiff(msg);
+              return;
+            case "research_lab_run_ack":
+              setResearchLabResult(msg);
+              return;
+            case "research_lab_progress":
+              setResearchLabProgress((prev) => {
+                const arr = prev || [];
+                return [...arr, msg];
+              });
+              return;
+            case "research_lab_result":
+              setResearchLabResult(msg);
+              setResearchLabProgress(null);  // clear progress accumulator
+              return;
+            case "research_params_current_ack":
+              setResearchParamsSchema(msg);
+              return;
             default:
               // Unknown typed message → drop silently. Do NOT fall through
               // to applyLiveState: a malformed backtest-side message with
@@ -3864,7 +3394,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
   useEffect(() => { refreshWsToken(); }, [refreshWsToken]);
 
-  // Phase 8: send a typed WS message (used by BacktestControlPanel).
+  // Phase 8: send a typed WS message.
   // v2.15.0: every send carries the per-session auth token.
   const sendMessage = useCallback((msg) => {
     const ws = wsRef.current;
@@ -4142,9 +3672,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
   // Total Balance: use real exchange balance when available, fall back to engine equity
   const totalEquity = balanceUsd?.total_usd != null ? balanceUsd.total_usd : Object.values(pairs).reduce((s, p) => s + (p.portfolio?.equity || 0), 0);
-  // P&L: journal-derived realized + unrealized, converted to USD. Authoritative
-  // across --resume (engine pnl_pct resets because initial_balance gets re-split).
-  const journalPnlUsd = state?.journal_stats?.total_pnl_usd ?? 0;
+  // P&L journalPnlUsd is computed below alongside the hydra-only-toggle
+  // sourced fields so the toggle gate them in lockstep.
   // Max drawdown: v2.16.2+ — agent tracks portfolio-level peak/max via
   // balance_usd.total_usd and persists across --resume. Falls back to the
   // legacy max-of-per-pair + in-session history if the agent hasn't sent
@@ -4169,10 +3698,22 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const engineWinRate = (totalWins + totalLosses) > 0 ? (totalWins / (totalWins + totalLosses) * 100) : 0;
   // Journal fill stats — computed from FULL journal on the backend (not the
   // 20-entry window shown in the order list). Reflects actual exchange activity.
+  // v2.20.0 — top StatCards have a "Hydra-only" toggle: ON excludes
+  // entries with source='kraken_backfill' (manual / pre-Hydra trades);
+  // OFF shows full history including backfill. Right-sidebar per-pair
+  // cards always read full-history (`fillsByPair`, `pnl_by_pair`) — they
+  // are not affected by the toggle.
   const jStats = state?.journal_stats || {};
-  const totalFills = jStats.total_fills || 0;
   const fillsByPair = jStats.fills_by_pair || {};
-  const fillWinRate = jStats.fill_win_rate || 0;
+  const totalFills = hydraOnly
+    ? (jStats.total_fills_hydra_only || 0)
+    : (jStats.total_fills || 0);
+  const fillWinRate = hydraOnly
+    ? (jStats.fill_win_rate_hydra_only || 0)
+    : (jStats.fill_win_rate || 0);
+  const journalPnlUsd = hydraOnly
+    ? (jStats.total_pnl_usd_hydra_only ?? 0)
+    : (jStats.total_pnl_usd ?? 0);
   // Win rate: use journal fill-derived rate when available so it reflects partial closes,
   // falling back to engine round-trip rate.
   const overallWinRate = totalFills > 0 ? fillWinRate : engineWinRate;
@@ -4261,93 +3802,19 @@ export function HydraDashboard({ jwtToken, onLogout }) {
               </div>
             )}
             {activeTab === "RESEARCH" && (
-              <>
-              <FeatureFlagBanner
-                flag="HYDRA_BACKTEST_DISABLED"
-                note="Backtest worker pool and compare library are prototype-stage."
+              <ResearchTab
+                sendMessage={sendMessage}
+                coverageData={researchCoverage}
+                labResult={researchLabResult}
+                labProgress={researchLabProgress}
+                releasesList={researchReleasesList}
+                releasesDiff={researchReleasesDiff}
+                paramsSchema={researchParamsSchema}
+                clearLabRunState={() => {
+                  setResearchLabResult(null);
+                  setResearchLabProgress(null);
+                }}
               />
-              <div style={{ padding: "16px 24px", display: "flex", gap: "24px", alignItems: "flex-start" }}>
-                {/* Left Column: Backtest Control Panel */}
-                <div style={{ flex: "0 0 500px" }}>
-                  <BacktestControlPanel
-                    onSubmit={sendMessage}
-                    connected={connected}
-                    disabled={false}
-                    stagedProposal={stagedProposal}
-                  />
-                </div>
-                
-                {/* Right Column: Backtest Results or Compare Library */}
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                  <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-                    <button onClick={() => setResearchTab("LATEST_RUN")}
-                            style={{ padding: "6px 16px", background: researchTab === "LATEST_RUN" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LATEST_RUN" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LATEST_RUN" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
-                      Latest Run
-                    </button>
-                    <button onClick={() => setResearchTab("LIBRARY")}
-                            style={{ padding: "6px 16px", background: researchTab === "LIBRARY" ? `${COLORS.blue}18` : "transparent", color: researchTab === "LIBRARY" ? COLORS.blue : COLORS.textDim, border: `1px solid ${researchTab === "LIBRARY" ? COLORS.blue + "60" : COLORS.panelBorder}`, borderRadius: 4, fontFamily: mono, fontSize: 12, fontWeight: 700, textTransform: "uppercase", cursor: "pointer", outline: "none" }}>
-                      Compare Library
-                    </button>
-                  </div>
-
-                  {researchTab === "LATEST_RUN" ? (
-                    <BacktestResults
-                      ackMsg={btLastAck}
-                      observerProgress={observerClosed ? null : obsProgress}
-                      observerResult={observerClosed ? null : obsResult}
-                      observerReview={observerClosed ? null : obsReview}
-                      observerEquity={obsEquity}
-                      observerTotalTicks={totalTicks}
-                      completedCount={Object.keys(btResults).length}
-                      onObserverClose={() => setObserverClosed(true)}
-                      onCompareThisRun={(expId) => {
-                        setCompareSelected((prev) =>
-                          prev.includes(expId) ? prev : [...prev, expId].slice(0, 8)
-                        );
-                        setResearchTab("LIBRARY");
-                        fetchLibrary();
-                      }}
-                    />
-                  ) : (
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-                      {viewingExpId && (
-                        <div style={{ marginBottom: 12, padding: "10px 16px",
-                                      background: `${COLORS.blue}10`,
-                                      border: `1px solid ${COLORS.blue}40`, borderRadius: 4,
-                                      fontFamily: mono, fontSize: 12, color: COLORS.blue,
-                                      display: "flex", justifyContent: "space-between",
-                                      alignItems: "center" }}>
-                          <span>Fetched experiment detail: {viewingExpId.slice(0, 16)}…</span>
-                          <button onClick={() => setViewingExpId(null)}
-                                  style={{ background: "transparent", border: "none",
-                                           color: COLORS.blue, cursor: "pointer",
-                                           fontFamily: mono, fontSize: 12 }}>
-                            dismiss
-                          </button>
-                        </div>
-                      )}
-                      <CompareView
-                        experiments={filteredExperiments}
-                        selectedIds={compareSelected}
-                        onToggleSelect={toggleSelectExperiment}
-                        onClearSelection={clearSelection}
-                        onRefresh={fetchLibrary}
-                        onView={viewExperiment}
-                        onCompare={runCompare}
-                        compareReport={compareReport}
-                        loading={libLoading}
-                        compareInFlight={compareInFlight}
-                        onGoToBacktest={() => { /* No-op */ }}
-                        totalInStore={libExperiments.length}
-                        onDismissReport={() => {
-                          setCompareReport(null);
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-              </>
             )}
             {activeTab === "THESIS" && (
               <>
@@ -4363,7 +3830,6 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 onBacktest={(p) => {
                   setStagedProposal(p);
                   setActiveTab("RESEARCH");
-                  setResearchTab("LATEST_RUN");
                 }}
               />
               </>
@@ -4398,19 +3864,56 @@ export function HydraDashboard({ jwtToken, onLogout }) {
           <style>{`@keyframes hc-dashboard-fade-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }`}</style>
           {/* Full grid — stats span top, then pair panels + sidebar below */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12, alignItems: "start" }}>
-            {/* Stats Row — spans both columns for edge-to-edge alignment */}
-            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+            {/* Stats Row — spans both columns for edge-to-edge alignment.
+                Hydra-only toggle gates Fills / Win Rate / P&L cards. */}
+            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "stretch" }}>
+              <button
+                onClick={() => {
+                  const next = !hydraOnly;
+                  setHydraOnly(next);
+                  try { localStorage.setItem("hydra.statcards.hydra_only", next ? "1" : "0"); } catch { /* ignore */ }
+                }}
+                title={hydraOnly
+                  ? "Showing Hydra-placed trades only (excludes kraken_backfill source). Click to show all trades."
+                  : "Showing all trades (full history including backfill). Click to filter to Hydra-only."}
+                style={{
+                  padding: "0 14px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: mono,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  background: hydraOnly ? `${COLORS.accent}18` : "transparent",
+                  color: hydraOnly ? COLORS.accent : COLORS.textDim,
+                  border: `1px solid ${hydraOnly ? `${COLORS.accent}60` : COLORS.panelBorder}`,
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  outline: "none",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: 7, height: 7, borderRadius: "50%",
+                    background: hydraOnly ? COLORS.accent : COLORS.textDim,
+                    boxShadow: hydraOnly ? `0 0 8px ${COLORS.accent}80` : "none",
+                  }}
+                />
+                {hydraOnly ? "Hydra-only" : "All trades"}
+              </button>
               <StatCard label="Total Balance" value={`$${totalEquity.toFixed(2)}`} color={COLORS.text} />
               <StatCard label="P&L" value={`${journalPnlUsd >= 0 ? "+$" : "-$"}${Math.abs(journalPnlUsd).toFixed(2)}`} color={journalPnlUsd >= 0 ? COLORS.buy : COLORS.sell} />
-              <StatCard
-                label={portDD ? "Max DD (Current)" : "Max Drawdown"}
-                value={portDD ? `${maxDD.toFixed(2)} (${currentDD.toFixed(2)})` : maxDD.toFixed(2)}
-                unit="%"
-                color={maxDD > 5 ? COLORS.danger : COLORS.warn}
-              />
               <StatCard label="Fills" value={totalFills} color={COLORS.blue} />
               <StatCard label="Win Rate" value={overallWinRate.toFixed(0)} unit="%" color={overallWinRate > 55 ? COLORS.buy : overallWinRate > 0 ? COLORS.warn : COLORS.textDim} />
             </div>
+            {/* Max DD card removed in v2.20.0 — portfolio-level DD was session-scoped
+                (reset on agent restart) which became inconsistent with the other
+                journal-derived top stats. Per-pair Drawdown remains on the right
+                sidebar cards. A journal-derived equity-curve drawdown that respects
+                the Hydra-only toggle is on the v2.21.0 backlog. */}
             {/* LEFT: Pair panels + equity + trade log */}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {pairNames.map((pair) => {
@@ -5049,7 +4552,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.19.1 | kraken-cli v0.3.2 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.20.0 | kraken-cli v0.3.2 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]

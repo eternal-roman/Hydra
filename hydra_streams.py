@@ -4,13 +4,9 @@ import json
 import time
 import os
 import shlex
-import asyncio
 import threading
-import secrets
 import queue
-from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timezone
 
 from hydra_kraken_cli import KrakenCLI
 
@@ -252,6 +248,24 @@ class CandleStream(BaseStream):
             ws_name = KrakenCLI._resolve_ws_pair(p)
             self._symbol_map[p] = p
             self._symbol_map[ws_name] = p
+        self._candle_callbacks: list = []
+
+    def on_candle(self, callback) -> None:
+        """Register a callback fired on each push: callback(pair: str, candle: dict).
+
+        Callbacks must be fast and non-blocking — they run inside the WS thread,
+        wrapped in try/except so a bad subscriber cannot kill the stream.
+
+        Registration order:
+        - Safe to call BEFORE start(): callbacks accumulate in _candle_callbacks
+          and fire as soon as the WS connection delivers its first candle. No
+          startup race; no "missed early candles" failure mode.
+        - Safe to call AFTER start(): the dispatch loop snapshots the list under
+          lock on every message, so newly-registered callbacks pick up on the
+          next candle.
+        """
+        with self._lock:
+            self._candle_callbacks.append(callback)
 
     def _build_cmd(self) -> str:
         ws_pairs = [KrakenCLI._resolve_ws_pair(p) for p in self._pairs]
@@ -285,6 +299,12 @@ class CandleStream(BaseStream):
             if pair:
                 with self._lock:
                     self._latest[pair] = entry
+                    cbs = list(self._candle_callbacks)
+                for cb in cbs:
+                    try:
+                        cb(pair, entry)
+                    except Exception as e:
+                        print(f"  [CANDLE_WS] callback error: {type(e).__name__}: {e}")
 
     def latest_candle(self, pair: str) -> Optional[Dict[str, Any]]:
         """Return the most recent candle for the given pair, or None."""

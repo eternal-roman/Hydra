@@ -47,7 +47,7 @@ regression bug, not a style issue.
   `STABLE_QUOTES = {USD, USDC, USDT}` are first-class. v2.19 flipped
   the default from USDC → USD; opt back into USDC by passing
   `--pairs SOL/USDC,SOL/BTC,BTC/USDC`.
-- **Version pin:** v2.19.1
+- **Version pin:** v2.20.0
 
 ## Defaults (inherited)
 
@@ -189,6 +189,9 @@ every call (tokens rotate).
 | `HYDRA_POSTEDIT_HOOK_DISABLED` | tooling | silence hook during heavy refactors |
 | `HYDRA_RM_FEATURES_DISABLED` | rm_features | `=1` skips engine-internal feature computation in `_build_quant_indicators`; instant rollback without redeploy. Default off (features enabled). |
 | `HYDRA_QUOTE` | config | Default stable quote when `--quote` is not passed and no `--pairs` override. Choices: `USD` (v2.19+ default), `USDC`, `USDT`. Resolution order: explicit `--quote` > `HYDRA_QUOTE` env > `DEFAULT_QUOTE` (USD). |
+| `HYDRA_TAPE_CAPTURE` | history | `=1` (default) wires CandleStream candle-close pushes into a bounded-queue writer that upserts to `hydra_history.sqlite` (`source='tape'`). Set `=0` to disable (e.g. paper-mode tests on a shared DB). |
+| `HYDRA_HISTORY_DB` | history | Path override for the canonical OHLC store. Defaults to `hydra_history.sqlite` in the working directory. Used by the agent (tape capture), `tools/refresh_history.py`, `tools/run_regression.py`, and the SqliteSource backtest path. |
+| `HYDRA_REGRESSION_GATE` | release | `=1` (default) blocks the `/release` skill on a Wilcoxon WORSE p<0.05 verdict in `tools/run_regression.py`. Set `=0` to skip the gate (override path also requires `--accept-regression "<reason>"` to populate `regression_run.override_reason`). Read only by `tools/run_regression.py`; live agent ignores it. |
 
 ## Build / run
 

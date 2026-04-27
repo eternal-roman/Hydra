@@ -14,25 +14,19 @@ Usage:
     python hydra_agent.py --pairs SOL/USDC,SOL/BTC,BTC/USDC --interval 60   # opt back into USDC
 """
 
-import subprocess
 import dataclasses
 import json
 import time
 import sys
 import os
 import argparse
-import queue
-import secrets
-import shlex
 import signal as sig
-import asyncio
-import threading
+import textwrap
 import traceback
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from collections import deque
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -75,7 +69,7 @@ from hydra_kraken_cli import KrakenCLI
 from hydra_pair_registry import STABLE_QUOTES
 from hydra_config import TradingTriangle
 from hydra_ws_server import DashboardBroadcaster
-from hydra_streams import BaseStream, CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
+from hydra_streams import CandleStream, TickerStream, BalanceStream, BookStream, ExecutionStream, _is_fully_filled
 
 # ═══════════════════════════════════════════════════════════════
 # HYDRA AGENT (Main Loop)
@@ -353,6 +347,27 @@ class HydraAgent:
         self.ticker_stream = TickerStream(pairs, paper=paper)
         self.balance_stream = BalanceStream(paper=paper)
         self.book_stream = BookStream(pairs, depth=10, paper=paper)
+        # v2.20.0 — Live tape capture: subscribe to CandleStream pushes and
+        # write closed candles into the canonical hydra_history.sqlite store.
+        # Bounded queue + writer thread guarantee the agent's main loop never
+        # stalls on a SQLite fsync. Default ON; disable with HYDRA_TAPE_CAPTURE=0.
+        # Wrapped in try/except so a SQLite lock / fs issue cannot crash
+        # __init__ and silently kill the companion subsystem alongside.
+        self._tape_store = None
+        self._tape_capture = None
+        if os.environ.get("HYDRA_TAPE_CAPTURE", "1") == "1":
+            try:
+                from hydra_history_store import HistoryStore
+                from hydra_tape_capture import TapeCapture
+                _tape_db = os.environ.get("HYDRA_HISTORY_DB", "hydra_history.sqlite")
+                self._tape_store = HistoryStore(_tape_db)
+                self._tape_capture = TapeCapture(self._tape_store)
+                self.candle_stream.on_candle(self._tape_capture.on_candle)
+                self._tape_capture.start()
+            except Exception as e:
+                print(f"  [TAPE] init failed ({type(e).__name__}: {e}); disabled for this run")
+                self._tape_store = None
+                self._tape_capture = None
         # Tracks the most recently logged unhealthy reason so the tick body
         # only prints on transitions instead of spamming the warning every
         # tick. None means "currently healthy or never warned".
@@ -447,6 +462,13 @@ class HydraAgent:
                 self.derivatives_stream.stop()
             except Exception as e:
                 print(f"  [HYDRA] DerivativesStream stop failed: {e}")
+        # v2.20.0 — Stop tape capture last (after streams are torn down so no
+        # more candles arrive). Drain the queue cleanly.
+        if getattr(self, "_tape_capture", None) is not None:
+            try:
+                self._tape_capture.stop()
+            except Exception as e:
+                print(f"  [HYDRA] TapeCapture stop failed: {e}")
         # Drain the backtest worker pool (daemon threads — best-effort join).
         if self.backtest_pool is not None:
             try:
@@ -1582,7 +1604,18 @@ class HydraAgent:
                     guidance = self.brain.run_portfolio_review(review_state)
                     if guidance:
                         self._portfolio_guidance = guidance
-                        print(f"  [PORTFOLIO] New guidance: {guidance[:100]}...")
+                        # Print the FULL guidance, wrapped at 100 cols with
+                        # continuation lines aligned under the message body
+                        # so multi-sentence Grok output reads cleanly next to
+                        # the surrounding [BRAIN] / [SWAP] / [COMPANION] lines.
+                        _prefix = "  [PORTFOLIO] New guidance: "
+                        _cont = " " * len(_prefix)
+                        for _line in textwrap.wrap(guidance, width=100,
+                                                   initial_indent=_prefix,
+                                                   subsequent_indent=_cont,
+                                                   break_long_words=False,
+                                                   break_on_hyphens=False):
+                            print(_line)
                     self._portfolio_epoch_count = 0
                     self._last_portfolio_review_regimes = {
                         p: (engine_states.get(p) or {}).get("regime", "RANGING")
@@ -3022,7 +3055,7 @@ class HydraAgent:
         sell_amount = sell_engine.position.size
         sell_price = sell_state.get("price", 0)
 
-        print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} → BUY {buy_pair}")
+        print(f"  [SWAP] Coordinated swap {swap_id}: SELL {sell_amount:.8f} {sell_pair} @ {sell_price} → BUY {buy_pair}")
         print(f"  [SWAP] Reason: {reason}")
 
         # Leg 1: Sell — update engine state first, then execute on exchange
@@ -3520,13 +3553,33 @@ class HydraAgent:
             "total_fills": 0, "fills_by_pair": {}, "fill_win_rate": 0,
             "pnl_by_pair": {}, "total_realized_pnl_usd": 0,
             "total_unrealized_pnl_usd": 0, "total_pnl_usd": 0,
+            # v2.20.0 — Hydra-only variants (dashboard toggle "Hydra-only ON"
+            # excludes source='kraken_backfill', i.e. trades NOT placed by
+            # Hydra). Toggle OFF reads the base fields above (full history).
+            "total_fills_hydra_only": 0, "fill_win_rate_hydra_only": 0,
+            "total_realized_pnl_usd_hydra_only": 0,
+            "total_pnl_usd_hydra_only": 0,
         }
         try:
             _FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
-            total_fills = 0
+
+            def _is_hydra_only(entry: dict) -> bool:
+                """Hydra-placed trades have source != 'kraken_backfill'."""
+                return (entry.get("source") or "") != "kraken_backfill"
+
+            # Single pass populates BOTH the full-history and hydra-only views
+            # in lockstep. fills_by_pair is full-history (right-sidebar
+            # per-pair cards never filter); the *_hydra_only counters branch
+            # off the same loop with the source filter applied.
             fills_by_pair: Dict[str, Dict[str, Any]] = {}
+            total_fills = 0
+            total_fills_hydra_only = 0
             _buy_cost: Dict[str, float] = {}
             _buy_qty: Dict[str, float] = {}
+            _buy_cost_h: Dict[str, float] = {}
+            _buy_qty_h: Dict[str, float] = {}
+            sell_wins_h = 0
+            sell_losses_h = 0
             for entry in self.order_journal:
                 lc = entry.get("lifecycle") or {}
                 if lc.get("state") not in _FILL_STATES:
@@ -3538,10 +3591,16 @@ class HydraAgent:
                 side = entry.get("side")
                 vol = float(lc.get("vol_exec") or 0)
                 price = float(lc.get("avg_fill_price") or (entry.get("intent") or {}).get("limit_price") or 0)
+                hydra_only = _is_hydra_only(entry)
+                if hydra_only:
+                    total_fills_hydra_only += 1
                 if side == "BUY":
                     fills_by_pair[p]["buys"] += 1
                     _buy_cost[p] = _buy_cost.get(p, 0) + vol * price
                     _buy_qty[p] = _buy_qty.get(p, 0) + vol
+                    if hydra_only:
+                        _buy_cost_h[p] = _buy_cost_h.get(p, 0) + vol * price
+                        _buy_qty_h[p] = _buy_qty_h.get(p, 0) + vol
                 elif side == "SELL":
                     fills_by_pair[p]["sells"] += 1
                     avg_buy = (_buy_cost.get(p, 0) / _buy_qty[p]) if _buy_qty.get(p, 0) > 0 else 0
@@ -3553,17 +3612,34 @@ class HydraAgent:
                     sold_cost = vol * avg_buy if avg_buy > 0 else 0
                     _buy_cost[p] = max(0.0, _buy_cost.get(p, 0) - sold_cost)
                     _buy_qty[p] = max(0.0, _buy_qty.get(p, 0) - vol)
+                    if hydra_only:
+                        avg_buy_h = (_buy_cost_h.get(p, 0) / _buy_qty_h[p]) if _buy_qty_h.get(p, 0) > 0 else 0
+                        if avg_buy_h > 0 and price > 0:
+                            if price >= avg_buy_h:
+                                sell_wins_h += 1
+                            else:
+                                sell_losses_h += 1
+                        sold_cost_h = vol * avg_buy_h if avg_buy_h > 0 else 0
+                        _buy_cost_h[p] = max(0.0, _buy_cost_h.get(p, 0) - sold_cost_h)
+                        _buy_qty_h[p] = max(0.0, _buy_qty_h.get(p, 0) - vol)
             total_sell_wins = sum(v.get("sell_wins", 0) for v in fills_by_pair.values())
             total_sell_losses = sum(v.get("sell_losses", 0) for v in fills_by_pair.values())
             total_sells = total_sell_wins + total_sell_losses
             fill_win_rate = round(total_sell_wins / total_sells * 100, 2) if total_sells > 0 else 0
+            total_sells_h = sell_wins_h + sell_losses_h
+            fill_win_rate_hydra_only = round(sell_wins_h / total_sells_h * 100, 2) if total_sells_h > 0 else 0
 
             asset_prices = self._get_asset_prices()
             total_realized_pnl_usd = 0.0
             total_unrealized_pnl_usd = 0.0
+            total_realized_pnl_usd_h = 0.0
             pnl_by_pair: Dict[str, Dict[str, float]] = {}
             for pair in self.pairs:
-                realized = self._compute_pair_realized_pnl(pair)
+                # Full-history realized for both the right-sidebar per-pair
+                # card and the "all trades" top P&L view.
+                realized_full = self._compute_pair_realized_pnl(pair, hydra_only=False)
+                # Hydra-only realized for the toggle-on top P&L view.
+                realized_h = self._compute_pair_realized_pnl(pair, hydra_only=True)
                 engine = self.engines.get(pair)
                 ep = engine.prices[-1] if engine and engine.prices else 0
                 unrealized = (engine.position.size * (ep - engine.position.avg_entry)
@@ -3571,14 +3647,16 @@ class HydraAgent:
                 quote = pair.split("/")[1] if "/" in pair else "USD"
                 quote_usd = asset_prices.get(quote, 1.0)
                 pnl_by_pair[pair] = {
-                    "realized": round(realized, 8),
+                    "realized": round(realized_full, 8),
                     "unrealized": round(unrealized, 8),
-                    "net": round(realized + unrealized, 8),
-                    "net_usd": round((realized + unrealized) * quote_usd, 2),
+                    "net": round(realized_full + unrealized, 8),
+                    "net_usd": round((realized_full + unrealized) * quote_usd, 2),
                 }
-                total_realized_pnl_usd += realized * quote_usd
+                total_realized_pnl_usd += realized_full * quote_usd
+                total_realized_pnl_usd_h += realized_h * quote_usd
                 total_unrealized_pnl_usd += unrealized * quote_usd
             total_pnl_usd = total_realized_pnl_usd + total_unrealized_pnl_usd
+            total_pnl_usd_h = total_realized_pnl_usd_h + total_unrealized_pnl_usd
 
             journal_stats = {
                 "total_fills": total_fills,
@@ -3588,6 +3666,12 @@ class HydraAgent:
                 "total_realized_pnl_usd": round(total_realized_pnl_usd, 2),
                 "total_unrealized_pnl_usd": round(total_unrealized_pnl_usd, 2),
                 "total_pnl_usd": round(total_pnl_usd, 2),
+                # v2.20.0 — Hydra-only variants for the dashboard toggle.
+                # excludes journal entries with source='kraken_backfill'.
+                "total_fills_hydra_only": total_fills_hydra_only,
+                "fill_win_rate_hydra_only": fill_win_rate_hydra_only,
+                "total_realized_pnl_usd_hydra_only": round(total_realized_pnl_usd_h, 2),
+                "total_pnl_usd_hydra_only": round(total_pnl_usd_h, 2),
             }
         except Exception as e:
             print(f"  [WARN] journal_stats computation failed: {type(e).__name__}: {e}")
@@ -3722,13 +3806,30 @@ class HydraAgent:
         print(f"\n  Past performance does not guarantee future results. Not financial advice.")
         print(f"  {'='*80}")
 
-    def _compute_pair_realized_pnl(self, pair: str) -> float:
+    def _compute_pair_realized_pnl(self, pair: str,
+                                   hydra_only: bool = False) -> float:
         """Compute realized P&L for a pair from the order journal.
 
         Uses average-cost-basis accounting: each sell's cost is valued at
         the running weighted-average buy price, so only *closed* round-trip
-        profit/loss is reflected.  Unsold inventory cost stays out of
+        profit/loss is reflected. Unsold inventory cost stays out of
         realized P&L — it belongs in unrealized (pos_size * (price - avg_entry)).
+
+        **Stable-quote netting** (cross-pair fix, v2.20.0):
+        Stable quotes are equivalent ($1 by CLAUDE.md invariant
+        `STABLE_QUOTES = {USD, USDC, USDT}`). A SOL bought via SOL/USDC
+        and sold via SOL/USD shares the same SOL inventory; siloing the
+        cost basis per pair manufactures fictitious P&L. So when the
+        requested pair has a stable quote, we walk all journal entries
+        whose base matches AND whose quote is also in STABLE_QUOTES,
+        treating prices as USD-equivalent. Entries with non-stable quote
+        (e.g. SOL/BTC) stay per-pair — BTC is a real quote.
+
+        `hydra_only`: when True, excludes journal entries with
+        `source == "kraken_backfill"` — i.e. trades NOT placed by Hydra
+        (user-action / pre-Hydra reconstructed). Used by the dashboard
+        "Hydra-only" toggle. When False, full history including backfilled
+        entries.
 
         Only counts FILLED / PARTIALLY_FILLED entries — PLACED,
         PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED are skipped.
@@ -3737,12 +3838,35 @@ class HydraAgent:
         journal state, not engine balances which get pooled and re-split.
         """
         FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
+        if "/" in pair:
+            req_base, req_quote = pair.split("/", 1)
+        else:
+            req_base, req_quote = pair, "USD"
+        req_is_stable = req_quote in STABLE_QUOTES
+
+        def _matches(entry_pair: str) -> bool:
+            if "/" not in entry_pair:
+                return entry_pair == pair
+            eb, eq = entry_pair.split("/", 1)
+            if req_is_stable:
+                return eb == req_base and eq in STABLE_QUOTES
+            return entry_pair == pair
+
+        def _source_ok(e: dict) -> bool:
+            if not hydra_only:
+                return True
+            return (e.get("source") or "") != "kraken_backfill"
+
+        entries = [
+            e for e in self.order_journal
+            if _matches(e.get("pair") or "") and _source_ok(e)
+        ]
+        entries.sort(key=lambda e: e.get("placed_at") or "")
+
         total_buy_cost = 0.0
         total_buy_vol = 0.0
         realized = 0.0
-        for entry in self.order_journal:
-            if entry.get("pair") != pair:
-                continue
+        for entry in entries:
             lifecycle = entry.get("lifecycle") or {}
             if lifecycle.get("state") not in FILL_STATES:
                 continue
@@ -3824,7 +3948,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.19.1",
+            "version": "2.20.0",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,
