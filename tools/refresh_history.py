@@ -62,10 +62,23 @@ def fill_gaps_for_pair(store: HistoryStore, pair: str, grain_sec: int,
     interval_min = grain_sec // 60
     cursor = int(cov.last_ts)
     total_written = 0
+    unfillable_warned = False
     for _ in range(max_pages):
         candles, last_cursor = cli.ohlc_paged(pair, interval=interval_min, since=cursor)
         if not candles:
             break
+        # Detect Kraken's "trailing window only" REST behavior: if the FIRST
+        # returned candle is more than grain_sec*2 ahead of `since`, Kraken
+        # didn't honor the cursor — it just gave us the trailing 720 candles.
+        # Deep gaps (older than ~30 days at 1h) cannot be filled via REST OHLC.
+        first_ts = int(float(candles[0].get("timestamp", 0)))
+        if (not unfillable_warned and first_ts > cursor + grain_sec * 2):
+            print(f"  [REFRESH] {pair} {grain_sec}s: unfillable gap from "
+                  f"{cursor} to {first_ts} ({(first_ts - cursor) // 3600}h). "
+                  f"Kraken REST OHLC doesn't paginate deep history; "
+                  f"gap will persist until next Kraken trade-archive "
+                  f"bootstrap or live tape capture covers it.")
+            unfillable_warned = True
         rows: List[CandleRow] = []
         for r in candles:
             ts = int(float(r.get("timestamp", 0)))
