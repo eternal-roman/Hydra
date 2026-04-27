@@ -3545,12 +3545,16 @@ class HydraAgent:
         }
         try:
             _FILL_STATES = ("FILLED", "PARTIALLY_FILLED")
-            # Rolling 90-day window — fills, win rate, and downstream P&L
-            # all reflect recent activity, not multi-year journal history.
-            # Entries without a parseable placed_at pass the filter (legacy
-            # compat). Same cutoff used by _compute_pair_realized_pnl.
+            # Two-pass split (v2.20.0):
+            #   pass 1 — full-history per-pair `fills_by_pair` (right-sidebar
+            #            per-pair card display: full lifetime activity)
+            #   pass 2 — 90d-windowed totals (top StatCards: Fills, Win Rate)
+            # The same split applies to P&L below: pnl_by_pair is full-history
+            # for the right-sidebar cards; total_realized_pnl_usd uses 90d
+            # via _compute_pair_realized_pnl's internal window.
             _stats_cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-            total_fills = 0
+
+            # ── Pass 1: full-history per-pair (right-sidebar cards) ──
             fills_by_pair: Dict[str, Dict[str, Any]] = {}
             _buy_cost: Dict[str, float] = {}
             _buy_qty: Dict[str, float] = {}
@@ -3558,10 +3562,6 @@ class HydraAgent:
                 lc = entry.get("lifecycle") or {}
                 if lc.get("state") not in _FILL_STATES:
                     continue
-                pa = entry.get("placed_at") or ""
-                if pa and pa < _stats_cutoff:
-                    continue
-                total_fills += 1
                 p = entry.get("pair", "")
                 if p not in fills_by_pair:
                     fills_by_pair[p] = {"buys": 0, "sells": 0, "sell_wins": 0, "sell_losses": 0}
@@ -3583,17 +3583,50 @@ class HydraAgent:
                     sold_cost = vol * avg_buy if avg_buy > 0 else 0
                     _buy_cost[p] = max(0.0, _buy_cost.get(p, 0) - sold_cost)
                     _buy_qty[p] = max(0.0, _buy_qty.get(p, 0) - vol)
-            total_sell_wins = sum(v.get("sell_wins", 0) for v in fills_by_pair.values())
-            total_sell_losses = sum(v.get("sell_losses", 0) for v in fills_by_pair.values())
-            total_sells = total_sell_wins + total_sell_losses
-            fill_win_rate = round(total_sell_wins / total_sells * 100, 2) if total_sells > 0 else 0
+
+            # ── Pass 2: 90d-windowed totals (top StatCards) ──
+            total_fills = 0
+            total_sell_wins_90d = 0
+            total_sell_losses_90d = 0
+            _buy_cost_90d: Dict[str, float] = {}
+            _buy_qty_90d: Dict[str, float] = {}
+            for entry in self.order_journal:
+                lc = entry.get("lifecycle") or {}
+                if lc.get("state") not in _FILL_STATES:
+                    continue
+                pa = entry.get("placed_at") or ""
+                if pa and pa < _stats_cutoff:
+                    continue
+                total_fills += 1
+                p = entry.get("pair", "")
+                side = entry.get("side")
+                vol = float(lc.get("vol_exec") or 0)
+                price = float(lc.get("avg_fill_price") or (entry.get("intent") or {}).get("limit_price") or 0)
+                if side == "BUY":
+                    _buy_cost_90d[p] = _buy_cost_90d.get(p, 0) + vol * price
+                    _buy_qty_90d[p] = _buy_qty_90d.get(p, 0) + vol
+                elif side == "SELL":
+                    avg_buy = (_buy_cost_90d.get(p, 0) / _buy_qty_90d[p]) if _buy_qty_90d.get(p, 0) > 0 else 0
+                    if avg_buy > 0 and price > 0:
+                        if price >= avg_buy:
+                            total_sell_wins_90d += 1
+                        else:
+                            total_sell_losses_90d += 1
+                    sold_cost = vol * avg_buy if avg_buy > 0 else 0
+                    _buy_cost_90d[p] = max(0.0, _buy_cost_90d.get(p, 0) - sold_cost)
+                    _buy_qty_90d[p] = max(0.0, _buy_qty_90d.get(p, 0) - vol)
+            total_sells_90d = total_sell_wins_90d + total_sell_losses_90d
+            fill_win_rate = round(total_sell_wins_90d / total_sells_90d * 100, 2) if total_sells_90d > 0 else 0
 
             asset_prices = self._get_asset_prices()
             total_realized_pnl_usd = 0.0
             total_unrealized_pnl_usd = 0.0
             pnl_by_pair: Dict[str, Dict[str, float]] = {}
             for pair in self.pairs:
-                realized = self._compute_pair_realized_pnl(pair)
+                # Full-history realized for the right-sidebar per-pair card
+                realized_full = self._compute_pair_realized_pnl(pair, window_days=None)
+                # 90d-windowed realized for the top P&L StatCard
+                realized_90d = self._compute_pair_realized_pnl(pair, window_days=90)
                 engine = self.engines.get(pair)
                 ep = engine.prices[-1] if engine and engine.prices else 0
                 unrealized = (engine.position.size * (ep - engine.position.avg_entry)
@@ -3601,12 +3634,12 @@ class HydraAgent:
                 quote = pair.split("/")[1] if "/" in pair else "USD"
                 quote_usd = asset_prices.get(quote, 1.0)
                 pnl_by_pair[pair] = {
-                    "realized": round(realized, 8),
+                    "realized": round(realized_full, 8),
                     "unrealized": round(unrealized, 8),
-                    "net": round(realized + unrealized, 8),
-                    "net_usd": round((realized + unrealized) * quote_usd, 2),
+                    "net": round(realized_full + unrealized, 8),
+                    "net_usd": round((realized_full + unrealized) * quote_usd, 2),
                 }
-                total_realized_pnl_usd += realized * quote_usd
+                total_realized_pnl_usd += realized_90d * quote_usd
                 total_unrealized_pnl_usd += unrealized * quote_usd
             total_pnl_usd = total_realized_pnl_usd + total_unrealized_pnl_usd
 
@@ -3752,7 +3785,8 @@ class HydraAgent:
         print(f"\n  Past performance does not guarantee future results. Not financial advice.")
         print(f"  {'='*80}")
 
-    def _compute_pair_realized_pnl(self, pair: str) -> float:
+    def _compute_pair_realized_pnl(self, pair: str,
+                                   window_days: Optional[int] = None) -> float:
         """Compute realized P&L for a pair from the order journal.
 
         Uses average-cost-basis accounting: each sell's cost is valued at
@@ -3769,6 +3803,12 @@ class HydraAgent:
         whose base matches AND whose quote is also in STABLE_QUOTES,
         treating prices as USD-equivalent. Entries with non-stable quote
         (e.g. SOL/BTC) stay per-pair — BTC is a real quote.
+
+        `window_days`: if not None, only journal entries with placed_at >=
+        (now - window_days) are counted. Used by journal_stats to compute
+        a 90-day total for the dashboard top P&L card while still allowing
+        per-pair full-history accounting for the right-sidebar cards.
+        Entries without a parseable placed_at pass the filter (legacy compat).
 
         Only counts FILLED / PARTIALLY_FILLED entries — PLACED,
         PLACEMENT_FAILED, CANCELLED_UNFILLED, REJECTED are skipped.
@@ -3791,18 +3831,15 @@ class HydraAgent:
                 return eb == req_base and eq in STABLE_QUOTES
             return entry_pair == pair
 
-        # Iterate in chronological order so cost basis evolves correctly
-        # across stable siblings. Sort defensively by placed_at.
-        # Rolling 90-day window (v2.20.0): older trades drop out so the
-        # headline P&L reflects recent activity, not 14-month history.
-        # The window cutoff is computed from `placed_at` strings; entries
-        # without a parseable timestamp pass the filter (legacy compat).
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-        def _within_window(e: dict) -> bool:
-            pa = e.get("placed_at")
-            if not pa:
+        if window_days is not None and window_days > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+            def _within_window(e: dict) -> bool:
+                pa = e.get("placed_at")
+                return (not pa) or pa >= cutoff
+        else:
+            def _within_window(e: dict) -> bool:
                 return True
-            return pa >= cutoff
+
         entries = [
             e for e in self.order_journal
             if _matches(e.get("pair") or "") and _within_window(e)
