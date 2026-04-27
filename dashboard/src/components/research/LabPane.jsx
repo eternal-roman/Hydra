@@ -2,23 +2,63 @@
 //
 // Mode B pane of the Research tab — hypothesis lab. Walk-forward param diff.
 //
-// IMPORTANT: Mode B is DEFERRED at v2.20.0 MVP. The form is wired and renders;
+// T30A: JSON textareas replaced with schema-driven slider rows. Each of the 8
+// tunable engine params (from PARAM_BOUNDS in hydra_tuner) renders as two sliders
+// side-by-side (Baseline | Candidate) with the live current value shown alongside
+// the range and a numeric readout. The backend handler `research_params_current`
+// is fetched on mount (and on pair change) to populate the schema.
+//
+// IMPORTANT: Mode B run-time is DEFERRED at v2.20.0. The sliders are wired;
 // the backend handler `research_lab_run` returns a structured "deferred" error.
 // The UI surfaces that error clearly and points users at the Releases pane (Mode C).
 //
 // Mirrors the props-based ws pattern established by DatasetPane: parent owns
-// the WS, passes `sendMessage` for outbound + `labResult` for inbound.
+// the WS, passes `sendMessage` for outbound + `labResult` / `paramsSchema` inbound.
 
 import React, { useState, useEffect } from "react";
 
 const PAIRS = ["BTC/USD", "SOL/USD", "SOL/BTC"];
 
-export default function LabPane({ sendMessage, labResult }) {
+const LABELS = {
+  volatile_atr_mult: "Volatile ATR multiplier",
+  volatile_bb_mult: "Volatile Bollinger multiplier",
+  trend_ema_ratio: "Trend EMA ratio",
+  momentum_rsi_lower: "Momentum RSI lower",
+  momentum_rsi_upper: "Momentum RSI upper",
+  mean_reversion_rsi_buy: "Mean-rev RSI buy",
+  mean_reversion_rsi_sell: "Mean-rev RSI sell",
+  min_confidence_threshold: "Min confidence threshold",
+};
+
+export default function LabPane({ sendMessage, labResult, paramsSchema }) {
   const [pair, setPair] = useState("BTC/USD");
-  const [baselineJson, setBaselineJson] = useState("{}");
-  const [candidateJson, setCandidateJson] = useState("{}");
+  const [baselineValues, setBaselineValues] = useState({});
+  const [candidateValues, setCandidateValues] = useState({});
   const [running, setRunning] = useState(false);
-  const [parseError, setParseError] = useState(null);
+
+  // Whenever the pair changes (or on mount), re-fetch the schema for it.
+  useEffect(() => {
+    sendMessage({ type: "research_params_current", pair });
+    setBaselineValues({});
+    setCandidateValues({});
+  }, [pair, sendMessage]);
+
+  // When the schema arrives for the active pair, populate both sides with
+  // the current live values. User can then drag sliders to diff candidate.
+  const schema =
+    paramsSchema && paramsSchema.success && paramsSchema.pair === pair
+      ? paramsSchema.data
+      : null;
+
+  useEffect(() => {
+    if (!schema) return;
+    const init = {};
+    for (const [k, def] of Object.entries(schema)) {
+      init[k] = def.current ?? def.default ?? def.min;
+    }
+    setBaselineValues((b) => (Object.keys(b).length === 0 ? init : b));
+    setCandidateValues((c) => (Object.keys(c).length === 0 ? init : c));
+  }, [schema]);
 
   // Clear running state when a result arrives.
   useEffect(() => {
@@ -26,21 +66,12 @@ export default function LabPane({ sendMessage, labResult }) {
   }, [labResult]);
 
   const run = () => {
-    setParseError(null);
-    let baseline, candidate;
-    try {
-      baseline = JSON.parse(baselineJson || "{}");
-      candidate = JSON.parse(candidateJson || "{}");
-    } catch (e) {
-      setParseError(`Invalid JSON: ${e.message}`);
-      return;
-    }
     setRunning(true);
     sendMessage({
       type: "research_lab_run",
       pair,
-      baseline_params: baseline,
-      candidate_params: candidate,
+      baseline_params: baselineValues,
+      candidate_params: candidateValues,
       spec: { fold_kind: "quarterly", is_lookback_quarters: 8 },
     });
   };
@@ -53,6 +84,7 @@ export default function LabPane({ sendMessage, labResult }) {
       <h3 style={{ marginTop: 0 }}>Hypothesis Lab</h3>
       <p style={{ color: "#888", fontSize: 12, marginTop: -4 }}>
         Mode B — paired walk-forward of candidate params vs baseline on real history.
+        Sliders show live current values; drag to set candidate.
       </p>
 
       {showDeferredNotice && (
@@ -90,87 +122,140 @@ export default function LabPane({ sendMessage, labResult }) {
         </div>
       )}
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "200px 1fr 1fr",
-          gap: 12,
-          alignItems: "start",
-        }}
-      >
-        <label style={{ display: "block" }}>
-          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>Pair</div>
-          <select
-            value={pair}
-            onChange={(e) => setPair(e.target.value)}
-            style={{
-              width: "100%",
-              padding: 6,
-              background: "#1a1a1a",
-              color: "#fff",
-              border: "1px solid #333",
-            }}
-          >
-            {PAIRS.map((p) => (
-              <option key={p}>{p}</option>
-            ))}
-          </select>
-        </label>
-        <label style={{ display: "block" }}>
-          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>
-            Baseline params (JSON)
-          </div>
-          <textarea
-            value={baselineJson}
-            onChange={(e) => setBaselineJson(e.target.value)}
-            style={{
-              width: "100%",
-              height: 80,
-              fontFamily: "monospace",
-              fontSize: 12,
-              padding: 6,
-              background: "#1a1a1a",
-              color: "#fff",
-              border: "1px solid #333",
-            }}
-          />
-        </label>
-        <label style={{ display: "block" }}>
-          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>
-            Candidate params (JSON)
-          </div>
-          <textarea
-            value={candidateJson}
-            onChange={(e) => setCandidateJson(e.target.value)}
-            style={{
-              width: "100%",
-              height: 80,
-              fontFamily: "monospace",
-              fontSize: 12,
-              padding: 6,
-              background: "#1a1a1a",
-              color: "#fff",
-              border: "1px solid #333",
-            }}
-          />
-        </label>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: "#aaa", marginRight: 8 }}>Pair</label>
+        <select
+          value={pair}
+          onChange={(e) => setPair(e.target.value)}
+          style={{
+            padding: 6,
+            background: "#1a1a1a",
+            color: "#fff",
+            border: "1px solid #333",
+          }}
+        >
+          {PAIRS.map((p) => (
+            <option key={p}>{p}</option>
+          ))}
+        </select>
       </div>
 
-      {parseError && (
-        <div style={{ color: "#ffb4b4", fontSize: 12, marginTop: 8 }}>{parseError}</div>
+      {!schema ? (
+        <div style={{ color: "#888", fontSize: 12 }}>Loading params for {pair}…</div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr
+              style={{
+                textAlign: "left",
+                borderBottom: "1px solid #333",
+                color: "#aaa",
+              }}
+            >
+              <th style={{ padding: "6px 8px" }}>Parameter</th>
+              <th style={{ padding: "6px 8px" }}>Range</th>
+              <th style={{ padding: "6px 8px" }}>Live</th>
+              <th style={{ padding: "6px 8px" }} colSpan={2}>
+                Baseline
+              </th>
+              <th style={{ padding: "6px 8px" }} colSpan={2}>
+                Candidate
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(schema).map(([name, def]) => (
+              <tr key={name} style={{ borderBottom: "1px solid #222" }}>
+                <td style={{ padding: "6px 8px" }}>{LABELS[name] || name}</td>
+                <td
+                  style={{
+                    padding: "6px 8px",
+                    color: "#888",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  [{def.min}, {def.max}]
+                </td>
+                <td
+                  style={{
+                    padding: "6px 8px",
+                    fontFamily: "monospace",
+                    color: "#aaa",
+                  }}
+                >
+                  {def.current != null ? def.current.toFixed(3) : "—"}
+                </td>
+                <td style={{ padding: "6px 8px", width: "20%" }}>
+                  <input
+                    type="range"
+                    min={def.min}
+                    max={def.max}
+                    step={def.step}
+                    value={baselineValues[name] ?? def.current}
+                    onChange={(e) =>
+                      setBaselineValues((v) => ({
+                        ...v,
+                        [name]: parseFloat(e.target.value),
+                      }))
+                    }
+                    style={{ width: "100%" }}
+                  />
+                </td>
+                <td
+                  style={{
+                    padding: "6px 8px",
+                    fontFamily: "monospace",
+                    width: 60,
+                  }}
+                >
+                  {(baselineValues[name] ?? def.current) != null
+                    ? (baselineValues[name] ?? def.current).toFixed(3)
+                    : "—"}
+                </td>
+                <td style={{ padding: "6px 8px", width: "20%" }}>
+                  <input
+                    type="range"
+                    min={def.min}
+                    max={def.max}
+                    step={def.step}
+                    value={candidateValues[name] ?? def.current}
+                    onChange={(e) =>
+                      setCandidateValues((v) => ({
+                        ...v,
+                        [name]: parseFloat(e.target.value),
+                      }))
+                    }
+                    style={{ width: "100%" }}
+                  />
+                </td>
+                <td
+                  style={{
+                    padding: "6px 8px",
+                    fontFamily: "monospace",
+                    width: 60,
+                  }}
+                >
+                  {(candidateValues[name] ?? def.current) != null
+                    ? (candidateValues[name] ?? def.current).toFixed(3)
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
 
       <button
         onClick={run}
-        disabled={running}
+        disabled={running || !schema}
         style={{
           marginTop: 12,
           padding: "8px 16px",
-          background: running ? "#444" : "#3aa757",
+          background: running || !schema ? "#444" : "#3aa757",
           color: "#fff",
           border: "none",
           borderRadius: 4,
-          cursor: running ? "default" : "pointer",
+          cursor: running || !schema ? "default" : "pointer",
           fontSize: 13,
         }}
       >

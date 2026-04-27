@@ -728,10 +728,38 @@ def mount_backtest_routes(
                      "(release regression) is fully wired — see the Releases pane.",
         }
 
+    def _research_params_current(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the tunable param schema (bounds + current values per pair).
+
+        Reads PARAM_BOUNDS from hydra_tuner and the per-pair current params
+        from hydra_params_<pair>.json. Falls back to DEFAULT_PARAMS when no
+        per-pair file exists. Pure read; no mutation."""
+        try:
+            from hydra_tuner import PARAM_BOUNDS, DEFAULT_PARAMS, ParameterTracker
+            pair = payload.get("pair") or "BTC/USD"
+            tracker = ParameterTracker(pair)
+            current = tracker.get_tunable_params()
+            schema = {}
+            for name, (lo, hi) in PARAM_BOUNDS.items():
+                schema[name] = {
+                    "min": lo,
+                    "max": hi,
+                    "default": DEFAULT_PARAMS.get(name),
+                    "current": current.get(name, DEFAULT_PARAMS.get(name)),
+                    # Step size: 0.001 for fine ratios, 0.01 for confidences,
+                    # 1.0 for RSI thresholds. Heuristic from the magnitude
+                    # of (hi - lo).
+                    "step": 0.001 if (hi - lo) < 0.05 else (0.01 if (hi - lo) < 0.5 else 1.0),
+                }
+            return {"success": True, "pair": pair, "data": schema}
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
     broadcaster.register_handler("research_dataset_coverage", _research_dataset_coverage)
     broadcaster.register_handler("research_releases_list", _research_releases_list)
     broadcaster.register_handler("research_releases_diff", _research_releases_diff)
     broadcaster.register_handler("research_lab_run", _research_lab_run)
+    broadcaster.register_handler("research_params_current", _research_params_current)
 
 
 def _compact(exp: Experiment) -> Dict[str, Any]:

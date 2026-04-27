@@ -3382,6 +3382,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
   const [researchLabResult, setResearchLabResult] = useState(null);
   const [researchReleasesList, setResearchReleasesList] = useState(null);
   const [researchReleasesDiff, setResearchReleasesDiff] = useState(null);
+  // T30A — param schema from research_params_current handler.
+  const [researchParamsSchema, setResearchParamsSchema] = useState(null);
   // v2.13.0 (Golden Unicorn Phase A): thesis_state snapshot for the THESIS tab.
   // null until agent responds to thesis_get_state; {disabled:true} when
   // HYDRA_THESIS_DISABLED=1 is set on the agent.
@@ -3834,6 +3836,9 @@ export function HydraDashboard({ jwtToken, onLogout }) {
             case "research_lab_run_ack":
               setResearchLabResult(msg);
               return;
+            case "research_params_current_ack":
+              setResearchParamsSchema(msg);
+              return;
             default:
               // Unknown typed message → drop silently. Do NOT fall through
               // to applyLiveState: a malformed backtest-side message with
@@ -4285,6 +4290,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                 labResult={researchLabResult}
                 releasesList={researchReleasesList}
                 releasesDiff={researchReleasesDiff}
+                paramsSchema={researchParamsSchema}
               />
             )}
             {activeTab === "THESIS" && (

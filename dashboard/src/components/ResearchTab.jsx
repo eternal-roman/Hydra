@@ -24,6 +24,7 @@ export default function ResearchTab({
   labResult,
   releasesList,
   releasesDiff,
+  paramsSchema,           // T30A — param schema from research_params_current
 }) {
   const [pane, setPane] = useState("DATASET");
 
@@ -68,7 +69,7 @@ export default function ResearchTab({
         <DatasetPane sendMessage={sendMessage} coverageData={coverageData} />
       )}
       {pane === "LAB" && (
-        <LabPane sendMessage={sendMessage} labResult={labResult} />
+        <LabPane sendMessage={sendMessage} labResult={labResult} paramsSchema={paramsSchema} />
       )}
       {pane === "RELEASES" && (
         <ReleasesPane
