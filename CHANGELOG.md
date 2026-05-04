@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.20.2] — 2026-05-03
+
+Upgrade primary brain model from Claude Sonnet 4.6 to Opus 4.6 with `effort: "high"`.
+
+### Changed
+
+- **Brain model (`hydra_brain.py`):** Primary model (`claude-sonnet-4-6` → `claude-opus-4-6`) with `output_config={"effort": "high"}` on all Anthropic call sites. Grok Strategist unchanged.
+- **Cost constants:** `COST_ANTHROPIC` updated to Opus 4.6 pricing ($5/$25 per MTok); `COST_ALERT_USD` and `max_daily_cost` default raised from $3 → $5 to match.
+- **LLM timeouts:** All brain API call timeouts raised from 30s/45s → 60s to give Opus adequate response time.
+
+### Fixed
+
+- **Thinking-block extraction (`hydra_brain.py`):** `_call_llm` was reading `content[0].text` unconditionally; when Opus 4.6 emits a `thinking` block first, this silently returned chain-of-thought instead of the output JSON, causing every tick to fall back to engine-only reasoning. Fixed to filter on `type == "text"`, matching the existing correct pattern in `_call_llm_with_tools`.
+
+---
+
 ## [2.20.1] — 2026-04-27
 
 Fill-quality fix: regime-gated BUY limit offset.
