@@ -1764,7 +1764,8 @@ class HydraAgent:
                                 _size_hint = thesis_attr.size_hint_for(pair, sig)
                             except Exception as te:
                                 print(f"  [THESIS] size_hint_for error ({type(te).__name__}: {te})")
-                        _brain_mult = float(ai.get("size_multiplier", 1.0) or 1.0)
+                        _sm = ai.get("size_multiplier")
+                        _brain_mult = float(1.0 if _sm is None else _sm)
                         _final_mult = max(0.0, min(1.5, _brain_mult * _size_hint))
 
                         # v2.13.4 (Phase E, opt-in): posture-binding daily
@@ -2212,7 +2213,7 @@ class HydraAgent:
             # v2.14.1: record the unclamped product so the dashboard can
             # tell the operator when the [0, 1.5] ceiling was actually
             # binding vs. merely a defensive guard.
-            brain_size = float(decision.size_multiplier or 1.0)
+            brain_size = float(1.0 if decision.size_multiplier is None else decision.size_multiplier)
             pre_clamp_product = brain_size * rules_size_mult
             final_size_multiplier = max(0.0, min(1.5, pre_clamp_product))
             size_clamp_applied = pre_clamp_product != final_size_multiplier
@@ -4032,7 +4033,7 @@ class HydraAgent:
 
         results = {
             "agent": "HYDRA",
-            "version": "2.20.2",
+            "version": "2.20.3",
             "mode": self.mode,
             "paper": self.paper,
             "timestamp_start": datetime.fromtimestamp(self.start_time, tz=timezone.utc).isoformat() if self.start_time else None,

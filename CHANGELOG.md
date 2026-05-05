@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.20.3] — 2026-05-04
+
+Revert brain to Sonnet 4.6; fix OVERRIDE size-multiplier veto silently ignored.
+
+### Fixed
+
+- **Brain OVERRIDE veto (`hydra_agent.py`):** Two `or 1.0` expressions coerced the brain's `size_multiplier=0.0` (OVERRIDE/HOLD decision) to `1.0` because Python treats `0.0` as falsy. Every OVERRIDE decision was being silently discarded — trades executed at full size regardless of the brain's verdict. Fixed both sites to use explicit `None`-check instead of `or 1.0`.
+
+### Changed
+
+- **Brain model (`hydra_brain.py`):** Reverted primary model from `claude-opus-4-6` back to `claude-sonnet-4-6`. Opus was excessively conservative (frequent OVERRIDE/HOLD), counterproductive for a trading system optimised for capital deployment. `output_config={"effort": "high"}` removed; cost constants and daily budget ceiling restored to Sonnet levels ($3/$15 per MTok, `max_daily_cost=3.0`, `COST_ALERT_USD=3.0`).
+
+---
+
 ## [2.20.2] — 2026-05-03
 
 Upgrade primary brain model from Claude Sonnet 4.6 to Opus 4.6 with `effort: "high"`.
