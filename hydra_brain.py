@@ -389,7 +389,7 @@ Do NOT output JSON. Output plain text only."""
 #   Claude Opus 4.7 / 4.6 / 4.5 — $5 in / $25 out per MTok
 #   Claude Haiku 4.5           — $1 in / $5 out per MTok
 #   Grok 4 reasoning           — ~$2 in / $6 out (xAI published; recheck at bump time)
-COST_ANTHROPIC = (5.0, 25.0)    # Opus 4.6
+COST_ANTHROPIC = (3.0, 15.0)    # Sonnet 4.6
 COST_OPENAI = (2.0, 8.0)
 COST_XAI = (2.0, 6.0)            # Grok 4 reasoning
 
@@ -415,17 +415,16 @@ class HydraBrain:
     # enforcement (enforce_budget=False, e.g., backtest context) and the
     # user still gets disclosure.
     # v2.14: lowered 10.0 → 3.0 (Sonnet-4.6 daily target).
-    # Bumped to 5.0 with Opus 4.6 upgrade — same call volume now costs ~1.7x.
     # Meaningful 3-agent activity (Quant + Risk + occasional Grok) lands
-    # well under $5/day; anything higher is a signal to investigate.
-    COST_ALERT_USD = 5.0
+    # well under $3/day; anything higher is a signal to investigate.
+    COST_ALERT_USD = 3.0
 
     def __init__(
         self,
         anthropic_key: str = "",
         openai_key: str = "",
         xai_key: str = "",
-        max_daily_cost: float = 5.0,
+        max_daily_cost: float = 3.0,
         tool_dispatcher: Optional[Any] = None,
         enable_tool_use: Optional[bool] = None,
         enforce_budget: bool = True,
@@ -440,7 +439,7 @@ class HydraBrain:
         if anthropic_key and HAS_ANTHROPIC:
             self.primary_client = anthropic.Anthropic(api_key=anthropic_key)
             self.primary_provider = "anthropic"
-            self.primary_model = "claude-opus-4-6"
+            self.primary_model = "claude-sonnet-4-6"
         elif openai_key and HAS_OPENAI:
             # OpenAI: same SDK as xAI but default base_url + gpt-4.1
             self.primary_client = openai.OpenAI(api_key=openai_key)
@@ -838,7 +837,6 @@ class HydraBrain:
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_msg}],
-                output_config={"effort": "high"},
                 timeout=60.0,
             )
             text_blocks = [b.text for b in response.content if getattr(b, "type", None) == "text" and hasattr(b, "text")]
@@ -925,7 +923,6 @@ class HydraBrain:
                     system=system_prompt,
                     tools=tools,
                     messages=messages,
-                    output_config={"effort": "high"},
                     timeout=60.0,
                 )
                 usage = getattr(response, "usage", None)
