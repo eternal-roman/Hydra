@@ -56,7 +56,7 @@ Five components, all inline in one file (~500 lines):
 ```
 MemeAgent
   ├── CompetitionDetector      polls watchlist every 15 min via `kraken ticker`
-  ├── CandleAggregator         accumulates 1-min REST ticks → 5-min bars (20 bars buffer)
+  ├── CandleAggregator         Kraken WS ohlc-5 subscription → 5-min bars (20 bars buffer)
   ├── SignalEngine              evaluates 5 entry gates + 6 exit triggers per bar close
   ├── OBIPoller                 polls `kraken orderbook` every 10s; caches last value
   └── MemeExecutor              places taker limit orders via WSL kraken CLI; tracks position
@@ -96,7 +96,9 @@ Emits JSON messages on each significant state change:
 - Volume-spike 5-min candles average 3.41% range
 - 1-min momentum persistence: 47% (coin flip — disqualified)
 
-CandleAggregator polls `kraken ohlc --pair <PAIR> --interval 5` every 60 seconds. Uses the Kraken API's native 5-min OHLC endpoint — no manual 1-min aggregation. A new candle is appended to the buffer when Kraken returns a bar with a timestamp later than the last stored bar. Buffer holds the last 20 closed bars.
+CandleAggregator subscribes to Kraken's public WebSocket (`wss://ws.kraken.com`, `ohlc-5` channel). Kraken streams the running candle on every trade; a bar is confirmed closed when the `etime` (end-time) in the update advances to the next 5-min boundary. This eliminates the ~60s lag of REST polling and lets entry fire at bar close, not up to a minute later. Buffer holds the last 20 closed bars.
+
+WebSocket reconnect: exponential backoff (5s, 10s, 20s, capped at 60s) on disconnect. Engine stays in warmup/hold state during reconnect; no trades placed without a live data feed.
 
 Warmup: **15 bars** (75 minutes from cold start). Engine holds and accumulates data; no trades during warmup.
 
