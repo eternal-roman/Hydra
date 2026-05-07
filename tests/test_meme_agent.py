@@ -2,6 +2,9 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+import time
+import tempfile
+import json as _json
 from hydra_meme_agent import CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap
 
 
@@ -279,3 +282,75 @@ def test_exit_no_trigger_bar():
     normal_bar = _make_bar(close=1.01, volume=1000.0)
     result = eng.evaluate_exit_bar(pos, normal_bar)
     assert result is None
+
+
+# ─── Competition Detector Tests ────────────────────────────────────────────────
+
+from hydra_meme_agent import CompetitionDetector
+
+
+def test_competition_detector_bootstrap_creates_watchlist():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        assert os.path.exists(path)
+        data = _json.loads(open(path).read())
+        assert len(data["tokens"]) > 0
+
+
+def test_competition_detector_anomaly_detection():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        # Manually set a baseline
+        detector._set_baseline("PLAY/USD", 3_200_000)
+        # Volume 6x baseline → anomaly
+        assert detector._is_anomaly("PLAY/USD", 19_200_000) is True
+
+
+def test_competition_detector_no_anomaly_below_threshold():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        detector._set_baseline("PLAY/USD", 3_200_000)
+        # 4x — below 5x threshold
+        assert detector._is_anomaly("PLAY/USD", 12_800_000) is False
+
+
+def test_competition_detector_null_baseline_not_anomaly():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        # Null baseline on first observation — not an anomaly
+        assert detector._is_anomaly("NEW/USD", 999_999_999) is False
+
+
+def test_competition_detector_ema_update():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        detector._set_baseline("PLAY/USD", 3_200_000)
+        detector._update_baseline("PLAY/USD", 3_200_000)
+        updated = detector._get_baseline("PLAY/USD")
+        # EMA with alpha=1/7: new = (1/7)*3.2M + (6/7)*3.2M = 3.2M (stable)
+        assert abs(updated - 3_200_000) < 1000
+
+
+def test_competition_detector_alert_suppression():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        detector._set_baseline("PLAY/USD", 3_200_000)
+        # Suppress for 2 hours
+        future = time.time() + 7200
+        detector._suppress("PLAY/USD", until=future)
+        assert detector._is_suppressed("PLAY/USD") is True
+
+
+def test_competition_detector_suppression_expired():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "watchlist.json")
+        detector = CompetitionDetector(path)
+        detector._set_baseline("PLAY/USD", 3_200_000)
+        detector._suppress("PLAY/USD", until=time.time() - 1)
+        assert detector._is_suppressed("PLAY/USD") is False

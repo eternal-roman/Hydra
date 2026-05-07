@@ -246,3 +246,117 @@ class SignalEngine:
         if obi < OBI_BOOK_FADE:
             return "book_fade"
         return None
+
+
+# ─── Competition Detector ──────────────────────────────────────────────────────
+
+class CompetitionDetector:
+    """Monitors token volume baselines and detects competition anomalies."""
+
+    def __init__(self, watchlist_path: str):
+        self._path = watchlist_path
+        self._lock = threading.Lock()
+        self._data: dict = self._load_or_bootstrap()
+
+    def _load_or_bootstrap(self) -> dict:
+        if os.path.exists(self._path):
+            with open(self._path) as f:
+                return json.load(f)
+        data = {
+            "tokens": [
+                {
+                    "pair": p,
+                    "baseline_volume_7d": None,
+                    "last_updated": None,
+                    "competition_type": None,
+                    "competition_type_confirmed": False,
+                    "alert_suppressed_until": None,
+                }
+                for p in COMPETITION_SEED_PAIRS
+            ],
+            "last_scan": None,
+        }
+        self._save(data)
+        return data
+
+    def _save(self, data: dict) -> None:
+        tmp = self._path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, self._path)
+
+    def _find_token(self, pair: str) -> Optional[dict]:
+        for t in self._data["tokens"]:
+            if t["pair"] == pair:
+                return t
+        return None
+
+    def _find_or_add_token(self, pair: str) -> dict:
+        token = self._find_token(pair)
+        if token is None:
+            token = {
+                "pair": pair,
+                "baseline_volume_7d": None,
+                "last_updated": None,
+                "competition_type": None,
+                "competition_type_confirmed": False,
+                "alert_suppressed_until": None,
+            }
+            self._data["tokens"].append(token)
+        return token
+
+    def _set_baseline(self, pair: str, volume: float) -> None:
+        with self._lock:
+            token = self._find_or_add_token(pair)
+            token["baseline_volume_7d"] = volume
+            token["last_updated"] = int(time.time())
+            self._save(self._data)
+
+    def _get_baseline(self, pair: str) -> Optional[float]:
+        token = self._find_token(pair)
+        return token["baseline_volume_7d"] if token else None
+
+    def _update_baseline(self, pair: str, volume: float) -> None:
+        with self._lock:
+            token = self._find_or_add_token(pair)
+            old = token["baseline_volume_7d"]
+            if old is None:
+                token["baseline_volume_7d"] = volume
+            else:
+                token["baseline_volume_7d"] = (
+                    COMPETITION_EMA_ALPHA * volume + (1 - COMPETITION_EMA_ALPHA) * old
+                )
+            token["last_updated"] = int(time.time())
+            self._save(self._data)
+
+    def _is_anomaly(self, pair: str, current_volume: float) -> bool:
+        baseline = self._get_baseline(pair)
+        if baseline is None or baseline <= 0:
+            return False
+        return (current_volume / baseline) >= COMPETITION_ANOMALY_RATIO
+
+    def _suppress(self, pair: str, until: float) -> None:
+        with self._lock:
+            token = self._find_or_add_token(pair)
+            token["alert_suppressed_until"] = until
+            self._save(self._data)
+
+    def _is_suppressed(self, pair: str) -> bool:
+        token = self._find_token(pair)
+        if token is None:
+            return False
+        until = token.get("alert_suppressed_until")
+        return until is not None and time.time() < until
+
+    def infer_competition_type(self, pair: str) -> str:
+        """Volume-pattern heuristic. Returns 'volume', 'pnl', 'rebate', or 'unknown'."""
+        token = self._find_token(pair)
+        if token and token.get("competition_type_confirmed"):
+            return token["competition_type"]
+        baseline = self._get_baseline(pair)
+        if baseline is None:
+            return "unknown"
+        return "volume"
+
+    def get_all_tokens(self) -> list[dict]:
+        return list(self._data.get("tokens", []))
