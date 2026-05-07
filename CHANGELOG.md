@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.21.0] — 2026-05-07
+
+APEX Meme Engine — standalone competition-token trading agent with dedicated dashboard tab.
+
+### Added
+- `hydra_meme_agent.py` — isolated meme engine: 5-gate entry (volume spike, OBI, VWAP, RSI window, ask wall), 6-trigger exit (profit target, hard stop, book fade, RSI exhaust, time stop, volume death), competition detection via 24h volume anomaly scanner
+- `dashboard/src/MemeTab.jsx` — MEME dashboard tab with candle chart, OBI gauge, position panel, trade log, session stats, competition discovery view
+- `tests/test_meme_agent.py` — 59 unit tests covering indicators, gates, exits, executor, journal persistence
+- `start_meme.bat` — launcher with .env validation and unbuffered output
+- `--test-fire` flag for BUY→SELL pipeline verification
+- Dynamic pair precision from Kraken `pairs` endpoint (price_decimals, lot_decimals, ordermin, costmin)
+- Trade journal persistence with atomic writes and reload on restart
+- Global Kraken CLI rate limiter (2s floor across all concurrent callers)
+- OBI staleness detection (60s threshold blocks entry on stale data)
+- Graceful shutdown with session state flush
+- `.claude/hooks/post-edit.py` — path-scoped post-edit verification hook
+
+### Fixed
+- Kraken CLI `book` → `orderbook`, `--depth` → `--count` (was silently failing)
+- Candle history seeded before WS server start (race condition fix)
+- Unicode cp1252 crash on Windows (replaced symbols with ASCII)
+- `asyncio.gather` with `return_exceptions=True` (crashed task no longer kills others)
+
+---
+
 ## [2.20.3] — 2026-05-04
 
 Revert brain to Sonnet 4.6; fix OVERRIDE size-multiplier veto silently ignored.
