@@ -58,12 +58,23 @@ OBI_LEVELS = 5
 TAKER_SLIPPAGE_BPS = 5       # 0.05% — limit at ask+0.05% for BUY
 SLIPPAGE_CAP_BPS = 10        # 0.10% — reject if book moves more
 SELL_MAX_RETRIES = 5         # abandon after N failed sell attempts
+TRAILING_ACTIVATE_PCT = 0.015  # activate trailing stop after 1.5% unrealised gain
+TRAILING_OFFSET_PCT = 0.010   # trail 1.0% below peak
 
 COMPETITION_ANOMALY_RATIO = 5.0
 COMPETITION_EMA_ALPHA = 1 / 7
 
-EXTENSION_MAX_PCT = 0.20  # block entry when price is >20% above slow EMA
+EXTENSION_MAX_PCT = 0.10  # block entry when price is >10% above slow EMA
 REENTRY_COOLDOWN_BARS = 2  # bars to wait after exit before re-entering
+
+# Bounce-mode entry thresholds
+BOUNCE_RSI_THRESHOLD = 25    # enter bounce when RSI < 25 (deeply oversold)
+BOUNCE_VOL_SPIKE_MULT = 2.0  # require 2x vol EMA (capitulation selling)
+BOUNCE_MAX_EMA50_DIST = -0.15  # reject if price >15% below EMA(50) (freefall)
+BOUNCE_PROFIT_PCT = 0.020    # 2.0% profit target for bounce trades
+BOUNCE_STOP_PCT = -0.012     # -1.2% stop for bounce trades
+BOUNCE_RSI_EXIT = 50         # exit bounce when RSI recovers above 50
+BOUNCE_TIME_STOP = 8         # 8-bar timeout for bounce trades
 
 COMPETITION_SEED_PAIRS = [
     # Meme tokens
@@ -98,6 +109,8 @@ class Position:
     entry_ts: int
     candles_held: int = 0
     order_id: str = ""
+    peak_price: float = 0.0
+    entry_mode: str = "momentum"  # "momentum" or "bounce"
 
 
 @dataclass
@@ -228,54 +241,93 @@ class SignalEngine:
         obi: float,
         ask_wall_usd: float,
     ) -> dict:
-        """Evaluate all 6 entry gates. Returns dict with gate booleans + all_pass."""
+        """Evaluate dual-mode entry gates. Returns dict with gate booleans + entry_mode.
+
+        Mode A (momentum): uptrend + RSI sweet-spot + volume spike + extension guard
+        Mode B (bounce): deeply oversold + capitulation volume + not in freefall
+        """
         vol_baseline = self.vol_ema_baseline
-        # bar is already in self._bars (add_bar called before evaluate); don't duplicate
         closes = [b.close for b in self._bars]
         rsi = wilder_rsi(closes)
         vwap = self.session_vwap
 
-        trend_aligned = True
-        if len(self._bars) >= EMA_TREND_SLOW:
-            ema_fast = ema(closes, EMA_TREND_FAST)
-            ema_slow = ema(closes, EMA_TREND_SLOW)
-            trend_aligned = ema_fast > ema_slow
+        ema_fast_val = ema(closes, EMA_TREND_FAST) if len(self._bars) >= EMA_TREND_FAST else 0
+        ema_slow_val = ema(closes, EMA_TREND_SLOW) if len(self._bars) >= EMA_TREND_SLOW else 0
+        ema50_val = ema(closes, 50) if len(self._bars) >= 50 else ema_slow_val
 
-        not_extended = True
-        if len(self._bars) >= EMA_TREND_SLOW:
-            ema_slow_val = ema(closes, EMA_TREND_SLOW)
-            if ema_slow_val > 0:
-                extension = (latest_bar.close - ema_slow_val) / ema_slow_val
-                not_extended = extension <= EXTENSION_MAX_PCT
+        trend_aligned = ema_fast_val > ema_slow_val if ema_slow_val > 0 else True
+        extension = (latest_bar.close - ema_slow_val) / ema_slow_val if ema_slow_val > 0 else 0
+        not_extended = extension <= EXTENSION_MAX_PCT
+
+        # Momentum gate checks
+        mom_volume = latest_bar.volume > VOLUME_SPIKE_MULTIPLIER * vol_baseline
+        mom_obi = obi > OBI_ENTRY_THRESHOLD
+        mom_vwap = latest_bar.close > vwap if vwap > 0 else False
+        mom_rsi = RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH
+        mom_wall = ask_wall_usd < ASK_WALL_USD_LIMIT
+        mom_pass = all([mom_volume, mom_obi, mom_vwap, mom_rsi,
+                        mom_wall, trend_aligned, not_extended])
+
+        # Bounce gate checks
+        ema50_dist = (latest_bar.close - ema50_val) / ema50_val if ema50_val > 0 else -1
+        bounce_rsi = rsi < BOUNCE_RSI_THRESHOLD and rsi > 0
+        bounce_vol = latest_bar.volume > BOUNCE_VOL_SPIKE_MULT * vol_baseline
+        bounce_floor = ema50_dist > BOUNCE_MAX_EMA50_DIST
+        bounce_pass = all([bounce_rsi, bounce_vol, bounce_floor])
+
+        entry_mode = "none"
+        if mom_pass:
+            entry_mode = "momentum"
+        elif bounce_pass:
+            entry_mode = "bounce"
 
         gates = {
-            "volume_spike": latest_bar.volume > VOLUME_SPIKE_MULTIPLIER * vol_baseline,
-            "obi": obi > OBI_ENTRY_THRESHOLD,
-            "vwap_align": latest_bar.close > vwap if vwap > 0 else False,
-            "rsi_window": RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH,
-            "ask_wall_clear": ask_wall_usd < ASK_WALL_USD_LIMIT,
+            "volume_spike": mom_volume,
+            "obi": mom_obi,
+            "vwap_align": mom_vwap,
+            "rsi_window": mom_rsi,
+            "ask_wall_clear": mom_wall,
             "trend_aligned": trend_aligned,
             "not_extended": not_extended,
+            "bounce_rsi": bounce_rsi,
+            "bounce_vol": bounce_vol,
+            "bounce_floor": bounce_floor,
             "rsi_value": round(rsi, 1),
             "vwap_value": round(vwap, 8),
             "vol_ema_value": round(vol_baseline, 2),
+            "ema50_dist": round(ema50_dist, 4),
+            "extension_pct": round(extension, 4),
+            "entry_mode": entry_mode,
+            "all_pass": entry_mode != "none",
         }
-        gates["all_pass"] = all(gates[k] for k in
-                                ["volume_spike", "obi", "vwap_align", "rsi_window",
-                                 "ask_wall_clear", "trend_aligned", "not_extended"])
         return gates
 
     def evaluate_exit_bar(self, position, latest_bar: CandleBar) -> Optional[str]:
-        """Bar-close exit triggers: RSI exhaust, time stop, volume death.
+        """Bar-close exit triggers: mode-aware RSI exit, time stop, volume death, trailing stop.
 
         position is a Position dataclass. Returns exit reason string or None.
         """
-        # bar is already in self._bars (add_bar called before evaluate); don't duplicate
         rsi = wilder_rsi([b.close for b in self._bars])
-        if rsi > RSI_EXHAUST:
-            return "rsi_exhaust"
-        if position.candles_held >= TIME_STOP_CANDLES:
-            return "time_stop"
+
+        if position.entry_mode == "bounce":
+            if rsi > BOUNCE_RSI_EXIT:
+                return "rsi_exit"
+            if position.candles_held >= BOUNCE_TIME_STOP:
+                return "time_stop"
+        else:
+            if rsi > RSI_EXHAUST:
+                return "rsi_exhaust"
+            if position.candles_held >= TIME_STOP_CANDLES:
+                return "time_stop"
+
+        # Trailing stop (both modes): if peak gain >= activation, trail from peak
+        if position.peak_price > 0 and position.entry_price > 0:
+            peak_pct = (position.peak_price - position.entry_price) / position.entry_price
+            if peak_pct >= TRAILING_ACTIVATE_PCT:
+                trail_level = position.peak_price * (1 - TRAILING_OFFSET_PCT)
+                if latest_bar.close <= trail_level:
+                    return "trailing_stop"
+
         vol_baseline = self.vol_ema_baseline
         if vol_baseline > 0 and latest_bar.volume < VOLUME_DEATH_MULTIPLIER * vol_baseline:
             return "volume_death"
@@ -287,15 +339,31 @@ class SignalEngine:
         mid_price: float,
         obi: float,
     ) -> Optional[str]:
-        """10-second exit triggers: profit target, hard stop, book fade.
+        """10-second exit triggers: mode-aware profit target, hard stop, trailing, book fade.
 
         position is a Position dataclass. Returns exit reason string or None.
         """
         pct_change = (mid_price - position.entry_price) / position.entry_price
-        if pct_change >= PROFIT_TARGET_PCT:
-            return "profit_target"
-        if pct_change <= HARD_STOP_PCT:
-            return "hard_stop"
+
+        if position.entry_mode == "bounce":
+            if pct_change >= BOUNCE_PROFIT_PCT:
+                return "profit_target"
+            if pct_change <= BOUNCE_STOP_PCT:
+                return "hard_stop"
+        else:
+            if pct_change >= PROFIT_TARGET_PCT:
+                return "profit_target"
+            if pct_change <= HARD_STOP_PCT:
+                return "hard_stop"
+
+        # Trailing stop check on mid-price
+        if position.peak_price > 0 and position.entry_price > 0:
+            peak_pct = (position.peak_price - position.entry_price) / position.entry_price
+            if peak_pct >= TRAILING_ACTIVATE_PCT:
+                trail_level = position.peak_price * (1 - TRAILING_OFFSET_PCT)
+                if mid_price <= trail_level:
+                    return "trailing_stop"
+
         if obi < OBI_BOOK_FADE:
             return "book_fade"
         return None
@@ -564,7 +632,8 @@ def _cancel_order(txid: str) -> dict:
 
 # ─── Meme Executor ─────────────────────────────────────────────────────────────
 
-TAKER_FEE_RATE = 0.004   # 0.40% taker fee on competition tokens
+TAKER_FEE_RATE = 0.004   # 0.40% taker fee (kept for reference/backtest)
+MAKER_FEE_RATE = 0.0016  # 0.16% maker fee — used for post-only orders
 
 
 def _query_pair_precision(pair: str) -> tuple[int, int, float, float]:
@@ -583,7 +652,7 @@ def _query_pair_precision(pair: str) -> tuple[int, int, float, float]:
 
 
 class MemeExecutor:
-    """Places taker limit orders and tracks position + daily P&L."""
+    """Places post-only limit orders (maker fees) and tracks position + daily P&L."""
 
     def __init__(self, pair: str, position_size: float, daily_cap: float,
                  price_decimals: int = 8, lot_decimals: int = 8,
@@ -632,13 +701,14 @@ class MemeExecutor:
 
     def _compute_net_pnl(self, position: Position, exit_price: float) -> float:
         gross = (exit_price - position.entry_price) * position.qty
-        entry_fee = position.notional_usd * TAKER_FEE_RATE
+        entry_fee = position.notional_usd * MAKER_FEE_RATE
         exit_notional = exit_price * position.qty
-        exit_fee = exit_notional * TAKER_FEE_RATE
+        exit_fee = exit_notional * MAKER_FEE_RATE
         return gross - entry_fee - exit_fee
 
-    def place_buy(self, ask: float, mid: Optional[float] = None) -> Optional[Position]:
-        """Place a taker BUY limit order. Returns Position on success, None on failure."""
+    def place_buy(self, ask: float, mid: Optional[float] = None,
+                  entry_mode: str = "momentum") -> Optional[Position]:
+        """Place a post-only BUY limit order. Returns Position on success, None on failure."""
         if self.is_halted():
             return None
         limit_price = self._buy_limit_price(ask)
@@ -655,6 +725,7 @@ class MemeExecutor:
             qfmt.format(qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
+            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -675,11 +746,13 @@ class MemeExecutor:
             notional_usd=actual_price * actual_qty,
             entry_ts=int(time.time()),
             order_id=str(order_id),
+            peak_price=actual_price,
+            entry_mode=entry_mode,
         )
 
     def place_sell(self, position: Position, bid: float, reason: str,
                    mid: Optional[float] = None) -> Optional[dict]:
-        """Place a taker SELL limit order. Returns trade record dict, or None on failure."""
+        """Place a post-only SELL limit order. Returns trade record dict, or None on failure."""
         limit_price = self._sell_limit_price(bid)
         if mid and mid > 0:
             slippage_bps = (mid - limit_price) / mid * 10_000
@@ -693,6 +766,7 @@ class MemeExecutor:
             qfmt.format(position.qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
+            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -708,8 +782,8 @@ class MemeExecutor:
         net_pnl = self._compute_net_pnl(position, exit_price)
         self.record_pnl(net_pnl)
         gross = (exit_price - position.entry_price) * position.qty
-        entry_fee = position.notional_usd * TAKER_FEE_RATE
-        exit_fee = exit_price * position.qty * TAKER_FEE_RATE
+        entry_fee = position.notional_usd * MAKER_FEE_RATE
+        exit_fee = exit_price * position.qty * MAKER_FEE_RATE
         record = TradeRecord(
             entry_ts=position.entry_ts,
             exit_ts=int(time.time()),
@@ -1042,9 +1116,11 @@ class MemeAgent:
         )
         await self._broadcast({"type": "signal_state", "gates": gates,
                                 "pair": self.pair, "ts": bar.ts})
-        # Bar-close exit check
+        # Bar-close exit check + peak tracking
         if self._position is not None:
             self._position.candles_held += 1
+            if bar.high > self._position.peak_price:
+                self._position.peak_price = bar.high
             reason = self._signal_engine.evaluate_exit_bar(self._position, bar)
             if reason:
                 await self._exit_position(reason)
@@ -1054,16 +1130,19 @@ class MemeAgent:
                 and not self._sell_pending_reason and not self._obi_poller.is_stale
                 and (self._bar_count - self._last_exit_bar_count) >= REENTRY_COOLDOWN_BARS):
             if gates["all_pass"]:
+                entry_mode = gates.get("entry_mode", "momentum")
                 mid = self._obi_poller.mid_price or None
                 pos = await asyncio.to_thread(
-                    self._executor.place_buy, self._obi_poller.best_ask, mid
+                    self._executor.place_buy, self._obi_poller.best_ask, mid,
+                    entry_mode,
                 )
                 if pos:
                     self._position = pos
                     await self._broadcast({"type": "order_placed",
                                            "side": "buy",
                                            "price": pos.entry_price,
-                                           "qty": pos.qty})
+                                           "qty": pos.qty,
+                                           "entry_mode": entry_mode})
 
     async def _exit_position(self, reason: str) -> None:
         """Exit current position. Lock prevents double-exit from concurrent OBI/bar tasks."""
@@ -1146,6 +1225,8 @@ class MemeAgent:
                 if self._sell_pending_reason and self._position is not None and mid > 0:
                     await self._exit_position(self._sell_pending_reason)
                 if self._position is not None and self._engine_state == "running" and mid > 0:
+                    if mid > self._position.peak_price:
+                        self._position.peak_price = mid
                     reason = self._signal_engine.evaluate_exit_intracandle(
                         self._position, mid, self._obi_poller.obi
                     )
@@ -1302,7 +1383,8 @@ class MemeAgent:
         buy_result = await asyncio.to_thread(
             _kraken_cli,
             ["order", "buy", self.pair, qfmt.format(qty),
-             "--type", "limit", "--price", pfmt.format(limit_buy), "--yes"],
+             "--type", "limit", "--price", pfmt.format(limit_buy),
+             "--oflags", "post", "--yes"],
         )
         if "error" in buy_result:
             print(f"[APEX] TEST-FIRE: BUY FAILED — {buy_result}")
@@ -1322,14 +1404,15 @@ class MemeAgent:
         sell_result = await asyncio.to_thread(
             _kraken_cli,
             ["order", "sell", self.pair, qfmt.format(qty),
-             "--type", "limit", "--price", pfmt.format(limit_sell), "--yes"],
+             "--type", "limit", "--price", pfmt.format(limit_sell),
+             "--oflags", "post", "--yes"],
         )
         if "error" in sell_result:
             print(f"[APEX] TEST-FIRE: SELL FAILED — {sell_result}")
             print("[APEX] TEST-FIRE: WARNING — position still open on exchange — close manually")
             return False
         gross = (limit_sell - limit_buy) * qty
-        fees = test_notional * TAKER_FEE_RATE * 2
+        fees = test_notional * MAKER_FEE_RATE * 2
         net = gross - fees
         print(f"[APEX] TEST-FIRE: SELL OK — txid={sell_result.get('txid', '?')}")
         print(f"[APEX] TEST-FIRE: gross={gross:+.6f}  fees={fees:.6f}  net={net:+.6f}")

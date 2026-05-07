@@ -545,8 +545,9 @@ def test_executor_net_pnl_calculation():
     exit_price = 0.16400
     net = exec_._compute_net_pnl(pos, exit_price)
     # gross = (0.164 - 0.16) * 3750 = $15.00
-    # fees = 600 * 0.004 + (600*1.025) * 0.004 ≈ 4.86
-    assert 9.0 < net < 11.0
+    # maker fees = 600 * 0.0016 + (0.164 * 3750) * 0.0016 = 0.96 + 0.984 = 1.944
+    # net = 15.00 - 1.944 = ~13.06
+    assert 12.5 < net < 13.5
 
 
 def test_executor_daily_cap_zero_raises():
@@ -796,7 +797,130 @@ def test_load_session_returns_none_for_corrupt_file():
 
 
 def test_risk_reward_ratio():
-    """R:R must be at least 1:2 to overcome 0.80% taker fee drag."""
+    """R:R must be at least 1:2 to overcome fee drag."""
     from hydra_meme_agent import PROFIT_TARGET_PCT, HARD_STOP_PCT
     rr_ratio = abs(PROFIT_TARGET_PCT / HARD_STOP_PCT)
-    assert rr_ratio >= 2.0, f"R:R ratio {rr_ratio:.1f} is too low for 0.80% fee drag"
+    assert rr_ratio >= 2.0, f"R:R ratio {rr_ratio:.1f} is too low for fee drag"
+
+
+def test_maker_fee_rate():
+    """Maker fee rate must be lower than taker rate."""
+    from hydra_meme_agent import MAKER_FEE_RATE, TAKER_FEE_RATE
+    assert MAKER_FEE_RATE < TAKER_FEE_RATE
+    assert MAKER_FEE_RATE == 0.0016
+
+
+def test_extension_guard_tighter():
+    """Extension guard should block at 10% (tighter than v2's 20%)."""
+    from hydra_meme_agent import EXTENSION_MAX_PCT
+    assert EXTENSION_MAX_PCT == 0.10
+
+
+def test_trailing_stop_constants():
+    """Trailing stop activates at 1.5% gain, trails 1.0% below peak."""
+    from hydra_meme_agent import TRAILING_ACTIVATE_PCT, TRAILING_OFFSET_PCT
+    assert TRAILING_ACTIVATE_PCT == 0.015
+    assert TRAILING_OFFSET_PCT == 0.010
+
+
+def test_trailing_stop_fires_on_bar():
+    """Trailing stop fires when peak gain was >= activation and price drops to trail level."""
+    eng = _warmed_engine(flat=True)
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, peak_price=1.02)  # 2% peak > 1.5% activation
+    bar = _make_bar(close=1.008, volume=1000.0)  # 1.02 * (1 - 0.01) = 1.0098 trail level
+    result = eng.evaluate_exit_bar(pos, bar)
+    assert result == "trailing_stop"
+
+
+def test_trailing_stop_does_not_fire_below_activation():
+    """Trailing stop should NOT fire if peak gain never reached activation threshold."""
+    eng = _warmed_engine(flat=True)
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, peak_price=1.01)  # 1% peak < 1.5% activation
+    bar = _make_bar(close=0.999, volume=1000.0)
+    result = eng.evaluate_exit_bar(pos, bar)
+    assert result != "trailing_stop"
+
+
+def test_trailing_stop_intracandle():
+    """Trailing stop fires on intracandle mid-price check."""
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, peak_price=1.025)  # 2.5% peak
+    # Trail level = 1.025 * 0.99 = 1.01475
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.013, obi=0.1)
+    assert result == "trailing_stop"
+
+
+def test_bounce_mode_entry():
+    """Bounce mode triggers on deeply oversold RSI with volume spike."""
+    from hydra_meme_agent import BOUNCE_RSI_THRESHOLD, BOUNCE_VOL_SPIKE_MULT
+    eng = SignalEngine()
+    # Feed mostly flat prices with a sharp dip to get RSI in 10-24 range
+    for i in range(40):
+        eng.add_bar(_make_bar(close=1.0, volume=1000.0, ts=i * 300))
+    for i in range(10):
+        eng.add_bar(_make_bar(close=1.0 - (i + 1) * 0.008, volume=1000.0, ts=(40 + i) * 300))
+    # Big volume spike bar at low RSI
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=0.915, volume=3000.0),
+        obi=0.0,
+        ask_wall_usd=100.0,
+    )
+    rsi = gates["rsi_value"]
+    assert gates["bounce_rsi"] == (0 < rsi < BOUNCE_RSI_THRESHOLD)
+    assert gates["bounce_vol"] is True
+
+
+def test_bounce_mode_exit_rsi_recovery():
+    """Bounce-mode position exits when RSI recovers above BOUNCE_RSI_EXIT."""
+    from hydra_meme_agent import BOUNCE_RSI_EXIT
+    eng = SignalEngine()
+    for i in range(15):
+        eng.add_bar(_make_bar(close=1.0 + i * 0.05, volume=1000.0, ts=i * 300))
+    pos = Position(entry_price=1.0, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, entry_mode="bounce")
+    bar = _make_bar(close=1.8, volume=1000.0)
+    result = eng.evaluate_exit_bar(pos, bar)
+    assert result == "rsi_exit"
+
+
+def test_bounce_mode_stop_loss():
+    """Bounce-mode uses BOUNCE_STOP_PCT instead of HARD_STOP_PCT."""
+    from hydra_meme_agent import BOUNCE_STOP_PCT
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, entry_mode="bounce")
+    # BOUNCE_STOP_PCT = -0.012, so 0.987 should trigger
+    result = eng.evaluate_exit_intracandle(pos, mid_price=0.987, obi=0.1)
+    assert result == "hard_stop"
+
+
+def test_bounce_mode_profit_target():
+    """Bounce-mode uses BOUNCE_PROFIT_PCT instead of PROFIT_TARGET_PCT."""
+    from hydra_meme_agent import BOUNCE_PROFIT_PCT
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
+                   entry_ts=0, candles_held=1, entry_mode="bounce")
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.021, obi=0.1)
+    assert result == "profit_target"
+
+
+def test_position_peak_price_defaults():
+    """Position peak_price defaults to 0.0 and entry_mode defaults to momentum."""
+    pos = Position(entry_price=1.0, qty=100.0, notional_usd=100.0, entry_ts=0)
+    assert pos.peak_price == 0.0
+    assert pos.entry_mode == "momentum"
+
+
+def test_entry_mode_in_gates():
+    """evaluate_entry_gates returns entry_mode field."""
+    eng = _warmed_engine(close=1.0, volume=1000.0)
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=1.015, volume=2000.0),
+        obi=0.25,
+        ask_wall_usd=200.0,
+    )
+    assert "entry_mode" in gates
+    assert gates["entry_mode"] in ("momentum", "bounce", "none")
