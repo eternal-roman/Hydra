@@ -545,9 +545,9 @@ def test_executor_net_pnl_calculation():
     exit_price = 0.16400
     net = exec_._compute_net_pnl(pos, exit_price)
     # gross = (0.164 - 0.16) * 3750 = $15.00
-    # maker fees = 600 * 0.0016 + (0.164 * 3750) * 0.0016 = 0.96 + 0.984 = 1.944
-    # net = 15.00 - 1.944 = ~13.06
-    assert 12.5 < net < 13.5
+    # taker fees = 600 * 0.004 + (0.164 * 3750) * 0.004 = 2.40 + 2.46 = 4.86
+    # net = 15.00 - 4.86 = ~10.14
+    assert 9.5 < net < 11.0
 
 
 def test_executor_daily_cap_zero_raises():

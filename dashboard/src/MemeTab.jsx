@@ -921,7 +921,7 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
         </div>
         <div style={{ padding: "10px 12px", background: "#0f1923", borderRadius: 8,
                       marginBottom: 16, fontFamily: C.mono, fontSize: 11, color: C.muted }}>
-          V3: $300 · maker post-only · ATR ≥1.5% regime filter · momentum +3%/−1% · bounce +2%/−1.2% · trailing stop 1% from peak
+          V3: $300 · limit orders · ATR ≥1.5% regime filter · momentum +3%/−1% · bounce +2%/−1.2% · trailing stop 1% from peak
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button

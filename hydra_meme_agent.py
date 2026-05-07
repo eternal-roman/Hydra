@@ -655,8 +655,8 @@ def _cancel_order(txid: str) -> dict:
 
 # ─── Meme Executor ─────────────────────────────────────────────────────────────
 
-TAKER_FEE_RATE = 0.004   # 0.40% taker fee (kept for reference/backtest)
-MAKER_FEE_RATE = 0.0016  # 0.16% maker fee — used for post-only orders
+TAKER_FEE_RATE = 0.004   # 0.40% taker fee on competition tokens
+MAKER_FEE_RATE = 0.0016  # 0.16% maker fee — for backtest comparison only (not used in live orders)
 
 
 def _query_pair_precision(pair: str) -> tuple[int, int, float, float]:
@@ -675,7 +675,7 @@ def _query_pair_precision(pair: str) -> tuple[int, int, float, float]:
 
 
 class MemeExecutor:
-    """Places post-only limit orders (maker fees) and tracks position + daily P&L."""
+    """Places taker limit orders and tracks position + daily P&L."""
 
     def __init__(self, pair: str, position_size: float, daily_cap: float,
                  price_decimals: int = 8, lot_decimals: int = 8,
@@ -724,14 +724,14 @@ class MemeExecutor:
 
     def _compute_net_pnl(self, position: Position, exit_price: float) -> float:
         gross = (exit_price - position.entry_price) * position.qty
-        entry_fee = position.notional_usd * MAKER_FEE_RATE
+        entry_fee = position.notional_usd * TAKER_FEE_RATE
         exit_notional = exit_price * position.qty
-        exit_fee = exit_notional * MAKER_FEE_RATE
+        exit_fee = exit_notional * TAKER_FEE_RATE
         return gross - entry_fee - exit_fee
 
     def place_buy(self, ask: float, mid: Optional[float] = None,
                   entry_mode: str = "momentum") -> Optional[Position]:
-        """Place a post-only BUY limit order. Returns Position on success, None on failure."""
+        """Place a taker BUY limit order. Returns Position on success, None on failure."""
         if self.is_halted():
             return None
         limit_price = self._buy_limit_price(ask)
@@ -748,7 +748,6 @@ class MemeExecutor:
             qfmt.format(qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
-            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -775,7 +774,7 @@ class MemeExecutor:
 
     def place_sell(self, position: Position, bid: float, reason: str,
                    mid: Optional[float] = None) -> Optional[dict]:
-        """Place a post-only SELL limit order. Returns trade record dict, or None on failure."""
+        """Place a taker SELL limit order. Returns trade record dict, or None on failure."""
         limit_price = self._sell_limit_price(bid)
         if mid and mid > 0:
             slippage_bps = (mid - limit_price) / mid * 10_000
@@ -789,7 +788,6 @@ class MemeExecutor:
             qfmt.format(position.qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
-            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -805,8 +803,8 @@ class MemeExecutor:
         net_pnl = self._compute_net_pnl(position, exit_price)
         self.record_pnl(net_pnl)
         gross = (exit_price - position.entry_price) * position.qty
-        entry_fee = position.notional_usd * MAKER_FEE_RATE
-        exit_fee = exit_price * position.qty * MAKER_FEE_RATE
+        entry_fee = position.notional_usd * TAKER_FEE_RATE
+        exit_fee = exit_price * position.qty * TAKER_FEE_RATE
         record = TradeRecord(
             entry_ts=position.entry_ts,
             exit_ts=int(time.time()),
@@ -1167,6 +1165,15 @@ class MemeAgent:
                                            "price": pos.entry_price,
                                            "qty": pos.qty,
                                            "entry_mode": entry_mode})
+                    await asyncio.to_thread(save_session, SessionState(
+                        pair=self.pair, engine_state=self._engine_state,
+                        session_pnl=self._executor._daily_pnl,
+                        daily_pnl=self._executor._daily_pnl,
+                        trade_count=len(self._trade_log),
+                        open_position={"entry_price": pos.entry_price, "qty": pos.qty,
+                                       "notional_usd": pos.notional_usd, "entry_ts": pos.entry_ts,
+                                       "order_id": pos.order_id},
+                    ), self._session_path)
 
     async def _exit_position(self, reason: str) -> None:
         """Exit current position. Lock prevents double-exit from concurrent OBI/bar tasks."""
@@ -1410,7 +1417,7 @@ class MemeAgent:
             _kraken_cli,
             ["order", "buy", self.pair, qfmt.format(qty),
              "--type", "limit", "--price", pfmt.format(limit_buy),
-             "--oflags", "post", "--yes"],
+             "--yes"],
         )
         if "error" in buy_result:
             print(f"[APEX] TEST-FIRE: BUY FAILED — {buy_result}")
@@ -1431,14 +1438,14 @@ class MemeAgent:
             _kraken_cli,
             ["order", "sell", self.pair, qfmt.format(qty),
              "--type", "limit", "--price", pfmt.format(limit_sell),
-             "--oflags", "post", "--yes"],
+             "--yes"],
         )
         if "error" in sell_result:
             print(f"[APEX] TEST-FIRE: SELL FAILED — {sell_result}")
             print("[APEX] TEST-FIRE: WARNING — position still open on exchange — close manually")
             return False
         gross = (limit_sell - limit_buy) * qty
-        fees = test_notional * MAKER_FEE_RATE * 2
+        fees = test_notional * TAKER_FEE_RATE * 2
         net = gross - fees
         print(f"[APEX] TEST-FIRE: SELL OK — txid={sell_result.get('txid', '?')}")
         print(f"[APEX] TEST-FIRE: gross={gross:+.6f}  fees={fees:.6f}  net={net:+.6f}")
