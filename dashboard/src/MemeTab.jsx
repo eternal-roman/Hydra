@@ -535,7 +535,7 @@ function ScanCountdown({ lastScanTs }) {
 
 // ─── Discover View ────────────────────────────────────────────────────────────
 
-function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected, lastScanTs, wsRef, sessionStats, dailyCap }) {
+function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected, lastScanTs, wsRef, sessionStats, dailyCap, scanInProgress }) {
   const [levers, setLevers] = useState({});
   const [activeToken, setActiveToken] = useState(enginePair);
   const [scanningNow, setScanningNow] = useState(false);
@@ -582,10 +582,10 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
   // Gate on daily-loss budget (capRemaining > 0), not account balance
   const hasCapital = !connected || capRemaining > 0;
 
-  // Build display rows: live tokens or seed list
-  const displayTokens = connected && tokens.length > 0
+  // Sort by anomaly ratio when connected; preserve seed order otherwise
+  const displayTokens = connected
     ? [...tokens].sort((a, b) => (b.anomaly_ratio ?? 0) - (a.anomaly_ratio ?? 0))
-    : SEED_PAIRS.map(p => ({ pair: p }));
+    : tokens;
 
   return (
     <div>
@@ -597,7 +597,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
           border: `1px solid ${C.border}`,
         }}>
           <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>
-            {tokens.length} tokens monitored
+            {tokens.filter(t => t.current_volume != null).length}/{tokens.length} tokens scanned
           </span>
           <span style={{ color: C.border }}>·</span>
           <ScanCountdown lastScanTs={lastScanTs} />
@@ -659,7 +659,11 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
                                   color: C.text }}>{token.pair}</div>
                   </td>
                   <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
-                                color: C.text }}>{fmtVol(token.current_volume)}</td>
+                                color: C.text }}>
+                    {token.current_volume != null ? fmtVol(token.current_volume)
+                      : scanInProgress ? <span style={{ color: C.muted, fontSize: 10 }}>scanning…</span>
+                      : "—"}
+                  </td>
                   <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
                                 color: C.muted }}>{fmtVol(token.baseline_volume_7d)}</td>
                   <td style={{ padding: "10px 12px" }}>
@@ -795,7 +799,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
       {!connected && (
         <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted + "80",
                       textAlign: "center", marginTop: 12 }}>
-          Showing {SEED_PAIRS.length} seed pairs · live volume data appears on connect
+          {tokens.length} seed pairs · volume data appears once APEX connects and scans
         </div>
       )}
     </div>
@@ -884,7 +888,8 @@ export default function MemeTab() {
   const [obi, setObi] = useState(0);
   const [sessionStats, setSessionStats] = useState(null);
   const [trades, setTrades] = useState([]);
-  const [tokens, setTokens] = useState([]);
+  const [tokens, setTokens] = useState(() => SEED_PAIRS.map(p => ({ pair: p })));
+  const [scanInProgress, setScanInProgress] = useState(false);
   const [bars, setBars] = useState([]);
   const [lastScanTs, setLastScanTs] = useState(null);
   const [pendingAlert, setPendingAlert] = useState(null);
@@ -961,9 +966,26 @@ export default function MemeTab() {
           case "competition_alert":
             setPendingAlert(msg);
             break;
+          case "scan_started":
+            setScanInProgress(true);
+            break;
+          case "token_update":
+            if (msg.pair) {
+              setTokens(prev => {
+                const idx = prev.findIndex(t => t.pair === msg.pair);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = { ...next[idx], ...msg };
+                  return next;
+                }
+                return [...prev, msg];
+              });
+            }
+            break;
           case "watchlist_update":
             setTokens(msg.tokens ?? []);
             setLastScanTs(Date.now() / 1000);
+            setScanInProgress(false);
             break;
           default:
             break;
@@ -1061,6 +1083,7 @@ export default function MemeTab() {
           wsRef={wsRef}
           sessionStats={sessionStats}
           dailyCap={APEX_DAILY_CAP_USD}
+          scanInProgress={scanInProgress}
         />
       )}
 

@@ -909,6 +909,7 @@ class MemeAgent:
     async def _run_competition_scan(self) -> None:
         """Single competition scan pass: fetch ticker for all watchlist tokens."""
         tokens = self._detector.get_all_tokens()
+        await self._broadcast({"type": "scan_started", "token_count": len(tokens)})
         last_call = 0.0
         for token in tokens:
             elapsed = time.time() - last_call
@@ -930,22 +931,36 @@ class MemeAgent:
             if not vol_str:
                 continue
             volume = float(vol_str)
-            if self._detector._get_baseline(token["pair"]) is None:
+            first_scan = self._detector._get_baseline(token["pair"]) is None
+            if first_scan:
                 self._detector._set_baseline(token["pair"], volume)
-                continue
-            self._detector._update_baseline(token["pair"], volume)
-            baseline = self._detector._get_baseline(token["pair"])
-            ratio = volume / baseline if baseline else 0.0
-            # Store live data on token dict so watchlist_update table has full columns
+                baseline = volume
+                ratio = 1.0  # first data point — no anomaly yet
+            else:
+                self._detector._update_baseline(token["pair"], volume)
+                baseline = self._detector._get_baseline(token["pair"])
+                ratio = volume / baseline if baseline else 0.0
+            # Store live data on token dict for watchlist_update
             with self._detector._lock:
                 t = self._detector._find_token(token["pair"])
                 if t is not None:
                     t["current_volume"] = volume
                     t["anomaly_ratio"] = ratio
-            if (not self._detector._is_suppressed(token["pair"])
+            comp_type = self._detector.infer_competition_type(token["pair"])
+            token_obj = self._detector._find_token(token["pair"]) or {}
+            # Broadcast individual token immediately — don't make frontend wait 36 s
+            await self._broadcast({
+                "type": "token_update",
+                "pair": token["pair"],
+                "current_volume": volume,
+                "baseline_volume_7d": baseline,
+                "anomaly_ratio": ratio,
+                "competition_type": comp_type,
+                "competition_type_confirmed": token_obj.get("competition_type_confirmed", False),
+            })
+            if (not first_scan
+                    and not self._detector._is_suppressed(token["pair"])
                     and self._detector._is_anomaly(token["pair"], volume)):
-                comp_type = self._detector.infer_competition_type(token["pair"])
-                token_obj = self._detector._find_token(token["pair"]) or {}
                 await self._broadcast({
                     "type": "competition_alert",
                     "pair": token["pair"],
@@ -955,7 +970,7 @@ class MemeAgent:
                     "competition_type": comp_type,
                     "competition_type_confirmed": token_obj.get("competition_type_confirmed", False),
                 })
-        # Broadcast full token list after scan
+        # Final authoritative snapshot after full scan
         await self._broadcast({
             "type": "watchlist_update",
             "tokens": self._detector.get_all_tokens(),
