@@ -88,7 +88,7 @@ def test_compute_vwap_weighted():
 
 # ─── SignalEngine Tests ────────────────────────────────────────────────────────
 
-from hydra_meme_agent import SignalEngine
+from hydra_meme_agent import SignalEngine, Position
 
 
 def _make_bar(close=1.0, volume=1000.0, ts=0):
@@ -206,3 +206,76 @@ def test_all_gates_pass():
     assert isinstance(gates["rsi_window"], bool)
     assert isinstance(gates["ask_wall_clear"], bool)
     assert "all_pass" in gates
+
+
+# ─── Exit Trigger Tests ────────────────────────────────────────────────────────
+
+def test_exit_profit_target():
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.026, obi=0.1)
+    assert result == "profit_target"
+
+
+def test_exit_hard_stop():
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=0.986, obi=0.1)
+    assert result == "hard_stop"
+
+
+def test_exit_book_fade():
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.005, obi=-0.25)
+    assert result == "book_fade"
+
+
+def test_exit_no_trigger_intracandle():
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.01, obi=0.05)
+    assert result is None
+
+
+def test_exit_time_stop():
+    eng = _warmed_engine()
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=3)
+    bar = _make_bar(close=1.01, volume=1000.0)
+    result = eng.evaluate_exit_bar(pos, bar)
+    assert result == "time_stop"
+
+
+def test_exit_rsi_exhaust():
+    # All rising prices → RSI very high → rsi_exhaust
+    eng = SignalEngine()
+    for i in range(15):
+        eng.add_bar(_make_bar(close=1.0 + i * 0.1, volume=1000.0, ts=i * 300))
+    pos = Position(entry_price=1.0, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    bar = _make_bar(close=2.6, volume=1000.0)
+    result = eng.evaluate_exit_bar(pos, bar)
+    assert result == "rsi_exhaust"
+
+
+def test_exit_volume_death():
+    eng = _warmed_engine(volume=1000.0)
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    dead_bar = _make_bar(close=1.01, volume=200.0)  # 0.2x baseline
+    result = eng.evaluate_exit_bar(pos, dead_bar)
+    assert result == "volume_death"
+
+
+def test_exit_no_trigger_bar():
+    eng = _warmed_engine(volume=1000.0)
+    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+                   entry_ts=0, candles_held=1)
+    normal_bar = _make_bar(close=1.01, volume=1000.0)
+    result = eng.evaluate_exit_bar(pos, normal_bar)
+    assert result is None
