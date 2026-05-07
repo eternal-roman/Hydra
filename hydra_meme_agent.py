@@ -17,6 +17,20 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 import websockets
 
+# Load .env file if present (same loader as hydra_agent.py — no dependency needed)
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                _v = _v.strip()
+                if len(_v) >= 2 and _v[0] == _v[-1] and _v[0] in ('"', "'"):
+                    _v = _v[1:-1]
+                if _v and _k.strip() not in os.environ:
+                    os.environ[_k.strip()] = _v
+
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -397,6 +411,19 @@ def append_journal(record: TradeRecord, path: str) -> None:
     os.replace(tmp, path)
 
 
+def load_journal(path: str) -> list[TradeRecord]:
+    """Load trade records from journal file. Returns empty list if missing/corrupt."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            entries = json.load(f)
+        return [TradeRecord(**e) for e in entries]
+    except Exception as e:
+        print(f"[APEX] Warning: could not load journal {path}: {e}")
+        return []
+
+
 # ─── Kraken CLI ────────────────────────────────────────────────────────────────
 
 def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
@@ -435,15 +462,36 @@ def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
 TAKER_FEE_RATE = 0.004   # 0.40% taker fee on competition tokens
 
 
+def _query_pair_precision(pair: str) -> tuple[int, int, float, float]:
+    """Query Kraken for pair decimals. Returns (price_dec, lot_dec, ordermin, costmin)."""
+    pair_nodash = pair.replace("/", "")
+    result = _kraken_cli(["pairs", "--pair", pair_nodash])
+    if "error" not in result:
+        pdata = result.get(pair_nodash) or next(iter(result.values()), {})
+        return (
+            int(pdata.get("pair_decimals", 8)),
+            int(pdata.get("lot_decimals", 8)),
+            float(pdata.get("ordermin", 0)),
+            float(pdata.get("costmin", 0)),
+        )
+    return (8, 8, 0.0, 0.0)
+
+
 class MemeExecutor:
     """Places taker limit orders and tracks position + daily P&L."""
 
-    def __init__(self, pair: str, position_size: float, daily_cap: float):
+    def __init__(self, pair: str, position_size: float, daily_cap: float,
+                 price_decimals: int = 8, lot_decimals: int = 8,
+                 ordermin: float = 0.0, costmin: float = 0.0):
         if daily_cap <= 0:
             raise ValueError(f"daily_cap must be positive, got {daily_cap}")
         self.pair = pair
         self.position_size = position_size
         self.daily_cap = daily_cap
+        self.price_decimals = price_decimals
+        self.lot_decimals = lot_decimals
+        self.ordermin = ordermin
+        self.costmin = costmin
         self._daily_pnl: float = 0.0
         self._daily_loss: float = 0.0
         self._halted: bool = False
@@ -485,12 +533,14 @@ class MemeExecutor:
             if slippage_bps > SLIPPAGE_CAP_BPS:
                 return None
         qty = self._buy_qty(ask)
+        pfmt = f"{{:.{self.price_decimals}f}}"
+        qfmt = f"{{:.{self.lot_decimals}f}}"
         result = _kraken_cli([
             "order", "buy",
             self.pair,
-            f"{qty:.8f}",
+            qfmt.format(qty),
             "--type", "limit",
-            "--price", f"{limit_price:.8f}",
+            "--price", pfmt.format(limit_price),
             "--yes",
         ])
         if "error" in result:
@@ -512,12 +562,14 @@ class MemeExecutor:
             slippage_bps = (mid - limit_price) / mid * 10_000
             if slippage_bps > SLIPPAGE_CAP_BPS:
                 limit_price = mid * (1 - SLIPPAGE_CAP_BPS / 10_000)
+        pfmt = f"{{:.{self.price_decimals}f}}"
+        qfmt = f"{{:.{self.lot_decimals}f}}"
         result = _kraken_cli([
             "order", "sell",
             self.pair,
-            f"{position.qty:.8f}",
+            qfmt.format(position.qty),
             "--type", "limit",
-            "--price", f"{limit_price:.8f}",
+            "--price", pfmt.format(limit_price),
             "--yes",
         ])
         if "error" in result:
@@ -691,7 +743,10 @@ class MemeAgent:
         self._clients: set = set()
         self._signal_engine = SignalEngine()
         self._obi_poller = OBIPoller(pair)
-        self._executor = MemeExecutor(pair, position_size, daily_cap)
+        price_dec, lot_dec, ordermin, costmin = _query_pair_precision(pair)
+        print(f"[APEX] {pair}: price_decimals={price_dec}  lot_decimals={lot_dec}  ordermin={ordermin}  costmin=${costmin}")
+        self._executor = MemeExecutor(pair, position_size, daily_cap,
+                                      price_dec, lot_dec, ordermin, costmin)
         self._detector = CompetitionDetector(watchlist_path)
         self._candle_agg = CandleAggregator(pair, self._on_bar)
         self._position: Optional[Position] = None
@@ -699,7 +754,12 @@ class MemeAgent:
         self._exit_lock: asyncio.Lock = asyncio.Lock()
         self._session_path = session_path
         self._journal_path = journal_path
-        self._trade_log: list[TradeRecord] = []
+        self._trade_log: list[TradeRecord] = load_journal(journal_path)
+        if self._trade_log:
+            for t in self._trade_log:
+                self._executor.record_pnl(t.net_pnl)
+            total_pnl = sum(t.net_pnl for t in self._trade_log)
+            print(f"[APEX] Loaded {len(self._trade_log)} trades from journal (net P&L: ${total_pnl:+.2f})")
         self._engine_state = "warmup"
 
     # ── History seed ──
@@ -1032,12 +1092,109 @@ class MemeAgent:
                 continue
             await self._run_competition_scan()
 
+    # ── Test fire ──
+
+    async def _test_fire(self) -> bool:
+        """Execute one BUY→SELL cycle to verify the full pipeline.
+
+        Queries pair minimums from Kraken to ensure the order clears both
+        ordermin (token qty) and costmin (USD notional).
+        """
+        ex = self._executor
+        ordermin = ex.ordermin
+        costmin = ex.costmin
+        pfmt = f"{{:.{ex.price_decimals}f}}"
+        qfmt = f"{{:.{ex.lot_decimals}f}}"
+        print(f"[APEX] TEST-FIRE: starting round-trip on {self.pair}")
+        print(f"[APEX] TEST-FIRE: ordermin={ordermin}  costmin=${costmin}  price_dec={ex.price_decimals}  lot_dec={ex.lot_decimals}")
+        print("[APEX] TEST-FIRE: polling orderbook for fresh bid/ask...")
+        for attempt in range(6):
+            await asyncio.to_thread(self._obi_poller.poll)
+            if self._obi_poller.best_ask > 0:
+                break
+            print(f"[APEX] TEST-FIRE: no book data yet (attempt {attempt + 1}/6)")
+            await asyncio.sleep(3)
+        ask = self._obi_poller.best_ask
+        bid = self._obi_poller.best_bid
+        mid = self._obi_poller.mid_price
+        obi = self._obi_poller.obi
+        if ask <= 0 or bid <= 0:
+            print("[APEX] TEST-FIRE: FAILED — could not get orderbook data")
+            return False
+        print(f"[APEX] TEST-FIRE: ask={ask:.8f}  bid={bid:.8f}  mid={mid:.8f}  OBI={obi:.4f}")
+        # Compute qty that clears both minimums with 20% headroom
+        qty_from_min = ordermin * 1.2
+        qty_from_cost = (costmin * 1.2) / ask
+        qty = max(qty_from_min, qty_from_cost)
+        test_notional = qty * ask
+        limit_buy = ask * (1 + TAKER_SLIPPAGE_BPS / 10_000)
+        print(f"[APEX] TEST-FIRE: placing BUY  qty={qfmt.format(qty)}  limit={pfmt.format(limit_buy)}  (~${test_notional:.2f})")
+        buy_result = await asyncio.to_thread(
+            _kraken_cli,
+            ["order", "buy", self.pair, qfmt.format(qty),
+             "--type", "limit", "--price", pfmt.format(limit_buy), "--yes"],
+        )
+        if "error" in buy_result:
+            print(f"[APEX] TEST-FIRE: BUY FAILED — {buy_result}")
+            return False
+        txid = buy_result.get("txid", "?")
+        print(f"[APEX] TEST-FIRE: BUY OK — txid={txid}")
+        await self._broadcast({"type": "order_placed", "side": "buy",
+                                "price": limit_buy, "qty": qty,
+                                "test_fire": True})
+        # Wait for fill
+        await asyncio.sleep(3)
+        # SELL
+        await asyncio.to_thread(self._obi_poller.poll)
+        bid = self._obi_poller.best_bid
+        limit_sell = bid * (1 - TAKER_SLIPPAGE_BPS / 10_000)
+        print(f"[APEX] TEST-FIRE: placing SELL qty={qfmt.format(qty)}  limit={pfmt.format(limit_sell)}")
+        sell_result = await asyncio.to_thread(
+            _kraken_cli,
+            ["order", "sell", self.pair, qfmt.format(qty),
+             "--type", "limit", "--price", pfmt.format(limit_sell), "--yes"],
+        )
+        if "error" in sell_result:
+            print(f"[APEX] TEST-FIRE: SELL FAILED — {sell_result}")
+            print("[APEX] TEST-FIRE: WARNING — position still open on exchange — close manually")
+            return False
+        gross = (limit_sell - limit_buy) * qty
+        fees = test_notional * TAKER_FEE_RATE * 2
+        net = gross - fees
+        print(f"[APEX] TEST-FIRE: SELL OK — txid={sell_result.get('txid', '?')}")
+        print(f"[APEX] TEST-FIRE: gross={gross:+.6f}  fees={fees:.6f}  net={net:+.6f}")
+        print("[APEX] TEST-FIRE: PASS — full pipeline verified — continuing normal operation")
+        record = TradeRecord(
+            entry_ts=int(time.time()) - 3,
+            exit_ts=int(time.time()),
+            entry_price=limit_buy,
+            exit_price=limit_sell,
+            qty=qty,
+            gross_pnl=gross,
+            fees_usd=fees,
+            net_pnl=net,
+            exit_reason="test_fire",
+            hold_candles=0,
+        )
+        self._trade_log.append(record)
+        await asyncio.to_thread(append_journal, record, self._journal_path)
+        await self._broadcast({"type": "trade_closed", "net_pnl": net,
+                                "exit_reason": "test_fire",
+                                "exit_ts": record.exit_ts,
+                                "entry_price": limit_buy,
+                                "exit_price": limit_sell,
+                                "hold_candles": 0,
+                                "test_fire": True})
+        return True
+
     # ── Main run ──
 
-    async def run(self) -> None:
+    async def run(self, test_fire: bool = False) -> None:
+        await self._seed_history()
         server = await websockets.serve(self._ws_handler, "localhost", WS_PORT)
         print(f"[APEX] WebSocket server on ws://localhost:{WS_PORT}")
-        await self._seed_history()
+        if test_fire:
+            await self._test_fire()
         print(f"[APEX] Trading {self.pair} | State: {self._engine_state}")
         try:
             await asyncio.gather(
@@ -1060,6 +1217,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--session-path", default="hydra_meme_session.json")
     p.add_argument("--journal-path", default="hydra_meme_journal.json")
     p.add_argument("--watchlist-path", default="hydra_meme_watchlist.json")
+    p.add_argument("--test-fire", action="store_true",
+                   help="Execute one $5 BUY→SELL cycle on startup to verify pipeline")
     return p.parse_args()
 
 
@@ -1073,7 +1232,7 @@ def main() -> None:
         journal_path=args.journal_path,
         watchlist_path=args.watchlist_path,
     )
-    asyncio.run(agent.run())
+    asyncio.run(agent.run(test_fire=args.test_fire))
 
 
 if __name__ == "__main__":
