@@ -10,8 +10,8 @@ import sys, os, json, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hydra_meme_agent import (
-    CandleBar, wilder_rsi, vol_ema, SignalEngine, Position,
-    TAKER_FEE_RATE, TAKER_SLIPPAGE_BPS, WARMUP_BARS, CANDLE_BUFFER_SIZE,
+    CandleBar, wilder_rsi, vol_ema, atr_pct, SignalEngine, Position,
+    TAKER_FEE_RATE, MAKER_FEE_RATE, TAKER_SLIPPAGE_BPS, WARMUP_BARS, CANDLE_BUFFER_SIZE,
 )
 
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "play_ohlc_raw.json")
@@ -37,6 +37,8 @@ V1_DEFAULTS = {
     "partial_profit_frac": 0.5,
     "extension_max_pct": None,
     "reentry_cooldown": 0,
+    "atr_min_pct": None,
+    "fee_mode": "taker",
 }
 
 DEFAULTS = {
@@ -60,6 +62,8 @@ DEFAULTS = {
     "partial_profit_frac": 0.5,
     "extension_max_pct": 0.20,
     "reentry_cooldown": 2,
+    "atr_min_pct": 0.015,
+    "fee_mode": "maker",
 }
 
 
@@ -99,6 +103,8 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
     if cfg:
         c.update(cfg)
 
+    fee_rate = MAKER_FEE_RATE if c.get("fee_mode") == "maker" else TAKER_FEE_RATE
+
     engine = SignalEngine()
     position = None
     trades = []
@@ -106,7 +112,7 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
     daily_loss = 0.0
     halted = False
     entry_signals = 0
-    gate_failures = {"volume_spike": 0, "obi": 0, "vwap_align": 0, "rsi_window": 0, "trend": 0, "extension": 0, "cooldown": 0}
+    gate_failures = {"volume_spike": 0, "obi": 0, "vwap_align": 0, "rsi_window": 0, "trend": 0, "extension": 0, "cooldown": 0, "atr_regime": 0}
     bars_processed = 0
     last_exit_bar = -c.get("reentry_cooldown", 0)
 
@@ -170,8 +176,8 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
                 slippage = exit_price * TAKER_SLIPPAGE_BPS / 10_000
                 fill_price = exit_price - slippage
                 gross = (fill_price - position.entry_price) * position.qty
-                entry_fee = position.notional_usd * TAKER_FEE_RATE
-                exit_fee = fill_price * position.qty * TAKER_FEE_RATE
+                entry_fee = position.notional_usd * fee_rate
+                exit_fee = fill_price * position.qty * fee_rate
                 net = gross - entry_fee - exit_fee
                 daily_pnl += net
                 if net < 0:
@@ -224,6 +230,11 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
 
         cooldown_pass = (i - last_exit_bar) >= c.get("reentry_cooldown", 0)
 
+        atr_pass = True
+        if c.get("atr_min_pct") is not None:
+            cur_atr = atr_pct(engine._bars)
+            atr_pass = cur_atr >= c["atr_min_pct"]
+
         if not vol_pass:
             gate_failures["volume_spike"] += 1
         if not obi_pass:
@@ -238,8 +249,10 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
             gate_failures["extension"] += 1
         if not cooldown_pass:
             gate_failures["cooldown"] += 1
+        if not atr_pass:
+            gate_failures["atr_regime"] += 1
 
-        if vol_pass and obi_pass and vwap_pass and rsi_pass and trend_pass and ext_pass and cooldown_pass:
+        if vol_pass and obi_pass and vwap_pass and rsi_pass and trend_pass and ext_pass and cooldown_pass and atr_pass:
             entry_signals += 1
             ask_est = bar.close * 1.001
             limit_price = ask_est * (1 + TAKER_SLIPPAGE_BPS / 10_000)
@@ -256,8 +269,8 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
         last = bars[-1]
         fill_price = last.close * (1 - TAKER_SLIPPAGE_BPS / 10_000)
         gross = (fill_price - position.entry_price) * position.qty
-        entry_fee = position.notional_usd * TAKER_FEE_RATE
-        exit_fee = fill_price * position.qty * TAKER_FEE_RATE
+        entry_fee = position.notional_usd * fee_rate
+        exit_fee = fill_price * position.qty * fee_rate
         net = gross - entry_fee - exit_fee
         daily_pnl += net
         trades.append({
@@ -312,18 +325,22 @@ def run_backtest(bars: list[CandleBar], cfg: dict = None) -> dict:
         "halted": halted,
         "exit_reasons": exit_reasons,
         "gate_failures": gate_failures,
+        "fee_mode": c.get("fee_mode", "maker"),
+        "atr_min_pct": c.get("atr_min_pct"),
         "trades": trades,
     }
 
 
 def print_report(result: dict) -> None:
     print("=" * 72)
-    print("  APEX Meme Engine -- 72h Backtest Report (PLAY/USD)")
+    print("  APEX Meme Engine -- V3+ATR Backtest Report (PLAY/USD)")
     print("=" * 72)
     print()
     print(f"  Data:  {result['first_bar']} -> {result['last_bar']}")
     print(f"  Bars:  {result['bars_total']} (5-min) | Warmup: {result['warmup_bars']}")
     print(f"  Price: ${result['price_start']:.6f} -> ${result['price_end']:.6f}  ({result['price_change_pct']:+.1f}%)")
+    atr_str = f"{result['atr_min_pct']*100:.1f}%" if result.get('atr_min_pct') else "OFF"
+    print(f"  Fees:  {result.get('fee_mode','maker')} | ATR gate: {atr_str}")
     print()
     print("-" * 72)
     print("  PERFORMANCE")
@@ -375,47 +392,35 @@ def run_sensitivity(bars: list[CandleBar]) -> None:
     print()
 
     configs = [
-        ("v1 ORIGINAL", {k: v for k, v in V1_DEFAULTS.items() if v != DEFAULTS.get(k)}),
-        ("v2 COMBINED (current)", {}),
+        ("v1 ORIGINAL (taker)", {k: v for k, v in V1_DEFAULTS.items() if v != DEFAULTS.get(k)}),
+        ("v2 no-ATR (taker)", {"atr_min_pct": None, "fee_mode": "taker"}),
+        ("v3 ATR+maker (current)", {}),
+        ("ATR 1.0%", {"atr_min_pct": 0.010}),
+        ("ATR 1.5% (default)", {"atr_min_pct": 0.015}),
+        ("ATR 2.0%", {"atr_min_pct": 0.020}),
+        ("ATR 2.5%", {"atr_min_pct": 0.025}),
+        ("ATR 3.0%", {"atr_min_pct": 0.030}),
+        ("ATR off (maker fees)", {"atr_min_pct": None}),
+        ("ATR off (taker fees)", {"atr_min_pct": None, "fee_mode": "taker"}),
         ("Wider RSI 35-82", {"rsi_entry_low": 35, "rsi_entry_high": 82}),
-        ("Wider RSI 30-85", {"rsi_entry_low": 30, "rsi_entry_high": 85}),
         ("RSI oversold only 25-55", {"rsi_entry_low": 25, "rsi_entry_high": 55}),
         ("Vol spike 1.5x", {"vol_spike_mult": 1.5}),
         ("Vol spike 1.3x", {"vol_spike_mult": 1.3}),
-        ("Vol spike 1.0x (off)", {"vol_spike_mult": 1.0}),
         ("OBI 0.10", {"obi_entry": 0.10}),
         ("OBI 0.05", {"obi_entry": 0.05}),
         ("OBI 0.00 (off)", {"obi_entry": 0.00}),
-        ("Profit 3.5%", {"profit_target_pct": 0.035}),
         ("Profit 2.0%", {"profit_target_pct": 0.020}),
         ("Profit 1.5%", {"profit_target_pct": 0.015}),
-        ("Profit 1.0%", {"profit_target_pct": 0.010}),
         ("Stop -2.0%", {"hard_stop_pct": -0.020}),
-        ("Stop -1.0%", {"hard_stop_pct": -0.010}),
         ("Stop -0.8%", {"hard_stop_pct": -0.008}),
         ("Time stop 5c", {"time_stop_candles": 5}),
         ("Time stop 2c", {"time_stop_candles": 2}),
-        ("Time stop 1c", {"time_stop_candles": 1}),
-        ("Require uptrend EMA", {"require_uptrend": True}),
-        ("Trailing -1.5%", {"trailing_stop_pct": -0.015, "hard_stop_pct": -0.025}),
         ("Scalp: 1.5%/1%/2c", {"profit_target_pct": 0.015, "hard_stop_pct": -0.010, "time_stop_candles": 2}),
-        ("Scalp+low gates", {"profit_target_pct": 0.015, "hard_stop_pct": -0.010,
-                             "time_stop_candles": 2, "vol_spike_mult": 1.3, "obi_entry": 0.05}),
-        ("Bounce: RSI25-50/1.5%", {"rsi_entry_low": 25, "rsi_entry_high": 50,
-                                    "profit_target_pct": 0.015, "hard_stop_pct": -0.008,
-                                    "time_stop_candles": 2, "vol_spike_mult": 1.3, "obi_entry": 0.05}),
-        ("Max trades: all gates low", {"vol_spike_mult": 1.0, "obi_entry": 0.0,
-                                        "rsi_entry_low": 20, "rsi_entry_high": 90,
-                                        "profit_target_pct": 0.015, "hard_stop_pct": -0.008,
-                                        "time_stop_candles": 2}),
-        ("Trend filter only", {"require_uptrend": True, "vol_spike_mult": 1.0, "obi_entry": 0.0,
-                                "rsi_entry_low": 30, "rsi_entry_high": 80,
-                                "profit_target_pct": 0.020, "hard_stop_pct": -0.010,
-                                "time_stop_candles": 3}),
-        ("Wide+uptrend", {"require_uptrend": True, "vol_spike_mult": 1.3, "obi_entry": 0.05,
-                           "rsi_entry_low": 30, "rsi_entry_high": 75,
-                           "profit_target_pct": 0.020, "hard_stop_pct": -0.010,
-                           "time_stop_candles": 3}),
+        ("Scalp+low gates+ATR", {"profit_target_pct": 0.015, "hard_stop_pct": -0.010,
+                                  "time_stop_candles": 2, "vol_spike_mult": 1.3, "obi_entry": 0.05}),
+        ("ATR+no trend filter", {"require_uptrend": False}),
+        ("ATR+relaxed gates", {"vol_spike_mult": 1.3, "obi_entry": 0.05,
+                                "rsi_entry_low": 35, "rsi_entry_high": 82}),
     ]
 
     header = f"  {'Config':<28s}  {'Trades':>6s}  {'W/L':>7s}  {'WR':>5s}  {'Net P&L':>9s}  {'Avg':>7s}  {'MaxDD':>7s}  {'Halt':>4s}"

@@ -66,6 +66,7 @@ COMPETITION_EMA_ALPHA = 1 / 7
 
 EXTENSION_MAX_PCT = 0.10  # block entry when price is >10% above slow EMA
 REENTRY_COOLDOWN_BARS = 2  # bars to wait after exit before re-entering
+ATR_MIN_PCT = 0.015  # minimum ATR(5) as fraction of price to enter (1.5%)
 
 # Bounce-mode entry thresholds
 BOUNCE_RSI_THRESHOLD = 25    # enter bounce when RSI < 25 (deeply oversold)
@@ -198,6 +199,22 @@ def ema(values: list[float], period: int) -> float:
     return result
 
 
+def atr_pct(bars: list, period: int = 5) -> float:
+    """ATR as a fraction of current price. Returns 0.0 when insufficient data."""
+    if len(bars) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(len(bars) - period, len(bars)):
+        prev_close = bars[i - 1].close
+        tr = max(bars[i].high - bars[i].low,
+                 abs(bars[i].high - prev_close),
+                 abs(bars[i].low - prev_close))
+        trs.append(tr)
+    atr_val = sum(trs) / len(trs)
+    price = bars[-1].close
+    return atr_val / price if price > 0 else 0.0
+
+
 # ─── Signal Engine ─────────────────────────────────────────────────────────────
 
 class SignalEngine:
@@ -259,6 +276,9 @@ class SignalEngine:
         extension = (latest_bar.close - ema_slow_val) / ema_slow_val if ema_slow_val > 0 else 0
         not_extended = extension <= EXTENSION_MAX_PCT
 
+        cur_atr_pct = atr_pct(self._bars)
+        vol_regime_pass = cur_atr_pct >= ATR_MIN_PCT
+
         # Momentum gate checks
         mom_volume = latest_bar.volume > VOLUME_SPIKE_MULTIPLIER * vol_baseline
         mom_obi = obi > OBI_ENTRY_THRESHOLD
@@ -266,14 +286,14 @@ class SignalEngine:
         mom_rsi = RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH
         mom_wall = ask_wall_usd < ASK_WALL_USD_LIMIT
         mom_pass = all([mom_volume, mom_obi, mom_vwap, mom_rsi,
-                        mom_wall, trend_aligned, not_extended])
+                        mom_wall, trend_aligned, not_extended, vol_regime_pass])
 
         # Bounce gate checks
         ema50_dist = (latest_bar.close - ema50_val) / ema50_val if ema50_val > 0 else -1
         bounce_rsi = rsi < BOUNCE_RSI_THRESHOLD and rsi > 0
         bounce_vol = latest_bar.volume > BOUNCE_VOL_SPIKE_MULT * vol_baseline
         bounce_floor = ema50_dist > BOUNCE_MAX_EMA50_DIST
-        bounce_pass = all([bounce_rsi, bounce_vol, bounce_floor])
+        bounce_pass = all([bounce_rsi, bounce_vol, bounce_floor, vol_regime_pass])
 
         entry_mode = "none"
         if mom_pass:
@@ -289,12 +309,14 @@ class SignalEngine:
             "ask_wall_clear": mom_wall,
             "trend_aligned": trend_aligned,
             "not_extended": not_extended,
+            "vol_regime": vol_regime_pass,
             "bounce_rsi": bounce_rsi,
             "bounce_vol": bounce_vol,
             "bounce_floor": bounce_floor,
             "rsi_value": round(rsi, 1),
             "vwap_value": round(vwap, 8),
             "vol_ema_value": round(vol_baseline, 2),
+            "atr_pct": round(cur_atr_pct, 4),
             "ema50_dist": round(ema50_dist, 4),
             "extension_pct": round(extension, 4),
             "entry_mode": entry_mode,

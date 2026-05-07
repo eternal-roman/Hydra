@@ -923,4 +923,89 @@ def test_entry_mode_in_gates():
         ask_wall_usd=200.0,
     )
     assert "entry_mode" in gates
+
+
+# ─── ATR Gate Tests ──────────────────────────────────────────────────────────
+
+from hydra_meme_agent import atr_pct, ATR_MIN_PCT
+
+
+def test_atr_pct_insufficient_data():
+    """atr_pct returns 0.0 when too few bars."""
+    bars = [_make_bar(close=1.0 + i * 0.01) for i in range(3)]
+    assert atr_pct(bars, period=5) == 0.0
+
+
+def test_atr_pct_flat_bars():
+    """Flat bars (high==low==close) produce ATR near 0."""
+    bars = []
+    for i in range(10):
+        b = CandleBar(ts=i * 300, open=1.0, high=1.0, low=1.0, close=1.0,
+                      vwap=1.0, volume=1000.0, count=10)
+        bars.append(b)
+    assert atr_pct(bars, period=5) == 0.0
+
+
+def test_atr_pct_volatile_bars():
+    """Bars with 5% high-low range should produce ~5% ATR."""
+    bars = []
+    for i in range(10):
+        c = 1.0
+        b = CandleBar(ts=i * 300, open=c, high=c * 1.025, low=c * 0.975,
+                      close=c, vwap=c, volume=1000.0, count=10)
+        bars.append(b)
+    result = atr_pct(bars, period=5)
+    assert 0.04 < result < 0.06
+
+
+def test_atr_pct_constant():
+    from hydra_meme_agent import ATR_MIN_PCT
+    assert ATR_MIN_PCT == 0.015
+
+
+def test_atr_gate_in_entry_gates():
+    """evaluate_entry_gates includes vol_regime and atr_pct fields."""
+    eng = _warmed_engine(close=1.0, volume=1000.0)
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=1.015, volume=2000.0),
+        obi=0.25,
+        ask_wall_usd=200.0,
+    )
+    assert "vol_regime" in gates
+    assert "atr_pct" in gates
+    assert isinstance(gates["vol_regime"], bool)
+
+
+def test_atr_gate_blocks_flat_market():
+    """ATR gate should block entry when market is flat (low ATR)."""
+    eng = SignalEngine()
+    for i in range(20):
+        b = CandleBar(ts=i * 300, open=1.0, high=1.001, low=0.999,
+                      close=1.0, vwap=1.0, volume=1000.0, count=10)
+        eng.add_bar(b)
+    gates = eng.evaluate_entry_gates(
+        latest_bar=CandleBar(ts=20 * 300, open=1.0, high=1.001, low=0.999,
+                             close=1.0, vwap=1.0, volume=3000.0, count=10),
+        obi=0.50,
+        ask_wall_usd=100.0,
+    )
+    assert gates["vol_regime"] is False
+    assert gates["atr_pct"] < ATR_MIN_PCT
+
+
+def test_atr_gate_passes_volatile_market():
+    """ATR gate should pass when market has sufficient volatility."""
+    eng = SignalEngine()
+    for i in range(20):
+        c = 1.0 + (i % 2) * 0.03
+        b = CandleBar(ts=i * 300, open=c - 0.01, high=c + 0.02,
+                      low=c - 0.02, close=c, vwap=c, volume=1000.0, count=10)
+        eng.add_bar(b)
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=1.03, volume=2000.0),
+        obi=0.25,
+        ask_wall_usd=200.0,
+    )
+    assert gates["vol_regime"] is True
+    assert gates["atr_pct"] >= ATR_MIN_PCT
     assert gates["entry_mode"] in ("momentum", "bounce", "none")
