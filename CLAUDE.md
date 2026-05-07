@@ -164,12 +164,12 @@ Persist new learnings: `python $CBP_RUNNER_DIR/bin/memory-write.py --label <slug
 | cbp_sidecar_state | `cbp-runner/state/` | owner `cbp-runner/supervisor.py`; kill via `CBP_SIDECAR_ENABLED=0` or `state/_disabled` flag; Hydra falls through to JSONL — never blocks |
 | experiments_store | `.hydra-experiments/` | owner `experiments`; `presets.json` + `reviewer_config.json` bootstrap from code on first init (delete to regenerate); `shadow_outcomes.jsonl` append-only |
 
-CBP sidecar: auto-launched by `start_hydra.bat` / `start_all.bat` via
-`python %CBP_RUNNER_DIR%\supervisor.py --detach` (default `CBP_RUNNER_DIR`
-points at a sibling `../cbp-runner` checkout; override to anywhere).
-Missing checkout = launch skipped, client degrades to JSONL. Client:
-`hydra_companions.cbp_client.CbpClient` reads `state/ready.json` on
-every call (tokens rotate).
+CBP sidecar: **not auto-launched** (removed from launchers 2026-05-07).
+Launch manually via `python %CBP_RUNNER_DIR%\supervisor.py --detach`
+(default `CBP_RUNNER_DIR` points at a sibling `../cbp-runner` checkout;
+override to anywhere). Missing checkout = client degrades to JSONL.
+Client: `hydra_companions.cbp_client.CbpClient` reads `state/ready.json`
+on every call (tokens rotate).
 
 ## Env flags (kill switches + opt-ins)
 
@@ -262,7 +262,7 @@ declare done only when phase 2 is clean. Drive full cycle via `/audit`.
 
 - Use UTF-8 explicitly; cp1252 crashes on Unicode (dashboard regime emoji + console portfolio block share the theme — both crash on cp1252)
 - `time.time()` has ~15ms Windows resolution; in BaseStream heartbeat or `RESTART_COOLDOWN_S=30s` it silently miscounts — use `time.perf_counter()`
-- Escape parentheses in `.bat` files inside if-blocks; `start_hydra.bat` + `start_all.bat` use nested if around `--resume` and CBP sidecar launch — cmd parser drops branches silently
+- Escape parentheses in `.bat` files inside if-blocks — cmd parser drops branches silently
 - WSL: if distro is `Ubuntu-22.04` instead of `Ubuntu`, `kraken` invocation silently routes nowhere — verify `wsl -l -v`
 - Vite dev server falls off :5173 to next free port if taken; dashboard WS proxy assumes :5173 — verify bound port in Vite startup log
 
