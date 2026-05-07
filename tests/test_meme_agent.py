@@ -226,17 +226,17 @@ def test_all_gates_pass():
 
 def test_exit_profit_target():
     eng = _warmed_engine()
-    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
                    entry_ts=0, candles_held=1)
-    result = eng.evaluate_exit_intracandle(pos, mid_price=1.026, obi=0.1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=1.031, obi=0.1)
     assert result == "profit_target"
 
 
 def test_exit_hard_stop():
     eng = _warmed_engine()
-    pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
+    pos = Position(entry_price=1.00, qty=300.0, notional_usd=300.0,
                    entry_ts=0, candles_held=1)
-    result = eng.evaluate_exit_intracandle(pos, mid_price=0.986, obi=0.1)
+    result = eng.evaluate_exit_intracandle(pos, mid_price=0.989, obi=0.1)
     assert result == "hard_stop"
 
 
@@ -793,3 +793,10 @@ def test_load_session_returns_none_for_corrupt_file():
             f.write("{bad json")
         result = load_session_state(path)
         assert result is None
+
+
+def test_risk_reward_ratio():
+    """R:R must be at least 1:2 to overcome 0.80% taker fee drag."""
+    from hydra_meme_agent import PROFIT_TARGET_PCT, HARD_STOP_PCT
+    rr_ratio = abs(PROFIT_TARGET_PCT / HARD_STOP_PCT)
+    assert rr_ratio >= 2.0, f"R:R ratio {rr_ratio:.1f} is too low for 0.80% fee drag"
