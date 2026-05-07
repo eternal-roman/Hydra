@@ -6,10 +6,11 @@ import time
 import tempfile
 import json as _json
 import os as _os
+from unittest.mock import patch
 from hydra_meme_agent import (
     CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap,
-    TradeRecord, Position, MemeExecutor,
-    TAKER_SLIPPAGE_BPS, SLIPPAGE_CAP_BPS, RSI_PERIOD,
+    TradeRecord, Position, MemeExecutor, _query_fill, _cancel_order,
+    TAKER_SLIPPAGE_BPS, SLIPPAGE_CAP_BPS, RSI_PERIOD, SELL_MAX_RETRIES,
 )
 
 
@@ -552,3 +553,100 @@ def test_executor_win_rate_no_div_zero():
     trade_log = []
     win_rate = sum(1 for t in trade_log if t.net_pnl > 0) / max(len(trade_log), 1)
     assert win_rate == 0.0
+
+
+# ─── Fill Verification Tests ─────────────────────────────────────────────────
+
+def test_query_fill_empty_txid():
+    assert _query_fill("") is None
+    assert _query_fill(None) is None
+
+
+def test_query_fill_parses_closed_order():
+    mock_response = {
+        "ABC123": {
+            "status": "closed",
+            "price": "0.16520",
+            "vol_exec": "3628.50000",
+        }
+    }
+    with patch("hydra_meme_agent._kraken_cli", return_value=mock_response):
+        result = _query_fill("ABC123")
+    assert result is not None
+    assert result["status"] == "filled"
+    assert result["avg_price"] == 0.16520
+    assert result["vol_exec"] == 3628.5
+
+
+def test_query_fill_parses_pending_order():
+    mock_response = {
+        "ABC123": {
+            "status": "open",
+            "price": "0.0",
+            "vol_exec": "0.0",
+        }
+    }
+    with patch("hydra_meme_agent._kraken_cli", return_value=mock_response):
+        result = _query_fill("ABC123")
+    assert result is not None
+    assert result["status"] == "open"
+
+
+def test_query_fill_handles_cli_error():
+    with patch("hydra_meme_agent._kraken_cli", return_value={"error": "timeout"}):
+        result = _query_fill("ABC123")
+    assert result is None
+
+
+def test_cancel_order_empty_txid():
+    result = _cancel_order("")
+    assert "error" in result
+
+
+def test_cancel_order_calls_cli():
+    with patch("hydra_meme_agent._kraken_cli", return_value={"count": 1}) as mock_cli:
+        result = _cancel_order("XYZ789")
+    mock_cli.assert_called_once_with(["order", "cancel", "XYZ789", "--yes"])
+    assert result == {"count": 1}
+
+
+# ─── Fill-Verified Executor Tests ─────────────────────────────────────────────
+
+def test_place_buy_uses_actual_fill_price():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    order_response = {"txid": ["BUY001"]}
+    fill_response = {"status": "filled", "avg_price": 0.16500, "vol_exec": 3636.36}
+    with patch("hydra_meme_agent._kraken_cli", return_value=order_response), \
+         patch("hydra_meme_agent._query_fill", return_value=fill_response):
+        pos = exec_.place_buy(ask=0.16540)
+    assert pos is not None
+    assert pos.entry_price == 0.16500
+    assert pos.qty == 3636.36
+
+
+def test_place_buy_falls_back_to_limit_on_fill_failure():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    order_response = {"txid": ["BUY002"]}
+    with patch("hydra_meme_agent._kraken_cli", return_value=order_response), \
+         patch("hydra_meme_agent._query_fill", return_value=None):
+        pos = exec_.place_buy(ask=0.16540)
+    assert pos is not None
+    assert pos.entry_price == exec_._buy_limit_price(0.16540)
+
+
+def test_place_sell_uses_actual_fill_price():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    pos = Position(entry_price=0.16000, qty=3750.0, notional_usd=600.0,
+                   entry_ts=1000, candles_held=2)
+    order_response = {"txid": ["SELL001"]}
+    fill_response = {"status": "filled", "avg_price": 0.16410, "vol_exec": 3750.0}
+    with patch("hydra_meme_agent._kraken_cli", return_value=order_response), \
+         patch("hydra_meme_agent._query_fill", return_value=fill_response):
+        result = exec_.place_sell(pos, bid=0.16400, reason="profit_target")
+    assert result is not None
+    assert result["record"].exit_price == 0.16410
+
+
+def test_sell_max_retries_constant():
+    assert SELL_MAX_RETRIES > 0
+    assert SELL_MAX_RETRIES <= 10

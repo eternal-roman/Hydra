@@ -57,6 +57,7 @@ TIME_STOP_CANDLES = 3
 OBI_LEVELS = 5
 TAKER_SLIPPAGE_BPS = 5       # 0.05% — limit at ask+0.05% for BUY
 SLIPPAGE_CAP_BPS = 10        # 0.10% — reject if book moves more
+SELL_MAX_RETRIES = 5         # abandon after N failed sell attempts
 
 COMPETITION_ANOMALY_RATIO = 5.0
 COMPETITION_EMA_ALPHA = 1 / 7
@@ -460,6 +461,7 @@ def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
             time.sleep(wait)
         _cli_last_call = time.time()
     quoted = " ".join(shlex.quote(str(a)) for a in args)
+    cmd_str = "source ~/.cargo/env"
     api_key = os.environ.get("KRAKEN_API_KEY")
     api_secret = os.environ.get("KRAKEN_API_SECRET")
     if api_key and api_secret:
@@ -470,11 +472,14 @@ def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         stdout = result.stdout.strip()
+        rc = result.returncode
         if not stdout:
-            return {"error": f"Empty response (exit {result.returncode})"}
+            return {"error": f"Empty response (exit code {rc})"}
         data = json.loads(stdout)
         if isinstance(data, dict) and "error" in data:
             return data
+        if rc != 0:
+            return {"error": f"Non-zero exit code {rc}", "partial": data}
         return data
     except subprocess.TimeoutExpired:
         return {"error": "timeout", "retryable": True}
@@ -482,6 +487,33 @@ def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
         return {"error": f"JSON parse: {e}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _query_fill(txid: str) -> Optional[dict]:
+    """Query order fill status via CLI. Returns {status, avg_price, vol_exec} or None."""
+    if not txid:
+        return None
+    result = _kraken_cli(["query-orders", txid])
+    if "error" in result:
+        return None
+    order_data = result.get(txid)
+    if not order_data:
+        order_data = next(iter(result.values()), None) if result else None
+    if not order_data or not isinstance(order_data, dict):
+        return None
+    status = order_data.get("status", "")
+    return {
+        "status": "filled" if status == "closed" else status,
+        "avg_price": float(order_data.get("price", 0)),
+        "vol_exec": float(order_data.get("vol_exec", 0)),
+    }
+
+
+def _cancel_order(txid: str) -> dict:
+    """Cancel a specific order by txid."""
+    if not txid:
+        return {"error": "no txid"}
+    return _kraken_cli(["order", "cancel", txid, "--yes"])
 
 
 # ─── Meme Executor ─────────────────────────────────────────────────────────────
@@ -573,10 +605,19 @@ class MemeExecutor:
         if "error" in result:
             return None
         order_id = result.get("txid", [""])[0] if isinstance(result.get("txid"), list) else result.get("txid", "")
+        fill = _query_fill(str(order_id))
+        if fill and fill["status"] == "filled" and fill["avg_price"] > 0:
+            actual_price = fill["avg_price"]
+            actual_qty = fill["vol_exec"] if fill["vol_exec"] > 0 else qty
+        else:
+            actual_price = limit_price
+            actual_qty = qty
+            if fill:
+                print(f"[APEX] BUY fill check: status={fill['status']} — using limit price as estimate")
         return Position(
-            entry_price=limit_price,
-            qty=qty,
-            notional_usd=self.position_size,
+            entry_price=actual_price,
+            qty=actual_qty,
+            notional_usd=actual_price * actual_qty,
             entry_ts=int(time.time()),
             order_id=str(order_id),
         )
@@ -601,7 +642,14 @@ class MemeExecutor:
         ])
         if "error" in result:
             return None
-        exit_price = limit_price
+        sell_txid = result.get("txid", [""])[0] if isinstance(result.get("txid"), list) else result.get("txid", "")
+        fill = _query_fill(str(sell_txid))
+        if fill and fill["status"] == "filled" and fill["avg_price"] > 0:
+            exit_price = fill["avg_price"]
+        else:
+            exit_price = limit_price
+            if fill:
+                print(f"[APEX] SELL fill check: status={fill['status']} — using limit price as estimate")
         net_pnl = self._compute_net_pnl(position, exit_price)
         self.record_pnl(net_pnl)
         gross = (exit_price - position.entry_price) * position.qty
@@ -780,6 +828,7 @@ class MemeAgent:
         self._candle_agg = CandleAggregator(pair, self._on_bar)
         self._position: Optional[Position] = None
         self._sell_pending_reason: Optional[str] = None
+        self._sell_retry_count: int = 0
         self._exit_lock: asyncio.Lock = asyncio.Lock()
         self._session_path = session_path
         self._journal_path = journal_path
@@ -960,15 +1009,29 @@ class MemeAgent:
                 self._obi_poller.mid_price or None,
             )
             if result is None:
-                self._sell_pending_reason = reason
-                await self._broadcast({"type": "sell_failed", "reason": reason,
-                                       "pair": self.pair})
+                self._sell_retry_count += 1
+                if self._sell_retry_count >= SELL_MAX_RETRIES:
+                    print(f"[APEX] SELL FAILED after {SELL_MAX_RETRIES} retries — "
+                          f"abandoning auto-sell for {self.pair} "
+                          f"(qty={self._position.qty}, entry={self._position.entry_price})")
+                    print(f"[APEX] WARNING: position remains open on exchange — close manually")
+                    self._sell_pending_reason = None
+                    self._sell_retry_count = 0
+                    await self._broadcast({"type": "sell_abandoned",
+                                           "reason": reason, "pair": self.pair,
+                                           "retries": SELL_MAX_RETRIES})
+                else:
+                    self._sell_pending_reason = reason
+                    await self._broadcast({"type": "sell_failed", "reason": reason,
+                                           "pair": self.pair,
+                                           "retry": self._sell_retry_count})
                 return
             record: TradeRecord = result["record"]
             self._trade_log.append(record)
             await asyncio.to_thread(append_journal, record, self._journal_path)
             self._position = None
             self._sell_pending_reason = None
+            self._sell_retry_count = 0
         await self._broadcast({"type": "trade_closed",
                                "net_pnl": record.net_pnl,
                                "exit_reason": reason,
@@ -1252,11 +1315,36 @@ class MemeAgent:
         except asyncio.CancelledError:
             print("[APEX] Shutting down...")
         finally:
+            self._candle_agg.stop()
+            if self._position is not None:
+                print(f"[APEX] Shutdown with open position — attempting exit sell")
+                try:
+                    await asyncio.to_thread(self._obi_poller.poll)
+                    if self._obi_poller.best_bid > 0:
+                        await self._exit_position("shutdown")
+                except Exception as e:
+                    print(f"[APEX] Shutdown sell failed: {e}")
+                if self._position is not None:
+                    if self._position.order_id:
+                        try:
+                            await asyncio.to_thread(_cancel_order, self._position.order_id)
+                        except Exception:
+                            pass
+                    print(f"[APEX] WARNING: open position remains — "
+                          f"{self._position.qty} {self.pair} @ entry "
+                          f"{self._position.entry_price} — close manually on Kraken")
+            open_pos = None
+            if self._position is not None:
+                p = self._position
+                open_pos = {"entry_price": p.entry_price, "qty": p.qty,
+                            "notional_usd": p.notional_usd, "entry_ts": p.entry_ts,
+                            "order_id": p.order_id}
             save_session(SessionState(
                 pair=self.pair, engine_state="idle",
                 session_pnl=self._executor._daily_pnl,
                 daily_pnl=self._executor._daily_pnl,
                 trade_count=len(self._trade_log),
+                open_position=open_pos,
             ), self._session_path)
             server.close()
             await server.wait_closed()
