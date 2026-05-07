@@ -16,6 +16,7 @@ const C = {
 };
 
 const APEX_WS = "ws://localhost:8766";
+const APEX_DAILY_CAP_USD = 30;
 
 function GateDot({ pass, label, value }) {
   return (
@@ -31,7 +32,7 @@ function GateDot({ pass, label, value }) {
   );
 }
 
-function OBIGauge({ obi }) {
+function OBIGauge({ obi = 0 }) {
   const pct = ((obi + 1) / 2) * 100;
   const color = obi > 0.2 ? C.accent : obi < -0.2 ? C.danger : C.warn;
   return (
@@ -81,7 +82,7 @@ function SignalBanner({ allPass, engineState }) {
   );
 }
 
-function PositionPanel({ position, midPrice, sessionStats }) {
+function PositionPanel({ position, midPrice }) {
   if (!position) {
     return (
       <div style={{ padding: 12, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}` }}>
@@ -128,7 +129,7 @@ function PositionPanel({ position, midPrice, sessionStats }) {
         }} />
       </div>
       <div style={{ marginTop: 8, fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-        {position.candles_held} candle{position.candles_held !== 1 ? "s" : ""} held · time stop at {3 - position.candles_held} more
+        {position.candles_held ?? 0} candle{(position.candles_held ?? 0) !== 1 ? "s" : ""} held · time stop at {3 - (position.candles_held ?? 0)} more
       </div>
     </div>
   );
@@ -136,7 +137,7 @@ function PositionPanel({ position, midPrice, sessionStats }) {
 
 function SessionStats({ stats, dailyCap }) {
   const remaining = dailyCap + (stats?.daily_loss ?? 0);
-  const usedPct = Math.max(0, Math.min(100, ((dailyCap - remaining) / dailyCap) * 100));
+  const usedPct = dailyCap > 0 ? Math.max(0, Math.min(100, ((dailyCap - remaining) / dailyCap) * 100)) : 0;
   return (
     <div style={{ padding: 12, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}`,
                   marginTop: 8 }}>
@@ -188,8 +189,8 @@ function TradeLog({ trades }) {
           </tr>
         </thead>
         <tbody>
-          {[...trades].reverse().map((t, i) => (
-            <tr key={i} style={{ borderBottom: `1px solid ${C.border}20` }}>
+          {[...trades].reverse().map((t) => (
+            <tr key={t.exit_ts} style={{ borderBottom: `1px solid ${C.border}20` }}>
               <td style={{ padding: "4px 8px", color: C.muted }}>
                 {new Date(t.exit_ts * 1000).toLocaleTimeString()}
               </td>
@@ -246,7 +247,7 @@ function TradingView({ state, dailyCap }) {
 
         {/* Right — position + stats */}
         <div>
-          <PositionPanel position={position} midPrice={midPrice ?? 0} sessionStats={sessionStats} />
+          <PositionPanel position={position} midPrice={midPrice ?? 0} />
           <SessionStats stats={sessionStats} dailyCap={dailyCap} />
         </div>
       </div>
@@ -268,6 +269,7 @@ function TierBar({ sharePct }) {
     { label: "Top 10%", pct: 10, color: C.blue },
     { label: "Top 25%", pct: 25, color: C.warn },
   ];
+  // sharePct is fraction of total market volume; *500 maps 0.2% share → top-100% (rough rank heuristic)
   const userPos = Math.min(sharePct * 500, 100);
   const color = userPos <= 5 ? C.accent : userPos <= 10 ? C.blue : userPos <= 25 ? C.warn : C.danger;
   return (
@@ -303,7 +305,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair }) {
 
   function getShares(token, posSize) {
     const baseline = token.baseline_volume_7d ?? 3_200_000;
-    const price = 0.165;
+    const price = token.price ?? 0.165; // fallback: PLAY/USD snapshot price
     const marketUsd = baseline * 6 * price;
     const tradesPerDay = 5;
     const userUsd = tradesPerDay * posSize * 2;
@@ -433,7 +435,7 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
             ["Volume", `${(alert.volume / 1_000_000).toFixed(1)}M`],
             ["Baseline", `${(alert.baseline / 1_000_000).toFixed(1)}M`],
             ["Ratio", `${alert.ratio?.toFixed(1)}× baseline`],
-            ["Type", `${alert.competition_type || "unknown"} (inferred)`],
+            ["Type", `${alert.competition_type || "unknown"}${!alert.competition_type_confirmed ? " (inferred)" : ""}`],
           ].map(([l, v]) => (
             <div key={l} style={{ padding: 8, background: C.bg, borderRadius: 6 }}>
               <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{l}</div>
@@ -547,6 +549,7 @@ export default function MemeTab() {
     return () => {
       clearTimeout(reconnectRef.current);
       wsRef.current?.close();
+      wsRef.current = null;
     };
   }, [connect]);
 
@@ -597,7 +600,7 @@ export default function MemeTab() {
       </div>
 
       {subView === "trading" && (
-        <TradingView state={tradingState} dailyCap={30} />
+        <TradingView state={tradingState} dailyCap={APEX_DAILY_CAP_USD} />
       )}
       {subView === "discover" && (
         <DiscoverView
