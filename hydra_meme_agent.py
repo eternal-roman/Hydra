@@ -715,7 +715,14 @@ class MemeAgent:
 
     async def _ws_handler(self, websocket) -> None:
         self._clients.add(websocket)
-        # Send current candle buffer to new client so chart populates immediately
+        # Send initial state snapshot so a freshly-loaded tab syncs immediately
+        await websocket.send(json.dumps({
+            "type": "initial_state",
+            "engine_state": self._engine_state,
+            "pair": self.pair,
+            "bars_ready": len(self._signal_engine._bars),
+            "bars_required": WARMUP_BARS,
+        }))
         bars = self._signal_engine._bars
         if bars:
             await websocket.send(json.dumps({
@@ -777,6 +784,11 @@ class MemeAgent:
         })
         if not self._signal_engine.is_warmed_up():
             self._engine_state = "warmup"
+            await self._broadcast({
+                "type": "warmup_progress",
+                "bars_ready": len(self._signal_engine._bars),
+                "bars_required": WARMUP_BARS,
+            })
             return
         self._engine_state = "running"
         # Broadcast signal state

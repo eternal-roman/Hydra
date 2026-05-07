@@ -472,7 +472,7 @@ function TradingView({ state, dailyCap, connected, pair, onStop }) {
         {/* RIGHT — position + session */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <PositionPanel position={position} midPrice={midPrice ?? 0} />
-          <SessionStats stats={sessionStats} dailyCap={dailyCap} />
+          <SessionStats stats={sessionStats ?? {}} dailyCap={dailyCap} />
         </div>
       </div>
 
@@ -577,8 +577,9 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
 
   // Capital summary data
   const capRemaining = dailyCap + (sessionStats?.daily_loss ?? 0);
-  const capUsed = dailyCap - capRemaining;
-  const hasCapital = capRemaining >= POSITION_SIZE_USD || !connected;
+  const capUsed = Math.max(0, dailyCap - capRemaining);
+  // Gate on daily-loss budget (capRemaining > 0), not account balance
+  const hasCapital = !connected || capRemaining > 0;
 
   // Build display rows: live tokens or seed list
   const displayTokens = connected && tokens.length > 0
@@ -774,7 +775,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
           padding: 16, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}`,
         }}>
           {[
-            ["Available", `$${capRemaining.toFixed(2)}`, capRemaining >= POSITION_SIZE_USD ? C.accent : C.danger],
+            ["Available", `$${capRemaining.toFixed(2)}`, capRemaining > 0 ? C.accent : C.danger],
             ["Locked", activeToken ? `$${POSITION_SIZE_USD}` : "$0", C.text],
             ["Daily Cap", `$${dailyCap.toFixed(0)}`, C.muted],
             ["Used Today", `$${capUsed.toFixed(2)}`, capUsed > 0 ? C.danger : C.muted],
@@ -902,6 +903,13 @@ export default function MemeTab() {
       try {
         const msg = JSON.parse(evt.data);
         switch (msg.type) {
+          case "initial_state":
+            setEngineState(msg.engine_state ?? "idle");
+            if (msg.pair) setEnginePair(msg.pair);
+            break;
+          case "warmup_progress":
+            setEngineState("warmup");
+            break;
           case "candle_history":
             setBars(msg.bars ?? []);
             break;
