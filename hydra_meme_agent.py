@@ -1296,7 +1296,7 @@ class MemeAgent:
             print("[APEX] Kill switch HYDRA_APEX_DISABLED=1 — not starting")
             return
         await self._seed_history()
-        server = await websockets.serve(self._ws_handler, "localhost", WS_PORT)
+        server = await websockets.serve(self._ws_handler, "127.0.0.1", WS_PORT)
         print(f"[APEX] WebSocket server on ws://localhost:{WS_PORT}")
         if test_fire:
             await self._test_fire()
