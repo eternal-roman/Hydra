@@ -104,11 +104,16 @@ def _make_bar(close=1.0, volume=1000.0, ts=0):
                      close=close, vwap=close, volume=volume, count=10)
 
 
-def _warmed_engine(n_bars=15, close=1.0, volume=1000.0):
-    """Return a SignalEngine with n_bars of history loaded."""
+def _warmed_engine(n_bars=15, close=1.0, volume=1000.0, flat=False):
+    """Return a SignalEngine with n_bars of history loaded.
+
+    flat=True keeps all closes identical so RSI stays at 50 (neutral).
+    Default adds a tiny uptrend for VWAP alignment tests.
+    """
     eng = SignalEngine()
     for i in range(n_bars):
-        eng.add_bar(_make_bar(close=close + i * 0.001, volume=volume, ts=i * 300))
+        c = close if flat else close + i * 0.001
+        eng.add_bar(_make_bar(close=c, volume=volume, ts=i * 300))
     return eng
 
 
@@ -251,7 +256,7 @@ def test_exit_no_trigger_intracandle():
 
 
 def test_exit_time_stop():
-    eng = _warmed_engine()
+    eng = _warmed_engine(flat=True)
     pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
                    entry_ts=0, candles_held=3)
     bar = _make_bar(close=1.01, volume=1000.0)
@@ -272,7 +277,7 @@ def test_exit_rsi_exhaust():
 
 
 def test_exit_volume_death():
-    eng = _warmed_engine(volume=1000.0)
+    eng = _warmed_engine(volume=1000.0, flat=True)
     pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
                    entry_ts=0, candles_held=1)
     dead_bar = _make_bar(close=1.01, volume=200.0)  # 0.2x baseline
@@ -281,7 +286,7 @@ def test_exit_volume_death():
 
 
 def test_exit_no_trigger_bar():
-    eng = _warmed_engine(volume=1000.0)
+    eng = _warmed_engine(volume=1000.0, flat=True)
     pos = Position(entry_price=1.00, qty=600.0, notional_usd=600.0,
                    entry_ts=0, candles_held=1)
     normal_bar = _make_bar(close=1.01, volume=1000.0)
@@ -363,7 +368,7 @@ def test_competition_detector_suppression_expired():
 
 # ─── Session State & Persistence Tests ────────────────────────────────────────
 
-from hydra_meme_agent import SessionState, save_session, load_session, append_journal
+from hydra_meme_agent import SessionState, save_session, append_journal
 
 
 def test_save_and_load_session():
@@ -372,10 +377,11 @@ def test_save_and_load_session():
         state = SessionState(pair="PLAY/USD", engine_state="running",
                              session_pnl=10.20, daily_pnl=10.20, trade_count=2)
         save_session(state, path)
-        loaded = load_session(path)
-        assert loaded.pair == "PLAY/USD"
-        assert loaded.session_pnl == 10.20
-        assert loaded.trade_count == 2
+        with open(path) as f:
+            data = _json.load(f)
+        assert data["pair"] == "PLAY/USD"
+        assert data["session_pnl"] == 10.20
+        assert data["trade_count"] == 2
 
 
 def test_save_session_atomic(tmp_path):

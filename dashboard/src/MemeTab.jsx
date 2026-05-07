@@ -31,42 +31,66 @@ const SEED_PAIRS = [
 
 // ─── Candle Chart (hero element) ─────────────────────────────────────────────
 
-const CHART_VW = 480;
+const CHART_FALLBACK_W = 600;
+
+function useContainerWidth(fallback) {
+  const ref = useRef(null);
+  const [w, setW] = useState(fallback);
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.round(e.contentRect.width)));
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w];
+}
 
 function CandleChart({ bars, height = 160 }) {
+  const [containerRef, cw] = useContainerWidth(CHART_FALLBACK_W);
+
   if (!bars || bars.length === 0) {
     return (
-      <div style={{ width: "100%", height, display: "flex", alignItems: "center",
-                    justifyContent: "center", background: "#0d0d0f", borderRadius: 6,
-                    border: `1px solid ${C.border}` }}>
+      <div ref={containerRef} style={{ width: "100%", height, display: "flex",
+                    alignItems: "center", justifyContent: "center" }}>
         <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
           Waiting for candles… (warmup: 15 bars)
         </span>
       </div>
     );
   }
-  const pad = { top: 8, bottom: 8, left: 4, right: 4 };
-  const innerW = CHART_VW - pad.left - pad.right;
+  const priceGutter = 54;
+  const pad = { top: 10, bottom: 10, left: 6, right: priceGutter };
+  const innerW = cw - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
   const n = bars.length;
   const slotW = innerW / n;
-  const candleW = Math.max(3, Math.floor(slotW * 0.7));
+  const candleW = Math.max(4, Math.min(slotW * 0.78, 20));
   const minP = Math.min(...bars.map(b => b.low));
   const maxP = Math.max(...bars.map(b => b.high));
   const range = maxP - minP || minP * 0.01 || 1;
 
   function py(p) { return pad.top + innerH - ((p - minP) / range) * innerH; }
 
+  const gridSteps = [0, 0.25, 0.5, 0.75, 1];
   return (
-    <svg viewBox={`0 0 ${CHART_VW} ${height}`} width="100%" height={height}
+    <div ref={containerRef} style={{ width: "100%" }}>
+    <svg viewBox={`0 0 ${cw} ${height}`} width={cw} height={height}
          style={{ display: "block" }}>
-      {/* Price grid lines */}
-      {[0.25, 0.5, 0.75].map(f => (
-        <line key={f}
-          x1={pad.left} y1={pad.top + innerH * (1 - f)}
-          x2={pad.left + innerW} y2={pad.top + innerH * (1 - f)}
-          stroke={C.border} strokeWidth={0.5} strokeDasharray="3,3" />
-      ))}
+      {gridSteps.map(f => {
+        const y = pad.top + innerH * (1 - f);
+        const price = minP + range * f;
+        return (
+          <g key={f}>
+            <line x1={pad.left} y1={y} x2={pad.left + innerW} y2={y}
+                  stroke={C.border} strokeWidth={0.4} strokeDasharray="2,3" />
+            <text x={cw - 4} y={y + 3}
+                  fontFamily={C.mono} fontSize={9} fill={C.muted} textAnchor="end"
+                  opacity={0.7}>
+              {price.toFixed(5)}
+            </text>
+          </g>
+        );
+      })}
       {bars.map((b, i) => {
         const cx = pad.left + (i + 0.5) * slotW;
         const x = cx - candleW / 2;
@@ -83,39 +107,39 @@ function CandleChart({ bars, height = 160 }) {
           </g>
         );
       })}
-      {/* Price labels */}
-      <text x={pad.left + innerW - 2} y={pad.top + 10}
-            fontFamily={C.mono} fontSize={9} fill={C.muted} textAnchor="end">
-        {maxP.toFixed(5)}
-      </text>
-      <text x={pad.left + innerW - 2} y={pad.top + innerH}
-            fontFamily={C.mono} fontSize={9} fill={C.muted} textAnchor="end">
-        {minP.toFixed(5)}
-      </text>
     </svg>
+    </div>
   );
 }
 
 function VolumeHistogram({ bars, height = 44 }) {
-  if (!bars || bars.length === 0) return null;
+  const [containerRef, cw] = useContainerWidth(CHART_FALLBACK_W);
+
+  if (!bars || bars.length === 0) return <div ref={containerRef} />;
+  const priceGutter = 54;
+  const drawW = cw - priceGutter;
   const maxVol = Math.max(...bars.map(b => b.volume)) || 1;
   const n = bars.length;
-  const slotW = CHART_VW / n;
-  const candleW = Math.max(3, Math.floor(slotW * 0.7));
+  const slotW = drawW / n;
+  const candleW = Math.max(4, Math.min(slotW * 0.78, 20));
   return (
-    <svg viewBox={`0 0 ${CHART_VW} ${height}`} width="100%" height={height}
-         style={{ display: "block", marginTop: 3 }}>
+    <div ref={containerRef} style={{ width: "100%" }}>
+    <svg viewBox={`0 0 ${cw} ${height}`} width={cw} height={height}
+         style={{ display: "block" }}>
+      <line x1={0} y1={0.5} x2={cw} y2={0.5}
+            stroke={C.border} strokeWidth={0.5} />
       {bars.map((b, i) => {
-        const cx = (i + 0.5) * slotW;
+        const cx = 6 + (i + 0.5) * slotW;
         const x = cx - candleW / 2;
-        const barH = Math.max(1, (b.volume / maxVol) * (height - 4));
+        const barH = Math.max(1, (b.volume / maxVol) * (height - 6));
         return (
           <rect key={b.ts}
-            x={x} y={height - barH} width={candleW} height={barH}
-            fill={b.close >= b.open ? C.accent : C.danger} opacity={0.4} rx={1} />
+            x={x} y={height - barH - 2} width={candleW} height={barH}
+            fill={b.close >= b.open ? C.accent : C.danger} opacity={0.35} rx={1} />
         );
       })}
     </svg>
+    </div>
   );
 }
 
@@ -125,7 +149,7 @@ function OBIGauge({ obi = 0 }) {
   const pct = ((obi + 1) / 2) * 100;
   const color = obi > 0.2 ? C.accent : obi < -0.2 ? C.danger : C.warn;
   return (
-    <div style={{ marginTop: 10 }}>
+    <div>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
         <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>SELL PRESSURE</span>
         <span style={{ fontFamily: C.mono, fontSize: 12, color, fontWeight: 700 }}>
@@ -433,47 +457,49 @@ function TradingView({ state, dailyCap, connected, pair, onStop }) {
         </div>
       </div>
 
-      {/* Main 3-column grid — left column wider for chart */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px 220px", gap: 12,
+      {/* Main 2-column grid — chart left, panels right */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 12,
                     marginBottom: 12 }}>
         {/* LEFT — hero chart */}
-        <div style={{ padding: 16, background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 10,
+        <div style={{ background: "#0d0d0f", borderRadius: 8,
+                      border: `1px solid ${C.border}`, overflow: "hidden",
+                      display: "flex", flexDirection: "column" }}>
+          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted,
+                        padding: "10px 14px 6px",
                         textTransform: "uppercase", letterSpacing: "0.1em",
-                        display: "flex", justifyContent: "space-between" }}>
+                        display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>5-min Candles</span>
             {bars && bars.length > 0 && (
-              <span style={{ color: C.muted }}>{bars.length} bars</span>
+              <span style={{ fontSize: 9, opacity: 0.6 }}>{bars.length} bars</span>
             )}
           </div>
-          <CandleChart bars={bars} height={160} />
-          <VolumeHistogram bars={bars} height={44} />
-          <OBIGauge obi={obi ?? 0} />
+          <CandleChart bars={bars} height={340} />
+          <VolumeHistogram bars={bars} height={72} />
+          <div style={{ padding: "6px 14px 10px" }}>
+            <OBIGauge obi={obi ?? 0} />
+          </div>
         </div>
 
-        {/* MIDDLE — gates + signal */}
-        <div style={{ padding: 16, background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                        textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</div>
-          <GateDot pass={gates?.volume_spike} label="Vol 1.8×"
-                   value={gates?.vol_ema_value ? `${(gates.vol_ema_value / 1000).toFixed(1)}k` : null} />
-          <GateDot pass={gates?.obi} label="OBI >0.20"
-                   value={obi != null ? obi.toFixed(3) : null} />
-          <GateDot pass={gates?.vwap_align} label="VWAP align"
-                   value={gates?.vwap_value ? `$${parseFloat(gates.vwap_value).toFixed(5)}` : null} />
-          <GateDot pass={gates?.rsi_window} label="RSI 45–78"
-                   value={gates?.rsi_value != null ? String(gates.rsi_value) : null} />
-          <GateDot pass={gates?.ask_wall_clear} label="Ask wall <$500"
-                   value={null} />
-          <SignalBanner allPass={gates?.all_pass ?? false} engineState={engineState} />
-        </div>
-
-        {/* RIGHT — position + session */}
+        {/* RIGHT — position, session, gates */}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <PositionPanel position={position} midPrice={midPrice ?? 0} />
           <SessionStats stats={sessionStats ?? {}} dailyCap={dailyCap} />
+          <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                        border: `1px solid ${C.border}`, flex: 1 }}>
+            <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
+                          textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</div>
+            <GateDot pass={gates?.volume_spike} label="Vol 1.8×"
+                     value={gates?.vol_ema_value ? `${(gates.vol_ema_value / 1000).toFixed(1)}k` : null} />
+            <GateDot pass={gates?.obi} label="OBI >0.20"
+                     value={obi != null ? obi.toFixed(3) : null} />
+            <GateDot pass={gates?.vwap_align} label="VWAP align"
+                     value={gates?.vwap_value ? `$${parseFloat(gates.vwap_value).toFixed(5)}` : null} />
+            <GateDot pass={gates?.rsi_window} label="RSI 45–78"
+                     value={gates?.rsi_value != null ? String(gates.rsi_value) : null} />
+            <GateDot pass={gates?.ask_wall_clear} label="Ask wall <$500"
+                     value={null} />
+            <SignalBanner allPass={gates?.all_pass ?? false} engineState={engineState} />
+          </div>
         </div>
       </div>
 
@@ -523,11 +549,11 @@ function ScanCountdown({ lastScanTs }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [lastScanTs]);
-  if (secsLeft === null) return <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>scanning…</span>;
+  if (secsLeft === null) return <span style={{ fontFamily: C.mono, fontSize: 15, color: C.muted }}>scanning…</span>;
   const m = Math.floor(secsLeft / 60);
   const s = secsLeft % 60;
   return (
-    <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+    <span style={{ fontFamily: C.mono, fontSize: 15, color: C.muted }}>
       next scan in {m}:{String(s).padStart(2, "0")}
     </span>
   );
@@ -535,10 +561,9 @@ function ScanCountdown({ lastScanTs }) {
 
 // ─── Discover View ────────────────────────────────────────────────────────────
 
-function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected, lastScanTs, wsRef, sessionStats, dailyCap, scanInProgress }) {
+function DiscoverView({ tokens, onStartEngine, enginePair, connected, lastScanTs, wsRef, sessionStats, dailyCap, scanInProgress }) {
   const [levers, setLevers] = useState({});
   const [activeToken, setActiveToken] = useState(enginePair);
-  const [scanningNow, setScanningNow] = useState(false);
 
   useEffect(() => { setActiveToken(enginePair); }, [enginePair]);
 
@@ -557,8 +582,6 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
   function handleScanNow() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "scan_now" }));
-      setScanningNow(true);
-      setTimeout(() => setScanningNow(false), 5000);
     }
   }
 
@@ -596,7 +619,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
           padding: "10px 16px", background: C.panel, borderRadius: 8,
           border: `1px solid ${C.border}`,
         }}>
-          <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>
+          <span style={{ fontFamily: C.mono, fontSize: 15, color: C.text }}>
             {tokens.filter(t => t.current_volume != null).length}/{tokens.length} tokens scanned
           </span>
           <span style={{ color: C.border }}>·</span>
@@ -604,22 +627,22 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
           {tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length > 0 && (
             <>
               <span style={{ color: C.border }}>·</span>
-              <span style={{ fontFamily: C.mono, fontSize: 11, color: C.warn, fontWeight: 700 }}>
+              <span style={{ fontFamily: C.mono, fontSize: 15, color: C.warn, fontWeight: 700 }}>
                 {tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length} anomal{tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length === 1 ? "y" : "ies"}
               </span>
             </>
           )}
           <button
             onClick={handleScanNow}
-            disabled={scanningNow}
+            disabled={scanInProgress}
             style={{
               marginLeft: "auto", padding: "5px 14px", borderRadius: 6,
               border: `1px solid ${C.border}`, background: "transparent",
-              color: scanningNow ? C.muted : C.text,
-              fontFamily: C.mono, fontSize: 11, cursor: scanningNow ? "default" : "pointer",
+              color: scanInProgress ? C.muted : C.text,
+              fontFamily: C.mono, fontSize: 14, cursor: scanInProgress ? "default" : "pointer",
             }}
           >
-            {scanningNow ? "Scanning…" : "Scan Now"}
+            {scanInProgress ? "Scanning…" : "Scan Now"}
           </button>
         </div>
       ) : (
@@ -634,7 +657,7 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               {["Token", "Vol 24h", "7d Baseline", "Anomaly", "Type", "Capital", "Trade"].map(h => (
                 <th key={h} style={{
-                  padding: "8px 12px", textAlign: "left", fontSize: 10,
+                  padding: "12px 14px", textAlign: "left", fontSize: 13,
                   color: C.muted, fontWeight: 400, textTransform: "uppercase",
                   letterSpacing: "0.07em", whiteSpace: "nowrap",
                 }}>{h}</th>
@@ -642,53 +665,60 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
             </tr>
           </thead>
           <tbody>
-            {displayTokens.map(token => {
+            {displayTokens.map((token, idx) => {
               const isAnomaly = (token.anomaly_ratio ?? 0) >= 5;
               const isActive = activeToken === token.pair;
-              const isBusy = !!activeToken && activeToken !== token.pair;
+              const isEnginePair = enginePair === token.pair;
               const capOk = hasCapital;
-              const canToggle = connected && capOk && !isBusy;
+              const canToggle = connected && capOk && isEnginePair;
+              const evenRow = idx % 2 === 0;
 
               return (
                 <tr key={token.pair} style={{
-                  borderBottom: `1px solid ${C.border}20`,
-                  background: isActive ? `${C.purple}08` : isAnomaly ? `${C.warn}05` : "transparent",
+                  borderBottom: `1px solid ${C.border}25`,
+                  background: isActive ? `${C.accent}12`
+                            : isAnomaly ? `${C.warn}0c`
+                            : evenRow ? "#1a1a1f" : C.panel,
+                  borderLeft: isAnomaly ? `3px solid ${C.warn}` : isActive ? `3px solid ${C.accent}` : "3px solid transparent",
+                  boxShadow: isActive ? `inset 0 1px 0 ${C.accent}15, inset 0 -1px 0 ${C.accent}15`
+                           : `inset 0 1px 0 #ffffff04`,
+                  transition: "background 0.3s",
                 }}>
-                  <td style={{ padding: "10px 12px" }}>
-                    <div style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700,
+                  <td style={{ padding: "12px 14px" }}>
+                    <div style={{ fontFamily: C.mono, fontSize: 16, fontWeight: 700,
                                   color: C.text }}>{token.pair}</div>
                   </td>
-                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
+                  <td style={{ padding: "12px 14px", fontFamily: C.mono, fontSize: 15,
                                 color: C.text }}>
                     {token.current_volume != null ? fmtVol(token.current_volume)
-                      : scanInProgress ? <span style={{ color: C.muted, fontSize: 10 }}>scanning…</span>
+                      : scanInProgress ? <span style={{ color: C.muted, fontSize: 13 }}>scanning…</span>
                       : "—"}
                   </td>
-                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
+                  <td style={{ padding: "12px 14px", fontFamily: C.mono, fontSize: 15,
                                 color: C.muted }}>{fmtVol(token.baseline_volume_7d)}</td>
-                  <td style={{ padding: "10px 12px" }}>
+                  <td style={{ padding: "12px 14px" }}>
                     {token.anomaly_ratio >= 3 ? (
                       <span style={{
-                        padding: "2px 8px", borderRadius: 4, fontFamily: C.mono,
-                        fontSize: 11, fontWeight: 700,
+                        padding: "3px 10px", borderRadius: 4, fontFamily: C.mono,
+                        fontSize: 14, fontWeight: 700,
                         background: ratioColor(token.anomaly_ratio) + "20",
                         color: ratioColor(token.anomaly_ratio),
                       }}>
                         {token.anomaly_ratio.toFixed(1)}×
                       </span>
                     ) : (
-                      <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>—</span>
+                      <span style={{ fontFamily: C.mono, fontSize: 14, color: C.muted }}>—</span>
                     )}
                   </td>
-                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 11,
+                  <td style={{ padding: "12px 14px", fontFamily: C.mono, fontSize: 14,
                                 color: C.muted }}>
                     {token.competition_type
                       ? <>{token.competition_type}{!token.competition_type_confirmed && <span style={{ color: C.muted + "80" }}> *</span>}</>
                       : "—"}
                   </td>
-                  <td style={{ padding: "10px 12px" }}>
+                  <td style={{ padding: "12px 14px" }}>
                     <div style={{
-                      fontFamily: C.mono, fontSize: 11,
+                      fontFamily: C.mono, fontSize: 14,
                       color: !connected ? C.muted : capOk ? C.accent : C.danger,
                     }}>
                       {connected ? (capOk ? `$${POSITION_SIZE_USD} ✓` : `$${POSITION_SIZE_USD} ✗`) : "—"}
@@ -699,38 +729,38 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
                       onClick={() => canToggle && handleToggle(token.pair, levers[token.pair] ?? POSITION_SIZE_USD)}
                       disabled={!canToggle}
                       title={!connected ? "Connect APEX engine first"
-                           : isBusy ? `Engine trading ${activeToken}`
+                           : !isEnginePair ? `Restart APEX with --pair ${token.pair} to trade`
                            : !capOk ? "Insufficient capital"
                            : isActive ? "Stop trading this token"
                            : "Start trading this token"}
                       style={{
-                        display: "inline-flex", alignItems: "center", gap: 7,
-                        padding: "5px 12px", borderRadius: 6, border: "none",
-                        background: isActive ? `${C.danger}20`
+                        display: "inline-flex", alignItems: "center", justifyContent: "center",
+                        gap: 8, width: 90, padding: "8px 0", borderRadius: 6, border: "none",
+                        background: isActive ? `${C.accent}20`
                                   : canToggle ? `${C.purple}20`
                                   : "#27272a",
-                        color: isActive ? C.danger : canToggle ? C.purple : C.muted,
-                        fontFamily: C.mono, fontSize: 11, fontWeight: 700,
+                        color: isActive ? C.accent : canToggle ? C.purple : C.muted,
+                        fontFamily: C.mono, fontSize: 13, fontWeight: 700,
                         cursor: canToggle ? "pointer" : "not-allowed",
                         transition: "all 0.2s",
                       }}
                     >
-                      {/* Toggle pill */}
+                      {/* Toggle switch — square style */}
                       <div style={{
-                        width: 26, height: 13, borderRadius: 7, position: "relative",
-                        background: isActive ? C.danger : canToggle ? "#3f3f46" : "#27272a",
-                        border: `1px solid ${isActive ? C.danger : canToggle ? C.purple + "60" : C.border}`,
+                        width: 36, height: 20, borderRadius: 4, position: "relative",
+                        background: isActive ? C.accent : canToggle ? "#3f3f46" : "#27272a",
+                        border: `1px solid ${isActive ? C.accent : canToggle ? C.purple + "60" : C.border}`,
                         transition: "all 0.2s", flexShrink: 0,
                       }}>
                         <div style={{
-                          position: "absolute", top: 2,
-                          left: isActive ? 12 : 2,
-                          width: 7, height: 7, borderRadius: "50%",
-                          background: isActive ? C.danger : canToggle ? C.purple : C.muted,
+                          position: "absolute", top: 3,
+                          left: isActive ? 19 : 3,
+                          width: 12, height: 12, borderRadius: 2,
+                          background: isActive ? "#fff" : canToggle ? C.purple : C.muted,
                           transition: "left 0.2s",
                         }} />
                       </div>
-                      {isActive ? "ON" : isBusy ? "BUSY" : "OFF"}
+                      {isActive ? "ON" : !isEnginePair ? "—" : "OFF"}
                     </button>
                   </td>
                 </tr>
@@ -786,10 +816,10 @@ function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected,
             ["Used Today", `$${capUsed.toFixed(2)}`, capUsed > 0 ? C.danger : C.muted],
           ].map(([l, v, color]) => (
             <div key={l} style={{ textAlign: "center" }}>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted,
+              <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted,
                             textTransform: "uppercase", letterSpacing: "0.07em",
                             marginBottom: 4 }}>{l}</div>
-              <div style={{ fontFamily: C.mono, fontSize: 15, fontWeight: 700, color }}>{v}</div>
+              <div style={{ fontFamily: C.mono, fontSize: 17, fontWeight: 700, color }}>{v}</div>
             </div>
           ))}
         </div>
@@ -877,7 +907,7 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function MemeTab() {
-  const [subView, setSubView] = useState("discover");
+  const [subView, setSubView] = useState("trading");
   const [connected, setConnected] = useState(false);
   const [engineState, setEngineState] = useState("idle");
   const [enginePair, setEnginePair] = useState(null);
@@ -895,6 +925,7 @@ export default function MemeTab() {
   const [pendingAlert, setPendingAlert] = useState(null);
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  const connectRef = useRef(null);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -903,7 +934,7 @@ export default function MemeTab() {
     ws.onopen = () => setConnected(true);
     ws.onclose = () => {
       setConnected(false);
-      reconnectRef.current = setTimeout(() => connect(), 5000);
+      reconnectRef.current = setTimeout(() => connectRef.current?.(), 5000);
     };
     ws.onmessage = (evt) => {
       try {
@@ -912,6 +943,16 @@ export default function MemeTab() {
           case "initial_state":
             setEngineState(msg.engine_state ?? "idle");
             if (msg.pair) setEnginePair(msg.pair);
+            if (msg.position) setPosition(msg.position);
+            if (msg.trades) setTrades(msg.trades);
+            if (msg.session_pnl != null || msg.trade_count != null) {
+              setSessionStats({
+                session_pnl: msg.session_pnl ?? 0,
+                daily_loss: msg.daily_loss ?? 0,
+                trade_count: msg.trade_count ?? 0,
+                win_rate: msg.win_rate ?? 0,
+              });
+            }
             break;
           case "warmup_progress":
             setEngineState("warmup");
@@ -920,7 +961,10 @@ export default function MemeTab() {
             setBars(msg.bars ?? []);
             break;
           case "bar_update":
-            if (msg.bar) setBars(prev => [...prev, msg.bar].slice(-20));
+            if (msg.bar) setBars(prev => {
+              const deduped = prev.filter(b => b.ts !== msg.bar.ts);
+              return [...deduped, msg.bar].slice(-100);
+            });
             break;
           case "ticker":
             setMidPrice(msg.price ?? 0);
@@ -963,6 +1007,9 @@ export default function MemeTab() {
             setEngineState("halted");
             setPosition(null);
             break;
+          case "engine_state":
+            setEngineState(msg.state ?? "idle");
+            break;
           case "competition_alert":
             setPendingAlert(msg);
             break;
@@ -997,6 +1044,7 @@ export default function MemeTab() {
   }, []);
 
   useEffect(() => {
+    connectRef.current = connect;
     connect();
     return () => {
       clearTimeout(reconnectRef.current);
@@ -1031,17 +1079,17 @@ export default function MemeTab() {
                           sessionStats, trades, bars, spreadBps };
 
   return (
-    <div style={{ padding: "16px 24px", background: C.bg, minHeight: "100%" }}>
+    <div style={{ padding: "16px 12px", background: C.bg, minHeight: "100%" }}>
       {/* Sub-nav */}
       <div style={{ display: "flex", gap: 0, marginBottom: 20,
                     borderBottom: `1px solid ${C.border}` }}>
-        {[["trading", "⚡ Trading"], ["discover", "🔍 Discover"]].map(([key, label]) => (
+        {[["trading", "TRADING"], ["discover", "DISCOVER"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setSubView(key)}
             style={{
-              padding: "8px 20px", border: "none", background: "transparent",
-              fontFamily: C.mono, fontSize: 12, fontWeight: 700,
+              padding: "10px 28px", border: "none", background: "transparent",
+              fontFamily: C.mono, fontSize: 15, fontWeight: 700, letterSpacing: "0.08em",
               color: subView === key ? C.purple : C.muted,
               borderBottom: `2px solid ${subView === key ? C.purple : "transparent"}`,
               cursor: "pointer", transition: "all 0.2s",
@@ -1076,7 +1124,6 @@ export default function MemeTab() {
         <DiscoverView
           tokens={tokens}
           onStartEngine={handleStartEngine}
-          onDismiss={handleDismiss}
           enginePair={enginePair}
           connected={connected}
           lastScanTs={lastScanTs}

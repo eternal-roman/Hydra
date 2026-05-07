@@ -23,7 +23,7 @@ import websockets
 WS_PORT = 8766
 CANDLE_INTERVAL = 5          # minutes
 WARMUP_BARS = 15
-CANDLE_BUFFER_SIZE = 20
+CANDLE_BUFFER_SIZE = 100
 OBI_POLL_INTERVAL = 10       # seconds
 COMPETITION_SCAN_INTERVAL = 900  # 15 minutes
 KRAKEN_REST_FLOOR = 2.0      # seconds between CLI calls
@@ -385,12 +385,6 @@ def save_session(state: SessionState, path: str) -> None:
     os.replace(tmp, path)
 
 
-def load_session(path: str) -> SessionState:
-    with open(path) as f:
-        data = json.load(f)
-    return SessionState(**{k: v for k, v in data.items() if k in SessionState.__dataclass_fields__})
-
-
 def append_journal(record: TradeRecord, path: str) -> None:
     existing: list = []
     if os.path.exists(path):
@@ -511,8 +505,8 @@ class MemeExecutor:
         )
 
     def place_sell(self, position: Position, bid: float, reason: str,
-                   mid: Optional[float] = None) -> dict:
-        """Place a taker SELL limit order. Returns trade record dict."""
+                   mid: Optional[float] = None) -> Optional[dict]:
+        """Place a taker SELL limit order. Returns trade record dict, or None on failure."""
         limit_price = self._sell_limit_price(bid)
         if mid and mid > 0:
             slippage_bps = (mid - limit_price) / mid * 10_000
@@ -526,7 +520,9 @@ class MemeExecutor:
             "--price", f"{limit_price:.8f}",
             "--yes",
         ])
-        exit_price = limit_price  # assume fill at limit
+        if "error" in result:
+            return None
+        exit_price = limit_price
         net_pnl = self._compute_net_pnl(position, exit_price)
         self.record_pnl(net_pnl)
         gross = (exit_price - position.entry_price) * position.qty
@@ -558,6 +554,7 @@ class OBIPoller:
         self._obi: float = 0.0
         self._best_bid: float = 0.0
         self._best_ask: float = 0.0
+        self._ask_wall: float = 999_999.0
         self._last_poll: float = 0.0
 
     def poll(self) -> None:
@@ -566,7 +563,7 @@ class OBIPoller:
         if now - self._last_poll < KRAKEN_REST_FLOOR:
             return
         self._last_poll = now
-        result = _kraken_cli(["book", self._pair_nodash, "--depth", str(OBI_LEVELS)])
+        result = _kraken_cli(["orderbook", self._pair_nodash, "--count", str(OBI_LEVELS)])
         if "error" in result:
             return
         # Kraken book response: {PAIR: {bids: [[price, qty, ts], ...], asks: [...]}}
@@ -585,6 +582,7 @@ class OBIPoller:
             )
             self._best_bid = float(bids[0][0])
             self._best_ask = float(asks[0][0])
+            self._ask_wall = sum(float(a[0]) * float(a[1]) for a in asks[:3])
 
     @property
     def obi(self) -> float:
@@ -602,18 +600,9 @@ class OBIPoller:
     def best_ask(self) -> float:
         return self._best_ask
 
+    @property
     def ask_wall_usd(self) -> float:
-        """Compute top-3 ask levels total USD depth (for ask_wall_clear gate)."""
-        result = _kraken_cli(["book", self._pair_nodash, "--depth", "3"])
-        if "error" in result:
-            return 999_999.0
-        book = (result.get(self._pair_nodash)
-                or result.get(self.pair)
-                or (next(iter(result.values())) if result else {}))
-        if not isinstance(book, dict):
-            return 999_999.0
-        asks = book.get("asks", [])
-        return sum(float(a[0]) * float(a[1]) for a in asks[:3])
+        return self._ask_wall
 
 
 # ─── Candle Aggregator ─────────────────────────────────────────────────────────
@@ -706,23 +695,70 @@ class MemeAgent:
         self._detector = CompetitionDetector(watchlist_path)
         self._candle_agg = CandleAggregator(pair, self._on_bar)
         self._position: Optional[Position] = None
+        self._sell_pending_reason: Optional[str] = None
         self._exit_lock: asyncio.Lock = asyncio.Lock()
         self._session_path = session_path
         self._journal_path = journal_path
         self._trade_log: list[TradeRecord] = []
         self._engine_state = "warmup"
 
+    # ── History seed ──
+
+    async def _seed_history(self) -> None:
+        """Fetch recent 5-min candles via CLI to skip warmup wait."""
+        pair_nodash = self.pair.replace("/", "")
+        result = await asyncio.to_thread(
+            _kraken_cli,
+            ["ohlc", pair_nodash, "--interval", str(CANDLE_INTERVAL)],
+        )
+        if "error" in result:
+            print(f"[APEX] History seed failed: {result.get('error')} — falling back to live warmup")
+            return
+        key = next((k for k in result if k != "last"), None)
+        if not key:
+            return
+        raw_bars = result[key]
+        # Take the most recent WARMUP_BARS bars (exclude the very last — it's still open)
+        seed_count = CANDLE_BUFFER_SIZE
+        closed = raw_bars[-(seed_count + 1):-1] if len(raw_bars) > seed_count else raw_bars[:-1]
+        for b in closed:
+            bar = CandleBar(
+                ts=int(b[0]), open=float(b[1]), high=float(b[2]),
+                low=float(b[3]), close=float(b[4]), vwap=float(b[5]),
+                volume=float(b[6]), count=int(b[7]),
+            )
+            self._signal_engine.add_bar(bar)
+        n = len(self._signal_engine._bars)
+        print(f"[APEX] Seeded {n} historical bars — {'warmed up' if n >= WARMUP_BARS else f'{WARMUP_BARS - n} more needed'}")
+        if self._signal_engine.is_warmed_up():
+            self._engine_state = "running"
+
     # ── WebSocket server ──
 
     async def _ws_handler(self, websocket) -> None:
         self._clients.add(websocket)
-        # Send initial state snapshot so a freshly-loaded tab syncs immediately
+        pos_data = None
+        if self._position is not None:
+            p = self._position
+            pos_data = {"entry_price": p.entry_price, "qty": p.qty,
+                        "notional_usd": p.notional_usd, "entry_ts": p.entry_ts,
+                        "candles_held": p.candles_held}
+        win_count = sum(1 for t in self._trade_log if t.net_pnl > 0)
         await websocket.send(json.dumps({
             "type": "initial_state",
             "engine_state": self._engine_state,
             "pair": self.pair,
             "bars_ready": len(self._signal_engine._bars),
             "bars_required": WARMUP_BARS,
+            "position": pos_data,
+            "session_pnl": self._executor._daily_pnl,
+            "trade_count": len(self._trade_log),
+            "daily_loss": self._executor._daily_loss,
+            "win_rate": win_count / max(len(self._trade_log), 1),
+            "trades": [{"entry_ts": t.entry_ts, "exit_ts": t.exit_ts,
+                        "entry_price": t.entry_price, "exit_price": t.exit_price,
+                        "net_pnl": t.net_pnl, "exit_reason": t.exit_reason,
+                        "hold_candles": t.hold_candles} for t in self._trade_log],
         }))
         bars = self._signal_engine._bars
         if bars:
@@ -744,6 +780,7 @@ class MemeAgent:
                         if self._position is not None:
                             await self._exit_position("manual_stop")
                         self._engine_state = "idle"
+                        await self._broadcast({"type": "engine_state", "state": "idle"})
                     elif msg.get("type") == "scan_now":
                         asyncio.ensure_future(self._run_competition_scan())
                 except Exception:
@@ -760,14 +797,6 @@ class MemeAgent:
         await asyncio.gather(*[c.send(data) for c in list(self._clients)],
                              return_exceptions=True)
 
-    def _broadcast_sync(self, msg: dict) -> None:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._broadcast(msg))
-        except Exception:
-            pass
-
     # ── Bar callback (from CandleAggregator, scheduled into event loop) ──
 
     def _on_bar(self, bar: CandleBar) -> None:
@@ -775,6 +804,8 @@ class MemeAgent:
         asyncio.ensure_future(self._handle_bar(bar))
 
     async def _handle_bar(self, bar: CandleBar) -> None:
+        if os.environ.get("HYDRA_APEX_DISABLED") == "1":
+            return
         self._signal_engine.add_bar(bar)
         # Broadcast bar so frontend chart updates on every close
         await self._broadcast({
@@ -794,7 +825,7 @@ class MemeAgent:
         self._engine_state = "running"
         # Broadcast signal state
         gates = self._signal_engine.evaluate_entry_gates(
-            bar, self._obi_poller.obi, await asyncio.to_thread(self._obi_poller.ask_wall_usd)
+            bar, self._obi_poller.obi, self._obi_poller.ask_wall_usd
         )
         await self._broadcast({"type": "signal_state", "gates": gates,
                                 "pair": self.pair, "ts": bar.ts})
@@ -805,8 +836,8 @@ class MemeAgent:
             if reason:
                 await self._exit_position(reason)
                 return
-        # Entry check (only when no position)
-        if self._position is None and not self._executor.is_halted():
+        # Entry check (only when no position and no pending sell retry)
+        if self._position is None and not self._executor.is_halted() and not self._sell_pending_reason:
             if gates["all_pass"]:
                 mid = self._obi_poller.mid_price or None
                 pos = await asyncio.to_thread(
@@ -824,17 +855,25 @@ class MemeAgent:
         async with self._exit_lock:
             if self._position is None:
                 return
-            result = self._executor.place_sell(
+            result = await asyncio.to_thread(
+                self._executor.place_sell,
                 self._position, self._obi_poller.best_bid, reason,
-                mid=self._obi_poller.mid_price or None,
+                self._obi_poller.mid_price or None,
             )
+            if result is None:
+                self._sell_pending_reason = reason
+                await self._broadcast({"type": "sell_failed", "reason": reason,
+                                       "pair": self.pair})
+                return
             record: TradeRecord = result["record"]
             self._trade_log.append(record)
             await asyncio.to_thread(append_journal, record, self._journal_path)
             self._position = None
+            self._sell_pending_reason = None
         await self._broadcast({"type": "trade_closed",
                                "net_pnl": record.net_pnl,
                                "exit_reason": reason,
+                               "exit_ts": record.exit_ts,
                                "entry_price": record.entry_price,
                                "exit_price": record.exit_price,
                                "hold_candles": record.hold_candles})
@@ -865,45 +904,51 @@ class MemeAgent:
 
     async def _obi_loop(self) -> None:
         while True:
-            if os.environ.get("HYDRA_APEX_DISABLED") == "1":
-                self._engine_state = "halted"
-                await self._broadcast({"type": "engine_halted", "reason": "kill_switch"})
-                return
-            await asyncio.to_thread(self._obi_poller.poll)
-            if self._position is not None and self._engine_state == "running":
-                reason = self._signal_engine.evaluate_exit_intracandle(
-                    self._position, self._obi_poller.mid_price, self._obi_poller.obi
-                )
-                if reason:
-                    await self._exit_position(reason)
-            mid = self._obi_poller.mid_price
-            bid = self._obi_poller.best_bid
-            ask = self._obi_poller.best_ask
-            spread_bps = ((ask - bid) / mid * 10_000) if mid > 0 else 0.0
-            if self._position is not None:
-                pos = self._position
-                await self._broadcast({
-                    "type": "position_update",
-                    "price": mid,
-                    "obi": self._obi_poller.obi,
-                    "spread_bps": round(spread_bps, 1),
-                    "entry": {
-                        "entry_price": pos.entry_price,
-                        "qty": pos.qty,
-                        "candles_held": pos.candles_held,
-                        "notional_usd": pos.notional_usd,
-                        "entry_ts": pos.entry_ts,
-                    },
-                    "unrealised_pnl": (mid - pos.entry_price) * pos.qty,
-                })
-            else:
-                # Broadcast price/spread even without a position so control row updates
-                await self._broadcast({
-                    "type": "ticker",
-                    "price": mid,
-                    "obi": self._obi_poller.obi,
-                    "spread_bps": round(spread_bps, 1),
-                })
+            try:
+                if os.environ.get("HYDRA_APEX_DISABLED") == "1":
+                    self._engine_state = "halted"
+                    await self._broadcast({"type": "engine_halted", "reason": "kill_switch"})
+                    await asyncio.sleep(OBI_POLL_INTERVAL)
+                    continue
+                await asyncio.to_thread(self._obi_poller.poll)
+                mid = self._obi_poller.mid_price
+                # Retry failed sell with fresh bid data
+                if self._sell_pending_reason and self._position is not None and mid > 0:
+                    await self._exit_position(self._sell_pending_reason)
+                if self._position is not None and self._engine_state == "running" and mid > 0:
+                    reason = self._signal_engine.evaluate_exit_intracandle(
+                        self._position, mid, self._obi_poller.obi
+                    )
+                    if reason:
+                        await self._exit_position(reason)
+                bid = self._obi_poller.best_bid
+                ask = self._obi_poller.best_ask
+                spread_bps = ((ask - bid) / mid * 10_000) if mid > 0 else 0.0
+                if self._position is not None:
+                    pos = self._position
+                    await self._broadcast({
+                        "type": "position_update",
+                        "price": mid,
+                        "obi": self._obi_poller.obi,
+                        "spread_bps": round(spread_bps, 1),
+                        "entry": {
+                            "entry_price": pos.entry_price,
+                            "qty": pos.qty,
+                            "candles_held": pos.candles_held,
+                            "notional_usd": pos.notional_usd,
+                            "entry_ts": pos.entry_ts,
+                        },
+                        "unrealised_pnl": (mid - pos.entry_price) * pos.qty if mid > 0 else 0.0,
+                    })
+                else:
+                    await self._broadcast({
+                        "type": "ticker",
+                        "price": mid,
+                        "obi": self._obi_poller.obi,
+                        "spread_bps": round(spread_bps, 1),
+                    })
+            except Exception as e:
+                print(f"[APEX] OBI loop error: {e}")
             await asyncio.sleep(OBI_POLL_INTERVAL)
 
     async def _run_competition_scan(self) -> None:
@@ -935,11 +980,13 @@ class MemeAgent:
             if first_scan:
                 self._detector._set_baseline(token["pair"], volume)
                 baseline = volume
-                ratio = 1.0  # first data point — no anomaly yet
+                ratio = 1.0
+                is_anomaly = False
             else:
-                self._detector._update_baseline(token["pair"], volume)
                 baseline = self._detector._get_baseline(token["pair"])
                 ratio = volume / baseline if baseline else 0.0
+                is_anomaly = self._detector._is_anomaly(token["pair"], volume)
+                self._detector._update_baseline(token["pair"], volume)
             # Store live data on token dict for watchlist_update
             with self._detector._lock:
                 t = self._detector._find_token(token["pair"])
@@ -958,9 +1005,8 @@ class MemeAgent:
                 "competition_type": comp_type,
                 "competition_type_confirmed": token_obj.get("competition_type_confirmed", False),
             })
-            if (not first_scan
-                    and not self._detector._is_suppressed(token["pair"])
-                    and self._detector._is_anomaly(token["pair"], volume)):
+            if (is_anomaly
+                    and not self._detector._is_suppressed(token["pair"])):
                 await self._broadcast({
                     "type": "competition_alert",
                     "pair": token["pair"],
@@ -979,10 +1025,11 @@ class MemeAgent:
     # ── 15-minute competition scan loop ──
 
     async def _competition_loop(self) -> None:
-        # Run one scan immediately on startup so Discover view is populated
         await self._run_competition_scan()
         while True:
             await asyncio.sleep(COMPETITION_SCAN_INTERVAL)
+            if os.environ.get("HYDRA_APEX_DISABLED") == "1":
+                continue
             await self._run_competition_scan()
 
     # ── Main run ──
@@ -990,7 +1037,8 @@ class MemeAgent:
     async def run(self) -> None:
         server = await websockets.serve(self._ws_handler, "localhost", WS_PORT)
         print(f"[APEX] WebSocket server on ws://localhost:{WS_PORT}")
-        print(f"[APEX] Trading {self.pair} | Warmup: {WARMUP_BARS} bars ({WARMUP_BARS * CANDLE_INTERVAL} min)")
+        await self._seed_history()
+        print(f"[APEX] Trading {self.pair} | State: {self._engine_state}")
         try:
             await asyncio.gather(
                 self._candle_agg.run(),
