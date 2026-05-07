@@ -17,6 +17,7 @@ const C = {
 
 const APEX_WS = "ws://localhost:8766";
 const APEX_DAILY_CAP_USD = 30;
+const POSITION_SIZE_USD = 600;
 
 const SEED_PAIRS = [
   "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD",
@@ -27,21 +28,466 @@ const SEED_PAIRS = [
   "MATIC/USD", "SAND/USD", "MANA/USD", "ENJ/USD", "CHZ/USD",
 ];
 
-// ─── Primitives ──────────────────────────────────────────────────────────────
+// ─── Candle Chart (hero element) ─────────────────────────────────────────────
 
-function GateDot({ pass, label, value }) {
+const CHART_VW = 480;
+
+function CandleChart({ bars, height = 160 }) {
+  if (!bars || bars.length === 0) {
+    return (
+      <div style={{ width: "100%", height, display: "flex", alignItems: "center",
+                    justifyContent: "center", background: "#0d0d0f", borderRadius: 6,
+                    border: `1px solid ${C.border}` }}>
+        <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+          Waiting for candles… (warmup: 15 bars)
+        </span>
+      </div>
+    );
+  }
+  const pad = { top: 8, bottom: 8, left: 4, right: 4 };
+  const innerW = CHART_VW - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
+  const n = bars.length;
+  const slotW = innerW / n;
+  const candleW = Math.max(3, Math.floor(slotW * 0.7));
+  const minP = Math.min(...bars.map(b => b.low));
+  const maxP = Math.max(...bars.map(b => b.high));
+  const range = maxP - minP || minP * 0.01 || 1;
+
+  function py(p) { return pad.top + innerH - ((p - minP) / range) * innerH; }
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
-      <div style={{
-        width: 8, height: 8, borderRadius: "50%",
-        background: pass ? C.accent : C.danger,
-        flexShrink: 0,
-      }} />
-      <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted, minWidth: 100 }}>{label}</span>
-      <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>{value ?? "—"}</span>
+    <svg viewBox={`0 0 ${CHART_VW} ${height}`} width="100%" height={height}
+         style={{ display: "block" }}>
+      {/* Price grid lines */}
+      {[0.25, 0.5, 0.75].map(f => (
+        <line key={f}
+          x1={pad.left} y1={pad.top + innerH * (1 - f)}
+          x2={pad.left + innerW} y2={pad.top + innerH * (1 - f)}
+          stroke={C.border} strokeWidth={0.5} strokeDasharray="3,3" />
+      ))}
+      {bars.map((b, i) => {
+        const cx = pad.left + (i + 0.5) * slotW;
+        const x = cx - candleW / 2;
+        const bullish = b.close >= b.open;
+        const color = bullish ? C.accent : C.danger;
+        const bodyTop = py(Math.max(b.open, b.close));
+        const bodyH = Math.max(1, py(Math.min(b.open, b.close)) - bodyTop);
+        return (
+          <g key={b.ts}>
+            <line x1={cx} y1={py(b.high)} x2={cx} y2={py(b.low)}
+                  stroke={color} strokeWidth={1} opacity={0.5} />
+            <rect x={x} y={bodyTop} width={candleW} height={bodyH}
+                  fill={color} opacity={0.9} rx={1} />
+          </g>
+        );
+      })}
+      {/* Price labels */}
+      <text x={pad.left + innerW - 2} y={pad.top + 10}
+            fontFamily={C.mono} fontSize={9} fill={C.muted} textAnchor="end">
+        {maxP.toFixed(5)}
+      </text>
+      <text x={pad.left + innerW - 2} y={pad.top + innerH}
+            fontFamily={C.mono} fontSize={9} fill={C.muted} textAnchor="end">
+        {minP.toFixed(5)}
+      </text>
+    </svg>
+  );
+}
+
+function VolumeHistogram({ bars, height = 44 }) {
+  if (!bars || bars.length === 0) return null;
+  const maxVol = Math.max(...bars.map(b => b.volume)) || 1;
+  const n = bars.length;
+  const slotW = CHART_VW / n;
+  const candleW = Math.max(3, Math.floor(slotW * 0.7));
+  return (
+    <svg viewBox={`0 0 ${CHART_VW} ${height}`} width="100%" height={height}
+         style={{ display: "block", marginTop: 3 }}>
+      {bars.map((b, i) => {
+        const cx = (i + 0.5) * slotW;
+        const x = cx - candleW / 2;
+        const barH = Math.max(1, (b.volume / maxVol) * (height - 4));
+        return (
+          <rect key={b.ts}
+            x={x} y={height - barH} width={candleW} height={barH}
+            fill={b.close >= b.open ? C.accent : C.danger} opacity={0.4} rx={1} />
+        );
+      })}
+    </svg>
+  );
+}
+
+// ─── OBI Gauge ────────────────────────────────────────────────────────────────
+
+function OBIGauge({ obi = 0 }) {
+  const pct = ((obi + 1) / 2) * 100;
+  const color = obi > 0.2 ? C.accent : obi < -0.2 ? C.danger : C.warn;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>SELL PRESSURE</span>
+        <span style={{ fontFamily: C.mono, fontSize: 12, color, fontWeight: 700 }}>
+          OBI {obi >= 0 ? "+" : ""}{obi.toFixed(3)}
+        </span>
+        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>BUY PRESSURE</span>
+      </div>
+      <div style={{ height: 8, background: "#27272a", borderRadius: 4, overflow: "hidden" }}>
+        <div style={{
+          height: "100%", width: `${pct}%`,
+          background: `linear-gradient(90deg, ${C.danger}80, ${color})`,
+          transition: "width 0.5s ease",
+        }} />
+      </div>
     </div>
   );
 }
+
+// ─── Gate Dot ─────────────────────────────────────────────────────────────────
+
+function GateDot({ pass, label, value }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0",
+                  borderBottom: `1px solid ${C.border}20` }}>
+      <div style={{
+        width: 9, height: 9, borderRadius: "50%",
+        background: pass ? C.accent : "#3f3f46",
+        boxShadow: pass ? `0 0 6px ${C.accent}80` : "none",
+        flexShrink: 0, transition: "all 0.3s",
+      }} />
+      <span style={{ fontFamily: C.mono, fontSize: 11, color: pass ? C.text : C.muted,
+                     minWidth: 90, flex: 1 }}>{label}</span>
+      <span style={{ fontFamily: C.mono, fontSize: 11,
+                     color: pass ? C.accent : C.muted }}>{value ?? "—"}</span>
+    </div>
+  );
+}
+
+function SignalBanner({ allPass, engineState }) {
+  if (engineState === "warmup") {
+    return (
+      <div style={{
+        padding: "12px 0", borderRadius: 8, textAlign: "center",
+        background: "#1c1917", border: `1px solid ${C.warn}30`,
+        fontFamily: C.mono, fontSize: 12, color: C.warn, marginTop: 10,
+      }}>
+        ⏳ WARMING UP ({15} bars req.)
+      </div>
+    );
+  }
+  if (engineState === "halted") {
+    return (
+      <div style={{
+        padding: "12px 0", borderRadius: 8, textAlign: "center",
+        background: "#1c0a0a", border: `1px solid ${C.danger}30`,
+        fontFamily: C.mono, fontSize: 12, color: C.danger, marginTop: 10,
+      }}>
+        ⛔ DAILY CAP HIT
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      padding: "12px 0", borderRadius: 8, textAlign: "center",
+      background: allPass ? `${C.accent}12` : "#18181b",
+      border: `1px solid ${allPass ? C.accent + "50" : C.border}`,
+      fontFamily: C.mono, fontSize: 16, fontWeight: 700,
+      color: allPass ? C.accent : C.muted,
+      marginTop: 10, transition: "all 0.3s ease",
+      boxShadow: allPass ? `0 0 20px ${C.accent}20` : "none",
+    }}>
+      {allPass ? "⚡ BUY SIGNAL" : "— HOLD —"}
+    </div>
+  );
+}
+
+// ─── Position Panel ───────────────────────────────────────────────────────────
+
+function PositionPanel({ position, midPrice }) {
+  if (!position) {
+    return (
+      <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                    border: `1px solid ${C.border}`, height: "100%",
+                    display: "flex", flexDirection: "column", justifyContent: "center",
+                    alignItems: "center", gap: 6 }}>
+        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted,
+                      textTransform: "uppercase", letterSpacing: "0.1em" }}>Position</div>
+        <div style={{ fontFamily: C.mono, fontSize: 13, color: C.muted }}>No open position</div>
+        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted + "80" }}>
+          Waiting for all 5 gates to pass
+        </div>
+      </div>
+    );
+  }
+  const entryPct = ((midPrice - position.entry_price) / position.entry_price) * 100;
+  const progress = Math.max(0, Math.min(100,
+    ((entryPct - (-1.3)) / (2.5 - (-1.3))) * 100));
+  const pnlColor = entryPct >= 0 ? C.accent : C.danger;
+  const candles = position.candles_held ?? 0;
+
+  return (
+    <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                  border: `1px solid ${C.purple}50` }}>
+      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.purple, marginBottom: 12,
+                    textTransform: "uppercase", letterSpacing: "0.1em" }}>Open Position</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        {[
+          ["Entry", position.entry_price.toFixed(6)],
+          ["Mid", midPrice.toFixed(6)],
+          ["Qty", position.qty?.toFixed(2) ?? "—"],
+          ["Notional", `$${(position.notional_usd ?? 600).toFixed(0)}`],
+        ].map(([l, v]) => (
+          <div key={l}>
+            <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{l}</div>
+            <div style={{ fontFamily: C.mono, fontSize: 12, color: C.text }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ textAlign: "center", marginBottom: 14 }}>
+        <span style={{ fontFamily: C.mono, fontSize: 22, fontWeight: 700, color: pnlColor }}>
+          {entryPct >= 0 ? "+" : ""}{entryPct.toFixed(2)}%
+        </span>
+      </div>
+      {/* Exit watch levels */}
+      <div style={{ display: "flex", justifyContent: "space-between",
+                    padding: "6px 10px", background: C.bg, borderRadius: 6,
+                    marginBottom: 10, fontFamily: C.mono, fontSize: 10 }}>
+        <span style={{ color: C.danger }}>▼ stop {(position.entry_price * 0.987).toFixed(6)}</span>
+        <span style={{ color: C.accent }}>▲ target {(position.entry_price * 1.025).toFixed(6)}</span>
+      </div>
+      {/* Progress bar */}
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.danger }}>−1.3%</span>
+        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>progress to target</span>
+        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.accent }}>+2.5%</span>
+      </div>
+      <div style={{ height: 8, background: "#27272a", borderRadius: 4, overflow: "hidden",
+                    marginBottom: 8 }}>
+        <div style={{
+          height: "100%", width: `${progress}%`,
+          background: entryPct >= 0 ? C.accent : C.danger,
+          transition: "width 0.5s ease",
+        }} />
+      </div>
+      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, textAlign: "center" }}>
+        {candles} candle{candles !== 1 ? "s" : ""} held
+        {" · "}time stop in {Math.max(0, 3 - candles)} more
+      </div>
+    </div>
+  );
+}
+
+// ─── Session Stats ────────────────────────────────────────────────────────────
+
+function SessionStats({ stats, dailyCap }) {
+  const remaining = dailyCap + (stats?.daily_loss ?? 0);
+  const usedPct = dailyCap > 0 ? Math.max(0, Math.min(100,
+    ((dailyCap - remaining) / dailyCap) * 100)) : 0;
+  return (
+    <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                  border: `1px solid ${C.border}`, marginTop: 8 }}>
+      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 10,
+                    textTransform: "uppercase", letterSpacing: "0.1em" }}>Session</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        {[
+          ["Net P&L", `$${(stats?.session_pnl ?? 0).toFixed(2)}`, (stats?.session_pnl ?? 0) >= 0 ? C.accent : C.danger],
+          ["Win Rate", `${((stats?.win_rate ?? 0) * 100).toFixed(0)}%`, C.text],
+          ["Trades", String(stats?.trade_count ?? 0), C.text],
+          ["Cap Left", `$${remaining.toFixed(2)}`, remaining > 10 ? C.accent : C.danger],
+        ].map(([label, val, color]) => (
+          <div key={label}>
+            <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{label}</div>
+            <div style={{ fontFamily: C.mono, fontSize: 14, fontWeight: 700, color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ height: 5, background: "#27272a", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${usedPct}%`, background: C.danger,
+                      transition: "width 0.5s" }} />
+      </div>
+      <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted, marginTop: 3 }}>
+        daily cap: ${dailyCap.toFixed(0)} · {usedPct.toFixed(0)}% used
+      </div>
+    </div>
+  );
+}
+
+// ─── Trade Log ────────────────────────────────────────────────────────────────
+
+function TradeLog({ trades }) {
+  if (!trades || trades.length === 0) {
+    return (
+      <div style={{ fontFamily: C.mono, fontSize: 11, color: C.muted,
+                    padding: "20px 0", textAlign: "center" }}>
+        No closed trades this session
+      </div>
+    );
+  }
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: C.mono, fontSize: 11 }}>
+        <thead>
+          <tr>
+            {["TIME", "ENTRY", "EXIT", "NET P&L", "REASON", "HOLD"].map(c => (
+              <th key={c} style={{ padding: "5px 10px", textAlign: "left", color: C.muted,
+                                   borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap",
+                                   fontWeight: 400 }}>{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {[...trades].reverse().map(t => (
+            <tr key={t.exit_ts} style={{ borderBottom: `1px solid ${C.border}15` }}>
+              <td style={{ padding: "5px 10px", color: C.muted }}>
+                {new Date((t.exit_ts ?? 0) * 1000).toLocaleTimeString()}
+              </td>
+              <td style={{ padding: "5px 10px", color: C.text }}>{(t.entry_price ?? 0).toFixed(6)}</td>
+              <td style={{ padding: "5px 10px", color: C.text }}>{(t.exit_price ?? 0).toFixed(6)}</td>
+              <td style={{ padding: "5px 10px", fontWeight: 700,
+                           color: (t.net_pnl ?? 0) >= 0 ? C.accent : C.danger }}>
+                {(t.net_pnl ?? 0) >= 0 ? "+" : ""}${(t.net_pnl ?? 0).toFixed(2)}
+              </td>
+              <td style={{ padding: "5px 10px", color: C.muted }}>{t.exit_reason ?? "—"}</td>
+              <td style={{ padding: "5px 10px", color: C.muted }}>{t.hold_candles ?? 0}c</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Trading View ─────────────────────────────────────────────────────────────
+
+function TradingView({ state, dailyCap, connected, pair, onStop }) {
+  const { gates, position, midPrice, obi, engineState, sessionStats, trades, bars, spreadBps } = state;
+
+  if (!connected) {
+    return (
+      <div>
+        <OfflineBanner />
+        <div style={{ padding: 40, textAlign: "center", fontFamily: C.mono, fontSize: 12,
+                      color: C.muted, background: C.panel, borderRadius: 8,
+                      border: `1px solid ${C.border}` }}>
+          Live candles, signals, and position tracking appear here once APEX is connected.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Control row */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 16, marginBottom: 16,
+        padding: "10px 16px", background: C.panel, borderRadius: 8,
+        border: `1px solid ${C.border}`,
+      }}>
+        <span style={{ fontFamily: C.mono, fontSize: 15, fontWeight: 700, color: C.text }}>
+          {pair ?? "—"}
+        </span>
+        <span style={{ fontFamily: C.mono, fontSize: 18, fontWeight: 700,
+                       color: midPrice > 0 ? C.text : C.muted }}>
+          {midPrice > 0 ? `$${midPrice.toFixed(6)}` : "—"}
+        </span>
+        {spreadBps > 0 && (
+          <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+            spread {spreadBps.toFixed(1)} bps
+          </span>
+        )}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "3px 10px", borderRadius: 20,
+          background: engineState === "running" ? `${C.accent}15`
+                    : engineState === "warmup" ? `${C.warn}15`
+                    : engineState === "halted" ? `${C.danger}15` : "#27272a",
+        }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: "50%",
+            background: engineState === "running" ? C.accent
+                       : engineState === "warmup" ? C.warn
+                       : engineState === "halted" ? C.danger : C.muted,
+          }} />
+          <span style={{ fontFamily: C.mono, fontSize: 10,
+                         color: engineState === "running" ? C.accent
+                               : engineState === "warmup" ? C.warn
+                               : engineState === "halted" ? C.danger : C.muted }}>
+            {engineState}
+          </span>
+        </div>
+        <div style={{ marginLeft: "auto" }}>
+          <button
+            onClick={onStop}
+            disabled={!["running", "warmup"].includes(engineState)}
+            style={{
+              padding: "6px 18px", borderRadius: 6,
+              border: `1px solid ${C.danger}50`, background: "transparent",
+              color: C.danger, fontFamily: C.mono, fontSize: 12, fontWeight: 700,
+              cursor: ["running", "warmup"].includes(engineState) ? "pointer" : "not-allowed",
+              opacity: ["running", "warmup"].includes(engineState) ? 1 : 0.3,
+            }}
+          >
+            ■ STOP
+          </button>
+        </div>
+      </div>
+
+      {/* Main 3-column grid — left column wider for chart */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px 220px", gap: 12,
+                    marginBottom: 12 }}>
+        {/* LEFT — hero chart */}
+        <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                      border: `1px solid ${C.border}` }}>
+          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 10,
+                        textTransform: "uppercase", letterSpacing: "0.1em",
+                        display: "flex", justifyContent: "space-between" }}>
+            <span>5-min Candles</span>
+            {bars && bars.length > 0 && (
+              <span style={{ color: C.muted }}>{bars.length} bars</span>
+            )}
+          </div>
+          <CandleChart bars={bars} height={160} />
+          <VolumeHistogram bars={bars} height={44} />
+          <OBIGauge obi={obi ?? 0} />
+        </div>
+
+        {/* MIDDLE — gates + signal */}
+        <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                      border: `1px solid ${C.border}` }}>
+          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
+                        textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</div>
+          <GateDot pass={gates?.volume_spike} label="Vol 1.8×"
+                   value={gates?.vol_ema_value ? `${(gates.vol_ema_value / 1000).toFixed(1)}k` : null} />
+          <GateDot pass={gates?.obi} label="OBI >0.20"
+                   value={obi != null ? obi.toFixed(3) : null} />
+          <GateDot pass={gates?.vwap_align} label="VWAP align"
+                   value={gates?.vwap_value ? `$${parseFloat(gates.vwap_value).toFixed(5)}` : null} />
+          <GateDot pass={gates?.rsi_window} label="RSI 45–78"
+                   value={gates?.rsi_value != null ? String(gates.rsi_value) : null} />
+          <GateDot pass={gates?.ask_wall_clear} label="Ask wall <$500"
+                   value={null} />
+          <SignalBanner allPass={gates?.all_pass ?? false} engineState={engineState} />
+        </div>
+
+        {/* RIGHT — position + session */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <PositionPanel position={position} midPrice={midPrice ?? 0} />
+          <SessionStats stats={sessionStats} dailyCap={dailyCap} />
+        </div>
+      </div>
+
+      {/* Trade log */}
+      <div style={{ padding: 16, background: C.panel, borderRadius: 8,
+                    border: `1px solid ${C.border}` }}>
+        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 10,
+                      textTransform: "uppercase", letterSpacing: "0.1em" }}>Trade Log</div>
+        <TradeLog trades={trades} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Offline Banner ───────────────────────────────────────────────────────────
 
 function OfflineBanner() {
   return (
@@ -62,673 +508,292 @@ function OfflineBanner() {
   );
 }
 
-function WatchlistSeed() {
-  return (
-    <div>
-      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 12,
-                    textTransform: "uppercase", letterSpacing: "0.1em" }}>
-        Watching {SEED_PAIRS.length} pairs · live anomaly scan on connect
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8 }}>
-        {SEED_PAIRS.map(pair => {
-          const base = pair.split("/")[0];
-          return (
-            <div key={pair} style={{
-              padding: "8px 12px", background: C.panel, borderRadius: 6,
-              border: `1px solid ${C.border}`,
-            }}>
-              <div style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.text }}>
-                {base}
-              </div>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted, marginTop: 1 }}>
-                {pair}
-              </div>
-              <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginTop: 6 }}>
-                vol: —
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ─── Candle Chart ─────────────────────────────────────────────────────────────
-
-function CandleChart({ bars, width = 340, height = 120 }) {
-  if (!bars || bars.length === 0) {
-    return (
-      <div style={{ width, height, display: "flex", alignItems: "center",
-                    justifyContent: "center", background: C.bg, borderRadius: 4 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-          awaiting candles…
-        </span>
-      </div>
-    );
-  }
-
-  const pad = { top: 6, bottom: 6, left: 2, right: 2 };
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
-  const n = bars.length;
-  const candleW = Math.max(3, Math.floor(innerW / n) - 1);
-  const gap = Math.max(1, Math.floor(innerW / n) - candleW);
-
-  const allLows = bars.map(b => b.low);
-  const allHighs = bars.map(b => b.high);
-  const minP = Math.min(...allLows);
-  const maxP = Math.max(...allHighs);
-  const priceRange = maxP - minP || 1;
-
-  function py(price) {
-    return pad.top + innerH - ((price - minP) / priceRange) * innerH;
-  }
-
-  return (
-    <svg width={width} height={height} style={{ display: "block" }}>
-      {bars.map((b, i) => {
-        const x = pad.left + i * (candleW + gap);
-        const bullish = b.close >= b.open;
-        const color = bullish ? C.accent : C.danger;
-        const bodyTop = py(Math.max(b.open, b.close));
-        const bodyBot = py(Math.min(b.open, b.close));
-        const bodyH = Math.max(1, bodyBot - bodyTop);
-        const midX = x + candleW / 2;
-        return (
-          <g key={b.ts}>
-            {/* wick */}
-            <line x1={midX} y1={py(b.high)} x2={midX} y2={py(b.low)}
-                  stroke={color} strokeWidth={1} opacity={0.6} />
-            {/* body */}
-            <rect x={x} y={bodyTop} width={candleW} height={bodyH}
-                  fill={color} opacity={0.85} rx={1} />
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-function VolumeHistogram({ bars, width = 340, height = 36 }) {
-  if (!bars || bars.length === 0) return null;
-  const maxVol = Math.max(...bars.map(b => b.volume)) || 1;
-  const n = bars.length;
-  const pad = 2;
-  const innerW = width - pad * 2;
-  const barW = Math.max(3, Math.floor(innerW / n) - 1);
-  const gap = Math.max(1, Math.floor(innerW / n) - barW);
-
-  return (
-    <svg width={width} height={height} style={{ display: "block", marginTop: 2 }}>
-      {bars.map((b, i) => {
-        const x = pad + i * (barW + gap);
-        const barH = Math.max(1, (b.volume / maxVol) * (height - 4));
-        const bullish = b.close >= b.open;
-        return (
-          <rect key={b.ts}
-            x={x} y={height - barH} width={barW} height={barH}
-            fill={bullish ? C.accent : C.danger} opacity={0.45} rx={1} />
-        );
-      })}
-    </svg>
-  );
-}
-
-// ─── OBI Gauge ────────────────────────────────────────────────────────────────
-
-function OBIGauge({ obi = 0 }) {
-  const pct = ((obi + 1) / 2) * 100;
-  const color = obi > 0.2 ? C.accent : obi < -0.2 ? C.danger : C.warn;
-  return (
-    <div style={{ marginTop: 8 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>SELL</span>
-        <span style={{ fontFamily: C.mono, fontSize: 11, color, fontWeight: 700 }}>
-          OBI {obi >= 0 ? "+" : ""}{obi.toFixed(3)}
-        </span>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>BUY</span>
-      </div>
-      <div style={{ height: 6, background: "#27272a", borderRadius: 3, overflow: "hidden" }}>
-        <div style={{
-          height: "100%", width: `${pct}%`,
-          background: `linear-gradient(90deg, ${C.danger}, ${color})`,
-          transition: "width 0.5s ease",
-        }} />
-      </div>
-    </div>
-  );
-}
-
-// ─── Signal Banner ────────────────────────────────────────────────────────────
-
-function SignalBanner({ allPass, engineState }) {
-  if (engineState === "warmup") {
-    return (
-      <div style={{
-        padding: "10px 16px", borderRadius: 8, textAlign: "center",
-        background: "#1c1917", border: `1px solid ${C.warn}40`,
-        fontFamily: C.mono, fontSize: 13, color: C.warn,
-      }}>
-        ⏳ WARMING UP
-      </div>
-    );
-  }
-  const color = allPass ? C.accent : C.muted;
-  const label = allPass ? "⚡ BUY SIGNAL" : "— HOLD —";
-  return (
-    <div style={{
-      padding: "10px 16px", borderRadius: 8, textAlign: "center",
-      background: allPass ? `${C.accent}18` : "#18181b",
-      border: `1px solid ${allPass ? C.accent + "60" : C.border}`,
-      fontFamily: C.mono, fontSize: 15, fontWeight: 700, color,
-      transition: "all 0.3s ease",
-    }}>
-      {label}
-    </div>
-  );
-}
-
-// ─── Position Panel ───────────────────────────────────────────────────────────
-
-function PositionPanel({ position, midPrice }) {
-  if (!position) {
-    return (
-      <div style={{ padding: 12, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}` }}>
-        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                      textTransform: "uppercase", letterSpacing: "0.1em" }}>Position</div>
-        <div style={{ fontFamily: C.mono, fontSize: 12, color: C.muted, textAlign: "center",
-                      padding: "20px 0" }}>No open position</div>
-      </div>
-    );
-  }
-  const entryPct = ((midPrice - position.entry_price) / position.entry_price) * 100;
-  const targetPct = 2.5;
-  const stopPct = -1.3;
-  const progress = Math.max(0, Math.min(100, ((entryPct - stopPct) / (targetPct - stopPct)) * 100));
-  const pnlColor = entryPct >= 0 ? C.accent : C.danger;
-  return (
-    <div style={{ padding: 12, background: C.panel, borderRadius: 8, border: `1px solid ${C.purple}40` }}>
-      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.purple, marginBottom: 8,
-                    textTransform: "uppercase", letterSpacing: "0.1em" }}>Open Position</div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>Entry</span>
-        <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>{position.entry_price.toFixed(6)}</span>
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>Mid</span>
-        <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>{midPrice.toFixed(6)}</span>
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 12, color: C.muted }}>Unrealised</span>
-        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: pnlColor }}>
-          {entryPct >= 0 ? "+" : ""}{entryPct.toFixed(2)}%
-        </span>
-      </div>
-      {/* Exit watch levels */}
-      <div style={{ padding: "6px 8px", background: C.bg, borderRadius: 6, marginBottom: 8,
-                    fontFamily: C.mono, fontSize: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-          <span style={{ color: C.accent }}>▲ Target</span>
-          <span style={{ color: C.accent }}>{(position.entry_price * 1.025).toFixed(6)}</span>
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <span style={{ color: C.danger }}>▼ Stop</span>
-          <span style={{ color: C.danger }}>{(position.entry_price * 0.987).toFixed(6)}</span>
-        </div>
-      </div>
-      <div style={{ marginBottom: 4, display: "flex", justifyContent: "space-between" }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.danger }}>▼ −1.3%</span>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>progress</span>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.accent }}>▲ +2.5%</span>
-      </div>
-      <div style={{ height: 6, background: "#27272a", borderRadius: 3, overflow: "hidden" }}>
-        <div style={{
-          height: "100%", width: `${progress}%`,
-          background: entryPct >= 0 ? C.accent : C.danger,
-          transition: "width 0.5s ease",
-        }} />
-      </div>
-      <div style={{ marginTop: 8, fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-        {position.candles_held ?? 0} candle{(position.candles_held ?? 0) !== 1 ? "s" : ""} held · time stop at {3 - (position.candles_held ?? 0)} more
-      </div>
-    </div>
-  );
-}
-
-// ─── Session Stats ────────────────────────────────────────────────────────────
-
-function SessionStats({ stats, dailyCap }) {
-  const remaining = dailyCap + (stats?.daily_loss ?? 0);
-  const usedPct = dailyCap > 0 ? Math.max(0, Math.min(100, ((dailyCap - remaining) / dailyCap) * 100)) : 0;
-  return (
-    <div style={{ padding: 12, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}`,
-                  marginTop: 8 }}>
-      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                    textTransform: "uppercase", letterSpacing: "0.1em" }}>Session</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-        {[
-          ["Net P&L", `$${(stats?.session_pnl ?? 0).toFixed(2)}`, (stats?.session_pnl ?? 0) >= 0 ? C.accent : C.danger],
-          ["Win Rate", `${((stats?.win_rate ?? 0) * 100).toFixed(0)}%`, C.text],
-          ["Trades", stats?.trade_count ?? 0, C.text],
-          ["Cap Left", `$${remaining.toFixed(2)}`, remaining > 10 ? C.accent : C.danger],
-        ].map(([label, val, color]) => (
-          <div key={label}>
-            <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{label}</div>
-            <div style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color }}>{val}</div>
-          </div>
-        ))}
-      </div>
-      <div style={{ height: 4, background: "#27272a", borderRadius: 2, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${usedPct}%`, background: C.danger,
-                      transition: "width 0.5s ease" }} />
-      </div>
-      <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted, marginTop: 2 }}>
-        daily cap: ${dailyCap.toFixed(0)}
-      </div>
-    </div>
-  );
-}
-
-// ─── Trade Log ────────────────────────────────────────────────────────────────
-
-function TradeLog({ trades }) {
-  if (!trades || trades.length === 0) {
-    return (
-      <div style={{ fontFamily: C.mono, fontSize: 11, color: C.muted, padding: "16px 0",
-                    textAlign: "center" }}>
-        No closed trades this session
-      </div>
-    );
-  }
-  const cols = ["TIME", "ENTRY", "EXIT", "NET P&L", "REASON", "HOLD"];
-  return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: C.mono, fontSize: 11 }}>
-        <thead>
-          <tr>
-            {cols.map(c => (
-              <th key={c} style={{ padding: "4px 8px", textAlign: "left", color: C.muted,
-                                   borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {[...trades].reverse().map((t) => (
-            <tr key={t.exit_ts} style={{ borderBottom: `1px solid ${C.border}20` }}>
-              <td style={{ padding: "4px 8px", color: C.muted }}>
-                {new Date(t.exit_ts * 1000).toLocaleTimeString()}
-              </td>
-              <td style={{ padding: "4px 8px", color: C.text }}>{t.entry_price.toFixed(6)}</td>
-              <td style={{ padding: "4px 8px", color: C.text }}>{t.exit_price.toFixed(6)}</td>
-              <td style={{ padding: "4px 8px", fontWeight: 700,
-                           color: t.net_pnl >= 0 ? C.accent : C.danger }}>
-                {t.net_pnl >= 0 ? "+" : ""}${t.net_pnl.toFixed(2)}
-              </td>
-              <td style={{ padding: "4px 8px", color: C.muted }}>{t.exit_reason}</td>
-              <td style={{ padding: "4px 8px", color: C.muted }}>{t.hold_candles}c</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ─── Trading View ─────────────────────────────────────────────────────────────
-
-function TradingView({ state, dailyCap, connected, pair, onStop }) {
-  const { gates, position, midPrice, obi, engineState, sessionStats, trades, bars } = state;
-
-  if (!connected) {
-    return (
-      <div>
-        <OfflineBanner />
-        <div style={{ padding: 32, textAlign: "center", fontFamily: C.mono, fontSize: 12,
-                      color: C.muted, background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          Live signals, gates, and position tracking appear here once APEX is connected.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      {/* Control row */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16,
-                    padding: "8px 12px", background: C.panel, borderRadius: 8,
-                    border: `1px solid ${C.border}` }}>
-        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.text }}>
-          {pair ?? "—"}
-        </span>
-        <span style={{ fontFamily: C.mono, fontSize: 14, color: midPrice > 0 ? C.text : C.muted }}>
-          {midPrice > 0 ? `$${midPrice.toFixed(6)}` : "—"}
-        </span>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-          {engineState === "warmup" ? "⏳ warming up" : engineState === "running" ? "● running" : engineState === "halted" ? "⛔ halted" : "○ idle"}
-        </span>
-        <div style={{ marginLeft: "auto" }}>
-          <button
-            onClick={onStop}
-            disabled={engineState === "idle" || engineState === "halted"}
-            style={{
-              padding: "5px 14px", borderRadius: 6,
-              border: `1px solid ${C.danger}60`,
-              background: "transparent", color: C.danger,
-              fontFamily: C.mono, fontSize: 11, fontWeight: 700,
-              cursor: (engineState === "idle" || engineState === "halted") ? "not-allowed" : "pointer",
-              opacity: (engineState === "idle" || engineState === "halted") ? 0.4 : 1,
-            }}
-          >
-            STOP
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
-        {/* Left — candle chart + volume + OBI */}
-        <div style={{ padding: 12, background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                        textTransform: "uppercase", letterSpacing: "0.1em" }}>5-min Candles</div>
-          <CandleChart bars={bars} width={220} height={110} />
-          <VolumeHistogram bars={bars} width={220} height={32} />
-          <OBIGauge obi={obi ?? 0} />
-        </div>
-
-        {/* Middle — gates + signal */}
-        <div style={{ padding: 12, background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                        textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</div>
-          <GateDot pass={gates?.volume_spike} label="Vol Spike"
-                   value={gates?.vol_ema_value ? `${(gates.vol_ema_value / 1000).toFixed(1)}k` : null} />
-          <GateDot pass={gates?.obi} label="OBI >0.20"
-                   value={obi != null ? obi.toFixed(3) : null} />
-          <GateDot pass={gates?.vwap_align} label="VWAP Align"
-                   value={gates?.vwap_value ? `$${parseFloat(gates.vwap_value).toFixed(5)}` : null} />
-          <GateDot pass={gates?.rsi_window} label="RSI 45–78"
-                   value={gates?.rsi_value} />
-          <GateDot pass={gates?.ask_wall_clear} label="Ask Wall" value="<$500" />
-          <div style={{ marginTop: 10 }}>
-            <SignalBanner allPass={gates?.all_pass ?? false} engineState={engineState} />
-          </div>
-        </div>
-
-        {/* Right — position + stats */}
-        <div>
-          <PositionPanel position={position} midPrice={midPrice ?? 0} />
-          <SessionStats stats={sessionStats} dailyCap={dailyCap} />
-        </div>
-      </div>
-
-      {/* Trade log */}
-      <div style={{ padding: 12, background: C.panel, borderRadius: 8,
-                    border: `1px solid ${C.border}` }}>
-        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                      textTransform: "uppercase", letterSpacing: "0.1em" }}>Trade Log</div>
-        <TradeLog trades={trades} />
-      </div>
-    </div>
-  );
-}
-
 // ─── Scan Countdown ───────────────────────────────────────────────────────────
 
 function ScanCountdown({ lastScanTs }) {
   const [secsLeft, setSecsLeft] = useState(null);
-
   useEffect(() => {
     if (!lastScanTs) return;
     const tick = () => {
       const elapsed = Date.now() / 1000 - lastScanTs;
-      const remaining = Math.max(0, 900 - elapsed);
-      setSecsLeft(Math.ceil(remaining));
+      setSecsLeft(Math.max(0, Math.ceil(900 - elapsed)));
     };
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [lastScanTs]);
-
-  if (secsLeft === null) return null;
-  const mins = Math.floor(secsLeft / 60);
-  const secs = secsLeft % 60;
+  if (secsLeft === null) return <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>scanning…</span>;
+  const m = Math.floor(secsLeft / 60);
+  const s = secsLeft % 60;
   return (
-    <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-      next scan in {mins}:{String(secs).padStart(2, "0")}
+    <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+      next scan in {m}:{String(s).padStart(2, "0")}
     </span>
-  );
-}
-
-// ─── Tier Bar ─────────────────────────────────────────────────────────────────
-
-function TierBar({ sharePct }) {
-  const tiers = [
-    { label: "Top 5%", pct: 5, color: C.accent },
-    { label: "Top 10%", pct: 10, color: C.blue },
-    { label: "Top 25%", pct: 25, color: C.warn },
-  ];
-  // sharePct is fraction of total market volume; *500 maps 0.2% share → top-100% (rough rank heuristic)
-  const userPos = Math.min(sharePct * 500, 100);
-  const color = userPos <= 5 ? C.accent : userPos <= 10 ? C.blue : userPos <= 25 ? C.warn : C.danger;
-  return (
-    <div>
-      <div style={{ position: "relative", height: 20, background: "#27272a", borderRadius: 4,
-                    overflow: "visible", marginBottom: 4 }}>
-        {tiers.map(t => (
-          <div key={t.label} style={{
-            position: "absolute", left: `${t.pct}%`, top: 0, bottom: 0,
-            width: 1, background: t.color + "60",
-          }}>
-            <span style={{
-              position: "absolute", top: -16, left: 2,
-              fontFamily: C.mono, fontSize: 9, color: t.color, whiteSpace: "nowrap",
-            }}>{t.label}</span>
-          </div>
-        ))}
-        <div style={{
-          position: "absolute", top: 2, bottom: 2,
-          left: `${Math.min(userPos, 98)}%`, width: 3, borderRadius: 2,
-          background: color, transition: "left 0.3s ease",
-        }} />
-      </div>
-      <div style={{ fontFamily: C.mono, fontSize: 10, color }}>
-        Est. rank: top {userPos.toFixed(0)}%
-      </div>
-    </div>
   );
 }
 
 // ─── Discover View ────────────────────────────────────────────────────────────
 
-function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected, lastScanTs, wsRef }) {
+function DiscoverView({ tokens, onStartEngine, onDismiss, enginePair, connected, lastScanTs, wsRef, sessionStats, dailyCap }) {
   const [levers, setLevers] = useState({});
-  // Per-token opt-in toggle state (local — engine pair is the source of truth when connected)
   const [activeToken, setActiveToken] = useState(enginePair);
+  const [scanningNow, setScanningNow] = useState(false);
 
   useEffect(() => { setActiveToken(enginePair); }, [enginePair]);
 
-  function getShares(token, posSize) {
-    const baseline = token.baseline_volume_7d ?? 3_200_000;
-    const price = token.price ?? 0.165;
-    const marketUsd = baseline * 6 * price;
-    const tradesPerDay = 5;
-    const userUsd = tradesPerDay * posSize * 2;
-    return userUsd / (marketUsd || 1);
-  }
-
-  function ratioColor(ratio) {
-    if (!ratio) return C.muted;
-    if (ratio >= 7) return C.danger;
-    if (ratio >= 4) return C.warn;
-    return C.blue;
-  }
-
   function handleToggle(pair, posSize) {
     if (activeToken === pair) {
-      // Turn off — send stop
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "stop_engine" }));
       }
       setActiveToken(null);
-      onDismiss(pair);
     } else {
       setActiveToken(pair);
       onStartEngine(pair, posSize);
     }
   }
 
-  const anomalous = tokens.filter(t => t.anomaly_ratio && t.anomaly_ratio >= 3);
-  // Show all tokens (sorted: anomalous first) when engine is live
-  const allTokens = connected
-    ? [...anomalous, ...tokens.filter(t => !anomalous.includes(t))]
-    : [];
+  function handleScanNow() {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "scan_now" }));
+      setScanningNow(true);
+      setTimeout(() => setScanningNow(false), 5000);
+    }
+  }
+
+  function ratioColor(r) {
+    if (!r || r < 3) return C.muted;
+    if (r >= 7) return C.danger;
+    if (r >= 4) return C.warn;
+    return C.blue;
+  }
+
+  function fmtVol(v) {
+    if (!v) return "—";
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+    return v.toFixed(0);
+  }
+
+  // Capital summary data
+  const capRemaining = dailyCap + (sessionStats?.daily_loss ?? 0);
+  const capUsed = dailyCap - capRemaining;
+  const hasCapital = capRemaining >= POSITION_SIZE_USD || !connected;
+
+  // Build display rows: live tokens or seed list
+  const displayTokens = connected && tokens.length > 0
+    ? [...tokens].sort((a, b) => (b.anomaly_ratio ?? 0) - (a.anomaly_ratio ?? 0))
+    : SEED_PAIRS.map(p => ({ pair: p }));
 
   return (
     <div>
-      {/* Scan status header */}
-      {connected && (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16,
-                      padding: "8px 12px", background: C.panel, borderRadius: 8,
-                      border: `1px solid ${C.border}` }}>
-          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
+      {/* Scan header */}
+      {connected ? (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12, marginBottom: 16,
+          padding: "10px 16px", background: C.panel, borderRadius: 8,
+          border: `1px solid ${C.border}`,
+        }}>
+          <span style={{ fontFamily: C.mono, fontSize: 11, color: C.text }}>
             {tokens.length} tokens monitored
           </span>
           <span style={{ color: C.border }}>·</span>
           <ScanCountdown lastScanTs={lastScanTs} />
-          <span style={{ color: C.border }}>·</span>
-          {anomalous.length > 0
-            ? <span style={{ fontFamily: C.mono, fontSize: 10, color: C.warn }}>
-                {anomalous.length} anomal{anomalous.length === 1 ? "y" : "ies"} detected
+          {tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length > 0 && (
+            <>
+              <span style={{ color: C.border }}>·</span>
+              <span style={{ fontFamily: C.mono, fontSize: 11, color: C.warn, fontWeight: 700 }}>
+                {tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length} anomal{tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).length === 1 ? "y" : "ies"}
               </span>
-            : <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>no anomalies</span>
-          }
+            </>
+          )}
+          <button
+            onClick={handleScanNow}
+            disabled={scanningNow}
+            style={{
+              marginLeft: "auto", padding: "5px 14px", borderRadius: 6,
+              border: `1px solid ${C.border}`, background: "transparent",
+              color: scanningNow ? C.muted : C.text,
+              fontFamily: C.mono, fontSize: 11, cursor: scanningNow ? "default" : "pointer",
+            }}
+          >
+            {scanningNow ? "Scanning…" : "Scan Now"}
+          </button>
         </div>
+      ) : (
+        <OfflineBanner />
       )}
 
-      {!connected && <OfflineBanner />}
+      {/* Competition table */}
+      <div style={{ background: C.panel, borderRadius: 8, border: `1px solid ${C.border}`,
+                    marginBottom: 12, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: C.mono }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              {["Token", "Vol 24h", "7d Baseline", "Anomaly", "Type", "Capital", "Trade"].map(h => (
+                <th key={h} style={{
+                  padding: "8px 12px", textAlign: "left", fontSize: 10,
+                  color: C.muted, fontWeight: 400, textTransform: "uppercase",
+                  letterSpacing: "0.07em", whiteSpace: "nowrap",
+                }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayTokens.map(token => {
+              const isAnomaly = (token.anomaly_ratio ?? 0) >= 5;
+              const isActive = activeToken === token.pair;
+              const isBusy = !!activeToken && activeToken !== token.pair;
+              const capOk = hasCapital;
+              const canToggle = connected && capOk && !isBusy;
 
-      {/* Live token table */}
-      {allTokens.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          {allTokens.map(token => {
-            const posSize = levers[token.pair] ?? 600;
-            const sharePct = getShares(token, posSize) * 100;
-            const isActive = activeToken === token.pair;
-            const isBusy = activeToken && activeToken !== token.pair;
-            const isAnomalous = token.anomaly_ratio >= 3;
-
-            return (
-              <div key={token.pair} style={{
-                padding: 16, background: C.panel, borderRadius: 8,
-                border: `1px solid ${isAnomalous ? C.purple + "50" : C.border}`,
-                marginBottom: 8,
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontFamily: C.mono, fontSize: 14, fontWeight: 700,
-                                   color: C.text }}>{token.pair}</span>
-                    {isAnomalous && (
+              return (
+                <tr key={token.pair} style={{
+                  borderBottom: `1px solid ${C.border}20`,
+                  background: isActive ? `${C.purple}08` : isAnomaly ? `${C.warn}05` : "transparent",
+                }}>
+                  <td style={{ padding: "10px 12px" }}>
+                    <div style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700,
+                                  color: C.text }}>{token.pair}</div>
+                  </td>
+                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
+                                color: C.text }}>{fmtVol(token.current_volume)}</td>
+                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 12,
+                                color: C.muted }}>{fmtVol(token.baseline_volume_7d)}</td>
+                  <td style={{ padding: "10px 12px" }}>
+                    {token.anomaly_ratio >= 3 ? (
                       <span style={{
-                        padding: "2px 8px", borderRadius: 4,
-                        fontFamily: C.mono, fontSize: 10, fontWeight: 700,
+                        padding: "2px 8px", borderRadius: 4, fontFamily: C.mono,
+                        fontSize: 11, fontWeight: 700,
                         background: ratioColor(token.anomaly_ratio) + "20",
                         color: ratioColor(token.anomaly_ratio),
                       }}>
-                        {token.anomaly_ratio?.toFixed(1)}× baseline
+                        {token.anomaly_ratio.toFixed(1)}×
                       </span>
+                    ) : (
+                      <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>—</span>
                     )}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  </td>
+                  <td style={{ padding: "10px 12px", fontFamily: C.mono, fontSize: 11,
+                                color: C.muted }}>
+                    {token.competition_type
+                      ? <>{token.competition_type}{!token.competition_type_confirmed && <span style={{ color: C.muted + "80" }}> *</span>}</>
+                      : "—"}
+                  </td>
+                  <td style={{ padding: "10px 12px" }}>
+                    <div style={{
+                      fontFamily: C.mono, fontSize: 11,
+                      color: !connected ? C.muted : capOk ? C.accent : C.danger,
+                    }}>
+                      {connected ? (capOk ? `$${POSITION_SIZE_USD} ✓` : `$${POSITION_SIZE_USD} ✗`) : "—"}
+                    </div>
+                  </td>
+                  <td style={{ padding: "10px 12px" }}>
                     <button
-                      onClick={() => onDismiss(token.pair)}
+                      onClick={() => canToggle && handleToggle(token.pair, levers[token.pair] ?? POSITION_SIZE_USD)}
+                      disabled={!canToggle}
+                      title={!connected ? "Connect APEX engine first"
+                           : isBusy ? `Engine trading ${activeToken}`
+                           : !capOk ? "Insufficient capital"
+                           : isActive ? "Stop trading this token"
+                           : "Start trading this token"}
                       style={{
-                        padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`,
-                        background: "transparent", color: C.muted, fontFamily: C.mono,
-                        fontSize: 11, cursor: "pointer",
-                      }}
-                    >
-                      Dismiss 2h
-                    </button>
-                    {/* Opt-in toggle */}
-                    <button
-                      onClick={() => !isBusy && handleToggle(token.pair, posSize)}
-                      disabled={isBusy}
-                      title={isBusy ? `Engine busy on ${activeToken}` : isActive ? "Stop APEX" : "Start APEX"}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 6,
+                        display: "inline-flex", alignItems: "center", gap: 7,
                         padding: "5px 12px", borderRadius: 6, border: "none",
-                        background: isActive ? C.danger + "20" : isBusy ? C.border : C.purple + "20",
-                        color: isActive ? C.danger : isBusy ? C.muted : C.purple,
+                        background: isActive ? `${C.danger}20`
+                                  : canToggle ? `${C.purple}20`
+                                  : "#27272a",
+                        color: isActive ? C.danger : canToggle ? C.purple : C.muted,
                         fontFamily: C.mono, fontSize: 11, fontWeight: 700,
-                        cursor: isBusy ? "not-allowed" : "pointer",
+                        cursor: canToggle ? "pointer" : "not-allowed",
                         transition: "all 0.2s",
                       }}
                     >
                       {/* Toggle pill */}
                       <div style={{
-                        width: 28, height: 14, borderRadius: 7,
-                        background: isActive ? C.danger : isBusy ? C.border : "#27272a",
-                        position: "relative", transition: "background 0.2s",
-                        border: `1px solid ${isActive ? C.danger : C.border}`,
+                        width: 26, height: 13, borderRadius: 7, position: "relative",
+                        background: isActive ? C.danger : canToggle ? "#3f3f46" : "#27272a",
+                        border: `1px solid ${isActive ? C.danger : canToggle ? C.purple + "60" : C.border}`,
+                        transition: "all 0.2s", flexShrink: 0,
                       }}>
                         <div style={{
                           position: "absolute", top: 2,
-                          left: isActive ? 13 : 2,
-                          width: 8, height: 8, borderRadius: "50%",
-                          background: isActive ? C.danger : isBusy ? C.muted : C.purple,
+                          left: isActive ? 12 : 2,
+                          width: 7, height: 7, borderRadius: "50%",
+                          background: isActive ? C.danger : canToggle ? C.purple : C.muted,
                           transition: "left 0.2s",
                         }} />
                       </div>
-                      {isActive ? "Running" : isBusy ? "Busy" : "Trade"}
+                      {isActive ? "ON" : isBusy ? "BUSY" : "OFF"}
                     </button>
-                  </div>
-                </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
-                {isAnomalous && (
-                  <div style={{ marginTop: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                      <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-                        Position size: <strong style={{ color: C.text }}>${posSize}</strong>
-                        {" "}→ ${(5 * posSize * 2).toLocaleString()}/day projected
-                      </span>
-                      <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-                        {sharePct.toFixed(3)}% market share
-                      </span>
-                    </div>
-                    <input
-                      type="range" min={600} max={3000} step={100}
-                      value={posSize}
-                      onChange={e => setLevers(l => ({ ...l, [token.pair]: Number(e.target.value) }))}
-                      style={{ width: "100%", accentColor: C.purple, marginBottom: 8 }}
-                    />
-                    <TierBar sharePct={sharePct / 100} />
-                    <div style={{ marginTop: 8, padding: 8, background: "#0f1923", borderRadius: 6,
-                                  fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-                      Competition type: <span style={{ color: C.warn }}>
-                        {token.competition_type || "unknown"}{!token.competition_type_confirmed ? " (inferred)" : ""}
-                      </span>
-                      {" — "}
-                      <a href="https://www.kraken.com/promotions" target="_blank" rel="noopener noreferrer"
-                         style={{ color: C.blue }}>verify on Kraken</a>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+      {/* Position size lever (only for anomalous tokens) */}
+      {connected && tokens.filter(t => (t.anomaly_ratio ?? 0) >= 5).map(token => (
+        <div key={`lever-${token.pair}`} style={{
+          padding: 16, background: C.panel, borderRadius: 8,
+          border: `1px solid ${C.purple}30`, marginBottom: 8,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <span style={{ fontFamily: C.mono, fontSize: 12, fontWeight: 700,
+                           color: C.text }}>{token.pair} — position lever</span>
+            <span style={{ fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+              ${levers[token.pair] ?? POSITION_SIZE_USD}/trade ·{" "}
+              ${((levers[token.pair] ?? POSITION_SIZE_USD) * 5 * 2).toLocaleString()}/day proj.
+            </span>
+          </div>
+          <input
+            type="range" min={600} max={3000} step={100}
+            value={levers[token.pair] ?? POSITION_SIZE_USD}
+            onChange={e => setLevers(l => ({ ...l, [token.pair]: Number(e.target.value) }))}
+            style={{ width: "100%", accentColor: C.purple, marginBottom: 6 }}
+          />
+          <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
+            Competition type:{" "}
+            <span style={{ color: C.warn }}>
+              {token.competition_type || "volume (inferred)"}
+              {!token.competition_type_confirmed ? " *" : ""}
+            </span>
+            {" — "}
+            <a href="https://www.kraken.com/promotions" target="_blank" rel="noopener noreferrer"
+               style={{ color: C.blue }}>verify on Kraken</a>
+          </div>
+        </div>
+      ))}
+
+      {/* Capital summary */}
+      {connected && (
+        <div style={{
+          display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10,
+          padding: 16, background: C.panel, borderRadius: 8, border: `1px solid ${C.border}`,
+        }}>
+          {[
+            ["Available", `$${capRemaining.toFixed(2)}`, capRemaining >= POSITION_SIZE_USD ? C.accent : C.danger],
+            ["Locked", activeToken ? `$${POSITION_SIZE_USD}` : "$0", C.text],
+            ["Daily Cap", `$${dailyCap.toFixed(0)}`, C.muted],
+            ["Used Today", `$${capUsed.toFixed(2)}`, capUsed > 0 ? C.danger : C.muted],
+          ].map(([l, v, color]) => (
+            <div key={l} style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted,
+                            textTransform: "uppercase", letterSpacing: "0.07em",
+                            marginBottom: 4 }}>{l}</div>
+              <div style={{ fontFamily: C.mono, fontSize: 15, fontWeight: 700, color }}>{v}</div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Offline seed grid */}
-      {tokens.length === 0 && <WatchlistSeed />}
-
-      {/* No anomalies but connected */}
-      {connected && tokens.length > 0 && anomalous.length === 0 && (
-        <div style={{ padding: 16, textAlign: "center", fontFamily: C.mono,
-                      fontSize: 12, color: C.muted, marginTop: 8 }}>
-          All tokens within normal volume range
+      {/* Offline seed note */}
+      {!connected && (
+        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted + "80",
+                      textAlign: "center", marginTop: 12 }}>
+          Showing {SEED_PAIRS.length} seed pairs · live volume data appears on connect
         </div>
       )}
     </div>
@@ -741,43 +806,48 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
   if (!alert) return null;
   return (
     <div style={{
-      position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
       display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
     }}>
       <div style={{
         background: C.panel, border: `1px solid ${C.purple}60`, borderRadius: 12,
-        padding: 24, maxWidth: 480, width: "90%",
+        padding: 28, maxWidth: 500, width: "90%",
+        boxShadow: `0 0 40px ${C.purple}20`,
       }}>
-        <div style={{ fontFamily: C.mono, fontSize: 11, color: C.purple, marginBottom: 4,
+        <div style={{ fontFamily: C.mono, fontSize: 11, color: C.purple, marginBottom: 6,
                       textTransform: "uppercase", letterSpacing: "0.1em" }}>
           ⚡ Competition Detected
         </div>
-        <div style={{ fontFamily: C.sans, fontSize: 18, fontWeight: 700, color: C.text,
-                      marginBottom: 12 }}>{alert.pair}</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+        <div style={{ fontFamily: C.sans, fontSize: 22, fontWeight: 700, color: C.text,
+                      marginBottom: 16 }}>{alert.pair}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10,
+                      marginBottom: 16 }}>
           {[
-            ["Volume", `${(alert.volume / 1_000_000).toFixed(1)}M`],
-            ["Baseline", `${(alert.baseline / 1_000_000).toFixed(1)}M`],
-            ["Ratio", `${alert.ratio?.toFixed(1)}× baseline`],
-            ["Type", `${alert.competition_type || "unknown"}${!alert.competition_type_confirmed ? " (inferred)" : ""}`],
+            ["24h Volume", `${(alert.volume / 1_000_000).toFixed(1)}M tokens`],
+            ["7d Baseline", `${(alert.baseline / 1_000_000).toFixed(1)}M tokens`],
+            ["Anomaly Ratio", `${alert.ratio?.toFixed(1)}× baseline`],
+            ["Competition Type", `${alert.competition_type || "unknown"}${!alert.competition_type_confirmed ? " (inferred)" : ""}`],
           ].map(([l, v]) => (
-            <div key={l} style={{ padding: 8, background: C.bg, borderRadius: 6 }}>
-              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{l}</div>
-              <div style={{ fontFamily: C.mono, fontSize: 12, color: C.text }}>{v}</div>
+            <div key={l} style={{ padding: 10, background: C.bg, borderRadius: 8 }}>
+              <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted,
+                            textTransform: "uppercase", letterSpacing: "0.07em",
+                            marginBottom: 3 }}>{l}</div>
+              <div style={{ fontFamily: C.mono, fontSize: 13, color: C.text }}>{v}</div>
             </div>
           ))}
         </div>
-        <div style={{ padding: 8, background: "#0f1923", borderRadius: 6, marginBottom: 16,
-                      fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-          Strategy: $600 position · +2.5% target · −1.3% stop · 5-min candles
+        <div style={{ padding: "10px 12px", background: "#0f1923", borderRadius: 8,
+                      marginBottom: 16, fontFamily: C.mono, fontSize: 11, color: C.muted }}>
+          Strategy: $600 position · +2.5% target · −1.3% stop · 5-min candles · max 3 candles held
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 10 }}>
           <button
             onClick={() => onStart(alert.pair)}
             style={{
-              flex: 1, padding: "10px 0", borderRadius: 8, border: "none",
+              flex: 1, padding: "12px 0", borderRadius: 8, border: "none",
               background: C.purple, color: C.text,
               fontFamily: C.mono, fontSize: 13, fontWeight: 700, cursor: "pointer",
+              boxShadow: `0 0 20px ${C.purple}40`,
             }}
           >
             Start APEX Engine
@@ -785,7 +855,7 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
           <button
             onClick={() => onDismiss(alert.pair)}
             style={{
-              padding: "10px 16px", borderRadius: 8,
+              padding: "12px 20px", borderRadius: 8,
               border: `1px solid ${C.border}`, background: "transparent",
               color: C.muted, fontFamily: C.mono, fontSize: 12, cursor: "pointer",
             }}
@@ -808,6 +878,7 @@ export default function MemeTab() {
   const [gates, setGates] = useState(null);
   const [position, setPosition] = useState(null);
   const [midPrice, setMidPrice] = useState(0);
+  const [spreadBps, setSpreadBps] = useState(0);
   const [obi, setObi] = useState(0);
   const [sessionStats, setSessionStats] = useState(null);
   const [trades, setTrades] = useState([]);
@@ -835,18 +906,22 @@ export default function MemeTab() {
             setBars(msg.bars ?? []);
             break;
           case "bar_update":
-            if (msg.bar) setBars(prev => {
-              const next = [...prev, msg.bar];
-              return next.slice(-20); // keep last 20
-            });
+            if (msg.bar) setBars(prev => [...prev, msg.bar].slice(-20));
+            break;
+          case "ticker":
+            setMidPrice(msg.price ?? 0);
+            setObi(msg.obi ?? 0);
+            setSpreadBps(msg.spread_bps ?? 0);
             break;
           case "signal_state":
             setGates(msg.gates);
+            setEngineState("running");
             if (msg.gates?.all_pass) setSubView("trading");
             break;
           case "position_update":
             setMidPrice(msg.price ?? 0);
             setObi(msg.obi ?? 0);
+            setSpreadBps(msg.spread_bps ?? 0);
             if (msg.entry && typeof msg.entry === "object") {
               setPosition(p => p ? { ...p, ...msg.entry } : msg.entry);
             }
@@ -854,7 +929,8 @@ export default function MemeTab() {
           case "order_placed":
             if (msg.side === "buy") {
               setPosition({ entry_price: msg.price, qty: msg.qty,
-                            notional_usd: 600, entry_ts: Date.now() / 1000, candles_held: 0 });
+                            notional_usd: POSITION_SIZE_USD,
+                            entry_ts: Date.now() / 1000, candles_held: 0 });
               setSubView("trading");
             }
             break;
@@ -871,6 +947,7 @@ export default function MemeTab() {
             break;
           case "engine_halted":
             setEngineState("halted");
+            setPosition(null);
             break;
           case "competition_alert":
             setPendingAlert(msg);
@@ -919,17 +996,20 @@ export default function MemeTab() {
     }
   }
 
-  const tradingState = { gates, position, midPrice, obi, engineState, sessionStats, trades, bars };
+  const tradingState = { gates, position, midPrice, obi, engineState,
+                          sessionStats, trades, bars, spreadBps };
 
   return (
     <div style={{ padding: "16px 24px", background: C.bg, minHeight: "100%" }}>
-      <div style={{ display: "flex", gap: 0, marginBottom: 20, borderBottom: `1px solid ${C.border}` }}>
+      {/* Sub-nav */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 20,
+                    borderBottom: `1px solid ${C.border}` }}>
         {[["trading", "⚡ Trading"], ["discover", "🔍 Discover"]].map(([key, label]) => (
           <button
             key={key}
             onClick={() => setSubView(key)}
             style={{
-              padding: "8px 18px", border: "none", background: "transparent",
+              padding: "8px 20px", border: "none", background: "transparent",
               fontFamily: C.mono, fontSize: 12, fontWeight: 700,
               color: subView === key ? C.purple : C.muted,
               borderBottom: `2px solid ${subView === key ? C.purple : "transparent"}`,
@@ -942,11 +1022,12 @@ export default function MemeTab() {
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6,
                       paddingBottom: 8 }}>
           <div style={{
-            width: 6, height: 6, borderRadius: "50%",
+            width: 7, height: 7, borderRadius: "50%",
             background: connected ? C.accent : C.danger,
+            boxShadow: connected ? `0 0 6px ${C.accent}` : "none",
           }} />
           <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted }}>
-            {connected ? `APEX ${enginePair ?? "idle"}` : "disconnected"}
+            {connected ? `APEX ${enginePair ? `· ${enginePair}` : "· idle"}` : "disconnected"}
           </span>
         </div>
       </div>
@@ -969,6 +1050,8 @@ export default function MemeTab() {
           connected={connected}
           lastScanTs={lastScanTs}
           wsRef={wsRef}
+          sessionStats={sessionStats}
+          dailyCap={APEX_DAILY_CAP_USD}
         />
       )}
 

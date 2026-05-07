@@ -196,7 +196,8 @@ class SignalEngine:
     ) -> dict:
         """Evaluate all 5 entry gates. Returns dict with gate booleans + all_pass."""
         vol_baseline = self.vol_ema_baseline
-        rsi = wilder_rsi([b.close for b in self._bars] + [latest_bar.close])
+        # bar is already in self._bars (add_bar called before evaluate); don't duplicate
+        rsi = wilder_rsi([b.close for b in self._bars])
         vwap = self.session_vwap
 
         gates = {
@@ -218,7 +219,8 @@ class SignalEngine:
 
         position is a Position dataclass. Returns exit reason string or None.
         """
-        rsi = wilder_rsi([b.close for b in self._bars] + [latest_bar.close])
+        # bar is already in self._bars (add_bar called before evaluate); don't duplicate
+        rsi = wilder_rsi([b.close for b in self._bars])
         if rsi > RSI_EXHAUST:
             return "rsi_exhaust"
         if position.candles_held >= TIME_STOP_CANDLES:
@@ -734,6 +736,8 @@ class MemeAgent:
                         if self._position is not None:
                             await self._exit_position("manual_stop")
                         self._engine_state = "idle"
+                    elif msg.get("type") == "scan_now":
+                        asyncio.ensure_future(self._run_competition_scan())
                 except Exception:
                     pass
         except Exception:
@@ -859,12 +863,17 @@ class MemeAgent:
                 )
                 if reason:
                     await self._exit_position(reason)
+            mid = self._obi_poller.mid_price
+            bid = self._obi_poller.best_bid
+            ask = self._obi_poller.best_ask
+            spread_bps = ((ask - bid) / mid * 10_000) if mid > 0 else 0.0
             if self._position is not None:
                 pos = self._position
                 await self._broadcast({
                     "type": "position_update",
-                    "price": self._obi_poller.mid_price,
+                    "price": mid,
                     "obi": self._obi_poller.obi,
+                    "spread_bps": round(spread_bps, 1),
                     "entry": {
                         "entry_price": pos.entry_price,
                         "qty": pos.qty,
@@ -872,7 +881,15 @@ class MemeAgent:
                         "notional_usd": pos.notional_usd,
                         "entry_ts": pos.entry_ts,
                     },
-                    "unrealised_pnl": (self._obi_poller.mid_price - pos.entry_price) * pos.qty,
+                    "unrealised_pnl": (mid - pos.entry_price) * pos.qty,
+                })
+            else:
+                # Broadcast price/spread even without a position so control row updates
+                await self._broadcast({
+                    "type": "ticker",
+                    "price": mid,
+                    "obi": self._obi_poller.obi,
+                    "spread_bps": round(spread_bps, 1),
                 })
             await asyncio.sleep(OBI_POLL_INTERVAL)
 
@@ -904,6 +921,14 @@ class MemeAgent:
                 self._detector._set_baseline(token["pair"], volume)
                 continue
             self._detector._update_baseline(token["pair"], volume)
+            baseline = self._detector._get_baseline(token["pair"])
+            ratio = volume / baseline if baseline else 0.0
+            # Store live data on token dict so watchlist_update table has full columns
+            with self._detector._lock:
+                t = self._detector._find_token(token["pair"])
+                if t is not None:
+                    t["current_volume"] = volume
+                    t["anomaly_ratio"] = ratio
             if (not self._detector._is_suppressed(token["pair"])
                     and self._detector._is_anomaly(token["pair"], volume)):
                 comp_type = self._detector.infer_competition_type(token["pair"])
@@ -912,8 +937,8 @@ class MemeAgent:
                     "type": "competition_alert",
                     "pair": token["pair"],
                     "volume": volume,
-                    "baseline": self._detector._get_baseline(token["pair"]),
-                    "ratio": volume / self._detector._get_baseline(token["pair"]),
+                    "baseline": baseline,
+                    "ratio": ratio,
                     "competition_type": comp_type,
                     "competition_type_confirmed": token_obj.get("competition_type_confirmed", False),
                 })
