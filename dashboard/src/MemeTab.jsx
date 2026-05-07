@@ -239,28 +239,49 @@ function PositionPanel({ position, midPrice }) {
                       textTransform: "uppercase", letterSpacing: "0.1em" }}>Position</div>
         <div style={{ fontFamily: C.mono, fontSize: 13, color: C.muted }}>No open position</div>
         <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted + "80" }}>
-          Waiting for all 5 gates to pass
+          Waiting for all gates + ATR regime
         </div>
       </div>
     );
   }
+  const mode = position.entry_mode ?? "momentum";
+  const isBounce = mode === "bounce";
+  const stopPct = isBounce ? -1.2 : -1.0;
+  const targetPct = isBounce ? 2.0 : 3.0;
+  const timeStop = isBounce ? 8 : 3;
+  const stopPrice = position.entry_price * (1 + stopPct / 100);
+  const targetPrice = position.entry_price * (1 + targetPct / 100);
+
   const entryPct = ((midPrice - position.entry_price) / position.entry_price) * 100;
   const progress = Math.max(0, Math.min(100,
-    ((entryPct - (-1.3)) / (2.5 - (-1.3))) * 100));
+    ((entryPct - stopPct) / (targetPct - stopPct)) * 100));
   const pnlColor = entryPct >= 0 ? C.accent : C.danger;
   const candles = position.candles_held ?? 0;
+  const peakPrice = position.peak_price ?? 0;
+  const peakPct = peakPrice > 0 ? ((peakPrice - position.entry_price) / position.entry_price) * 100 : 0;
+  const trailActive = peakPct >= 1.5;
+  const trailLevel = trailActive ? peakPrice * 0.99 : null;
 
   return (
     <div style={{ padding: 16, background: C.panel, borderRadius: 8,
                   border: `1px solid ${C.purple}50` }}>
-      <div style={{ fontFamily: C.mono, fontSize: 10, color: C.purple, marginBottom: 12,
-                    textTransform: "uppercase", letterSpacing: "0.1em" }}>Open Position</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginBottom: 12 }}>
+        <div style={{ fontFamily: C.mono, fontSize: 10, color: C.purple,
+                      textTransform: "uppercase", letterSpacing: "0.1em" }}>Open Position</div>
+        <span style={{
+          fontFamily: C.mono, fontSize: 10, fontWeight: 700,
+          padding: "2px 8px", borderRadius: 4,
+          background: isBounce ? `${C.blue}20` : `${C.accent}20`,
+          color: isBounce ? C.blue : C.accent,
+        }}>{mode.toUpperCase()}</span>
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
         {[
           ["Entry", position.entry_price.toFixed(6)],
           ["Mid", midPrice.toFixed(6)],
           ["Qty", position.qty?.toFixed(2) ?? "—"],
-          ["Notional", `$${(position.notional_usd ?? 300).toFixed(0)}`],
+          ["Peak", peakPrice > 0 ? `${peakPrice.toFixed(6)} (${peakPct >= 0 ? "+" : ""}${peakPct.toFixed(2)}%)` : "—"],
         ].map(([l, v]) => (
           <div key={l}>
             <div style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>{l}</div>
@@ -274,17 +295,24 @@ function PositionPanel({ position, midPrice }) {
         </span>
       </div>
       {/* Exit watch levels */}
-      <div style={{ display: "flex", justifyContent: "space-between",
+      <div style={{ display: "flex", flexDirection: "column", gap: 4,
                     padding: "6px 10px", background: C.bg, borderRadius: 6,
                     marginBottom: 10, fontFamily: C.mono, fontSize: 10 }}>
-        <span style={{ color: C.danger }}>▼ stop {(position.entry_price * 0.987).toFixed(6)}</span>
-        <span style={{ color: C.accent }}>▲ target {(position.entry_price * 1.025).toFixed(6)}</span>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ color: C.danger }}>▼ stop {stopPrice.toFixed(6)} ({stopPct}%)</span>
+          <span style={{ color: C.accent }}>▲ target {targetPrice.toFixed(6)} (+{targetPct}%)</span>
+        </div>
+        {trailLevel && (
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <span style={{ color: C.warn }}>◆ trail {trailLevel.toFixed(6)} (peak−1%)</span>
+          </div>
+        )}
       </div>
       {/* Progress bar */}
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.danger }}>−1.3%</span>
+        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.danger }}>{stopPct}%</span>
         <span style={{ fontFamily: C.mono, fontSize: 9, color: C.muted }}>progress to target</span>
-        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.accent }}>+2.5%</span>
+        <span style={{ fontFamily: C.mono, fontSize: 9, color: C.accent }}>+{targetPct}%</span>
       </div>
       <div style={{ height: 8, background: "#27272a", borderRadius: 4, overflow: "hidden",
                     marginBottom: 8 }}>
@@ -296,7 +324,8 @@ function PositionPanel({ position, midPrice }) {
       </div>
       <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, textAlign: "center" }}>
         {candles} candle{candles !== 1 ? "s" : ""} held
-        {" · "}time stop in {Math.max(0, 3 - candles)} more
+        {" · "}time stop in {Math.max(0, timeStop - candles)} more
+        {trailActive && <span style={{ color: C.warn }}> · trail armed</span>}
       </div>
     </div>
   );
@@ -486,8 +515,23 @@ function TradingView({ state, dailyCap, connected, pair, onStop }) {
           <SessionStats stats={sessionStats ?? {}} dailyCap={dailyCap} />
           <div style={{ padding: 16, background: C.panel, borderRadius: 8,
                         border: `1px solid ${C.border}`, flex: 1 }}>
-            <div style={{ fontFamily: C.mono, fontSize: 10, color: C.muted, marginBottom: 8,
-                          textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                          marginBottom: 8 }}>
+              <span style={{ fontFamily: C.mono, fontSize: 10, color: C.muted,
+                             textTransform: "uppercase", letterSpacing: "0.1em" }}>Entry Gates</span>
+              {gates?.entry_mode && gates.entry_mode !== "none" && (
+                <span style={{
+                  fontFamily: C.mono, fontSize: 9, fontWeight: 700,
+                  padding: "1px 6px", borderRadius: 3,
+                  background: gates.entry_mode === "bounce" ? `${C.blue}20` : `${C.accent}20`,
+                  color: gates.entry_mode === "bounce" ? C.blue : C.accent,
+                }}>{gates.entry_mode}</span>
+              )}
+            </div>
+            <GateDot pass={gates?.vol_regime} label="ATR ≥1.5%"
+                     value={gates?.atr_pct != null ? `${(gates.atr_pct * 100).toFixed(1)}%` : null} />
+            <GateDot pass={gates?.trend_aligned} label="EMA trend"
+                     value={null} />
             <GateDot pass={gates?.volume_spike} label="Vol 1.8×"
                      value={gates?.vol_ema_value ? `${(gates.vol_ema_value / 1000).toFixed(1)}k` : null} />
             <GateDot pass={gates?.obi} label="OBI >0.20"
@@ -496,7 +540,9 @@ function TradingView({ state, dailyCap, connected, pair, onStop }) {
                      value={gates?.vwap_value ? `$${parseFloat(gates.vwap_value).toFixed(5)}` : null} />
             <GateDot pass={gates?.rsi_window} label="RSI 45–78"
                      value={gates?.rsi_value != null ? String(gates.rsi_value) : null} />
-            <GateDot pass={gates?.ask_wall_clear} label="Ask wall <$500"
+            <GateDot pass={gates?.not_extended} label="Ext <10%"
+                     value={gates?.extension_pct != null ? `${(gates.extension_pct * 100).toFixed(1)}%` : null} />
+            <GateDot pass={gates?.ask_wall_clear} label="Wall <$500"
                      value={null} />
             <SignalBanner allPass={gates?.all_pass ?? false} engineState={engineState} />
           </div>
@@ -874,7 +920,7 @@ function CompetitionModal({ alert, onStart, onDismiss }) {
         </div>
         <div style={{ padding: "10px 12px", background: "#0f1923", borderRadius: 8,
                       marginBottom: 16, fontFamily: C.mono, fontSize: 11, color: C.muted }}>
-          Strategy: $300 position · +2.5% target · −1.3% stop · 5-min candles · max 3 candles held
+          V3: $300 · maker post-only · ATR ≥1.5% regime filter · momentum +3%/−1% · bounce +2%/−1.2% · trailing stop 1% from peak
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button
@@ -988,7 +1034,9 @@ export default function MemeTab() {
             if (msg.side === "buy") {
               setPosition({ entry_price: msg.price, qty: msg.qty,
                             notional_usd: POSITION_SIZE_USD,
-                            entry_ts: Date.now() / 1000, candles_held: 0 });
+                            entry_ts: Date.now() / 1000, candles_held: 0,
+                            entry_mode: msg.entry_mode ?? "momentum",
+                            peak_price: msg.price });
               setSubView("trading");
             }
             break;

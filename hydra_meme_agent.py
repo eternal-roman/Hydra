@@ -1040,7 +1040,8 @@ class MemeAgent:
             p = self._position
             pos_data = {"entry_price": p.entry_price, "qty": p.qty,
                         "notional_usd": p.notional_usd, "entry_ts": p.entry_ts,
-                        "candles_held": p.candles_held}
+                        "candles_held": p.candles_held,
+                        "entry_mode": p.entry_mode, "peak_price": p.peak_price}
         win_count = sum(1 for t in self._trade_log if t.net_pnl > 0)
         await websocket.send(json.dumps({
             "type": "initial_state",
@@ -1270,6 +1271,8 @@ class MemeAgent:
                             "candles_held": pos.candles_held,
                             "notional_usd": pos.notional_usd,
                             "entry_ts": pos.entry_ts,
+                            "entry_mode": pos.entry_mode,
+                            "peak_price": pos.peak_price,
                         },
                         "unrealised_pnl": (mid - pos.entry_price) * pos.qty if mid > 0 else 0.0,
                     })
