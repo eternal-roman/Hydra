@@ -360,3 +360,74 @@ class CompetitionDetector:
 
     def get_all_tokens(self) -> list[dict]:
         return list(self._data.get("tokens", []))
+
+
+# ─── Session State ─────────────────────────────────────────────────────────────
+
+@dataclass
+class SessionState:
+    pair: str = ""
+    engine_state: str = "idle"   # idle | warmup | running | halted
+    candle_buffer: list = field(default_factory=list)
+    open_position: Optional[dict] = None
+    session_pnl: float = 0.0
+    daily_pnl: float = 0.0
+    trade_count: int = 0
+
+
+def save_session(state: SessionState, path: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(asdict(state), f, indent=2)
+    os.replace(tmp, path)
+
+
+def load_session(path: str) -> SessionState:
+    with open(path) as f:
+        data = json.load(f)
+    return SessionState(**{k: v for k, v in data.items() if k in SessionState.__dataclass_fields__})
+
+
+def append_journal(record: TradeRecord, path: str) -> None:
+    existing: list = []
+    if os.path.exists(path):
+        with open(path) as f:
+            existing = json.load(f)
+    existing.append(asdict(record))
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(existing, f, indent=2)
+    os.replace(tmp, path)
+
+
+# ─── Kraken CLI ────────────────────────────────────────────────────────────────
+
+def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
+    """Execute a kraken CLI command via WSL and return parsed JSON.
+
+    All args are shlex-quoted to prevent injection (matches hydra_kraken_cli.py pattern).
+    """
+    quoted = " ".join(shlex.quote(str(a)) for a in args)
+    cmd_str = "source ~/.cargo/env"
+    api_key = os.environ.get("KRAKEN_API_KEY")
+    api_secret = os.environ.get("KRAKEN_API_SECRET")
+    if api_key and api_secret:
+        cmd_str += (f" && export KRAKEN_API_KEY={shlex.quote(api_key)}"
+                    f" && export KRAKEN_API_SECRET={shlex.quote(api_secret)}")
+    cmd_str += f" && kraken {quoted} -o json 2>/dev/null"
+    cmd = ["wsl", "-d", "Ubuntu", "--", "bash", "-c", cmd_str]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        stdout = result.stdout.strip()
+        if not stdout:
+            return {"error": f"Empty response (exit {result.returncode})"}
+        data = json.loads(stdout)
+        if isinstance(data, dict) and "error" in data:
+            return data
+        return data
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout", "retryable": True}
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse: {e}"}
+    except Exception as e:
+        return {"error": str(e)}

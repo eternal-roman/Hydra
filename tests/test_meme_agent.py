@@ -5,7 +5,8 @@ import pytest
 import time
 import tempfile
 import json as _json
-from hydra_meme_agent import CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap
+import os as _os
+from hydra_meme_agent import CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap, TradeRecord
 
 
 def test_candle_bar_creation():
@@ -354,3 +355,40 @@ def test_competition_detector_suppression_expired():
         detector._set_baseline("PLAY/USD", 3_200_000)
         detector._suppress("PLAY/USD", until=time.time() - 1)
         assert detector._is_suppressed("PLAY/USD") is False
+
+
+# ─── Session State & Persistence Tests ────────────────────────────────────────
+
+from hydra_meme_agent import SessionState, save_session, load_session, append_journal
+
+
+def test_save_and_load_session():
+    with tempfile.TemporaryDirectory() as d:
+        path = _os.path.join(d, "session.json")
+        state = SessionState(pair="PLAY/USD", engine_state="running",
+                             session_pnl=10.20, daily_pnl=10.20, trade_count=2)
+        save_session(state, path)
+        loaded = load_session(path)
+        assert loaded.pair == "PLAY/USD"
+        assert loaded.session_pnl == 10.20
+        assert loaded.trade_count == 2
+
+
+def test_save_session_atomic(tmp_path):
+    path = str(tmp_path / "session.json")
+    state = SessionState(pair="TEST/USD")
+    save_session(state, path)
+    assert _os.path.exists(path)
+    assert not _os.path.exists(path + ".tmp")
+
+
+def test_append_journal(tmp_path):
+    path = str(tmp_path / "journal.json")
+    record = TradeRecord(entry_ts=1000, exit_ts=1300, entry_price=1.0, exit_price=1.025,
+                         qty=600.0, gross_pnl=15.0, fees_usd=4.80, net_pnl=10.20,
+                         exit_reason="profit_target", hold_candles=2)
+    append_journal(record, path)
+    append_journal(record, path)
+    data = _json.loads(open(path).read())
+    assert len(data) == 2
+    assert data[0]["exit_reason"] == "profit_target"
