@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.21.1] — 2026-05-07
+
+APEX Meme Engine bug fixes — critical CLI crash, fill verification, shutdown safety.
+
+### Fixed
+- **Critical:** `_kraken_cli` crashed with `NameError` on every call — `cmd_str` was never initialized (missing `source ~/.cargo/env` base)
+- Fill verification: BUY/SELL now query actual fill price via `query-orders` instead of assuming limit price
+- Shutdown now attempts to close open positions and cancel pending orders (previously left orders on exchange)
+- Sell retry loop capped at 5 attempts — previously retried forever on repeated failure
+- Non-zero exit code from Kraken CLI now surfaced as error (previously silently accepted partial data)
+
+### Added
+- `_query_fill()` helper — queries Kraken order status to get actual fill price and volume
+- `_cancel_order()` helper — cancels a specific order by txid (isolated from main agent's cancel-all)
+- `SELL_MAX_RETRIES` constant (5) with `sell_abandoned` WS broadcast when exhausted
+- Open position persisted to session state on shutdown for manual recovery
+- 10 new tests covering fill verification, order cancellation, and retry limits (69 total)
+
+---
+
 ## [2.21.0] — 2026-05-07
 
 APEX Meme Engine — standalone competition-token trading agent with dedicated dashboard tab.
