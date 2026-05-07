@@ -568,7 +568,6 @@ class MemeExecutor:
             qfmt.format(qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
-            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -598,7 +597,6 @@ class MemeExecutor:
             qfmt.format(position.qty),
             "--type", "limit",
             "--price", pfmt.format(limit_price),
-            "--oflags", "post",
             "--yes",
         ])
         if "error" in result:
@@ -1173,8 +1171,7 @@ class MemeAgent:
         buy_result = await asyncio.to_thread(
             _kraken_cli,
             ["order", "buy", self.pair, qfmt.format(qty),
-             "--type", "limit", "--price", pfmt.format(limit_buy),
-             "--oflags", "post", "--yes"],
+             "--type", "limit", "--price", pfmt.format(limit_buy), "--yes"],
         )
         if "error" in buy_result:
             print(f"[APEX] TEST-FIRE: BUY FAILED — {buy_result}")
@@ -1194,8 +1191,7 @@ class MemeAgent:
         sell_result = await asyncio.to_thread(
             _kraken_cli,
             ["order", "sell", self.pair, qfmt.format(qty),
-             "--type", "limit", "--price", pfmt.format(limit_sell),
-             "--oflags", "post", "--yes"],
+             "--type", "limit", "--price", pfmt.format(limit_sell), "--yes"],
         )
         if "error" in sell_result:
             print(f"[APEX] TEST-FIRE: SELL FAILED — {sell_result}")
