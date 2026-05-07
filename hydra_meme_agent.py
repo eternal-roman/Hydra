@@ -149,3 +149,100 @@ def compute_vwap(bars: list[CandleBar]) -> float:
     total_pv = sum(b.close * b.volume for b in bars)
     total_v = sum(b.volume for b in bars)
     return total_pv / total_v if total_v > 0.0 else 0.0
+
+
+# ─── Signal Engine ─────────────────────────────────────────────────────────────
+
+class SignalEngine:
+    """Evaluates 5 entry gates and 6 exit triggers against candle history."""
+
+    def __init__(self):
+        self._bars: list[CandleBar] = []
+        self._vwap_cum_pv: float = 0.0
+        self._vwap_cum_v: float = 0.0
+
+    def add_bar(self, bar: CandleBar) -> None:
+        """Add a closed bar to the buffer. Trims to CANDLE_BUFFER_SIZE."""
+        self._bars.append(bar)
+        self._vwap_cum_pv += bar.close * bar.volume
+        self._vwap_cum_v += bar.volume
+        if len(self._bars) > CANDLE_BUFFER_SIZE:
+            oldest = self._bars.pop(0)
+            self._vwap_cum_pv -= oldest.close * oldest.volume
+            self._vwap_cum_v -= oldest.volume
+
+    def is_warmed_up(self) -> bool:
+        return len(self._bars) >= WARMUP_BARS
+
+    @property
+    def session_vwap(self) -> float:
+        return self._vwap_cum_pv / self._vwap_cum_v if self._vwap_cum_v > 0 else 0.0
+
+    @property
+    def current_rsi(self) -> float:
+        closes = [b.close for b in self._bars]
+        return wilder_rsi(closes)
+
+    @property
+    def vol_ema_baseline(self) -> float:
+        volumes = [b.volume for b in self._bars]
+        return vol_ema(volumes)
+
+    def evaluate_entry_gates(
+        self,
+        latest_bar: CandleBar,
+        obi: float,
+        ask_wall_usd: float,
+    ) -> dict:
+        """Evaluate all 5 entry gates. Returns dict with gate booleans + all_pass."""
+        vol_baseline = self.vol_ema_baseline
+        rsi = wilder_rsi([b.close for b in self._bars] + [latest_bar.close])
+        vwap = self.session_vwap
+
+        gates = {
+            "volume_spike": latest_bar.volume > VOLUME_SPIKE_MULTIPLIER * vol_baseline,
+            "obi": obi > OBI_ENTRY_THRESHOLD,
+            "vwap_align": latest_bar.close > vwap if vwap > 0 else False,
+            "rsi_window": RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH,
+            "ask_wall_clear": ask_wall_usd < ASK_WALL_USD_LIMIT,
+            "rsi_value": round(rsi, 1),
+            "vwap_value": round(vwap, 8),
+            "vol_ema_value": round(vol_baseline, 2),
+        }
+        gates["all_pass"] = all(gates[k] for k in
+                                ["volume_spike", "obi", "vwap_align", "rsi_window", "ask_wall_clear"])
+        return gates
+
+    def evaluate_exit_bar(self, position, latest_bar: CandleBar) -> Optional[str]:
+        """Bar-close exit triggers: RSI exhaust, time stop, volume death.
+
+        position is a Position dataclass. Returns exit reason string or None.
+        """
+        rsi = wilder_rsi([b.close for b in self._bars] + [latest_bar.close])
+        if rsi > RSI_EXHAUST:
+            return "rsi_exhaust"
+        if position.candles_held >= TIME_STOP_CANDLES:
+            return "time_stop"
+        vol_baseline = self.vol_ema_baseline
+        if vol_baseline > 0 and latest_bar.volume < VOLUME_DEATH_MULTIPLIER * vol_baseline:
+            return "volume_death"
+        return None
+
+    def evaluate_exit_intracandle(
+        self,
+        position,
+        mid_price: float,
+        obi: float,
+    ) -> Optional[str]:
+        """10-second exit triggers: profit target, hard stop, book fade.
+
+        position is a Position dataclass. Returns exit reason string or None.
+        """
+        pct_change = (mid_price - position.entry_price) / position.entry_price
+        if pct_change >= PROFIT_TARGET_PCT:
+            return "profit_target"
+        if pct_change <= HARD_STOP_PCT:
+            return "hard_stop"
+        if obi < OBI_BOOK_FADE:
+            return "book_fade"
+        return None
