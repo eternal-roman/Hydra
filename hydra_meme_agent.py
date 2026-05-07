@@ -713,6 +713,15 @@ class MemeAgent:
 
     async def _ws_handler(self, websocket) -> None:
         self._clients.add(websocket)
+        # Send current candle buffer to new client so chart populates immediately
+        bars = self._signal_engine._bars
+        if bars:
+            await websocket.send(json.dumps({
+                "type": "candle_history",
+                "bars": [{"ts": b.ts, "open": b.open, "high": b.high,
+                           "low": b.low, "close": b.close, "volume": b.volume,
+                           "vwap": b.vwap} for b in bars],
+            }))
         try:
             async for raw in websocket:
                 try:
@@ -721,6 +730,10 @@ class MemeAgent:
                         pair = msg.get("pair", "")
                         if pair:
                             self._detector._suppress(pair, time.time() + 7200)
+                    elif msg.get("type") == "stop_engine":
+                        if self._position is not None:
+                            await self._exit_position("manual_stop")
+                        self._engine_state = "idle"
                 except Exception:
                     pass
         except Exception:
@@ -751,6 +764,13 @@ class MemeAgent:
 
     async def _handle_bar(self, bar: CandleBar) -> None:
         self._signal_engine.add_bar(bar)
+        # Broadcast bar so frontend chart updates on every close
+        await self._broadcast({
+            "type": "bar_update",
+            "bar": {"ts": bar.ts, "open": bar.open, "high": bar.high,
+                    "low": bar.low, "close": bar.close, "volume": bar.volume,
+                    "vwap": bar.vwap},
+        })
         if not self._signal_engine.is_warmed_up():
             self._engine_state = "warmup"
             return
