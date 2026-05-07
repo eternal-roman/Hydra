@@ -347,6 +347,34 @@ def test_competition_detector_ema_update():
         assert abs(updated - 3_200_000) < 1000
 
 
+# ─── Extension Guard Tests ────────────────────────────────────────────────────
+
+def test_entry_gate_extension_blocks_parabolic():
+    """Extension guard blocks entry when price is >20% above slow EMA."""
+    from hydra_meme_agent import EXTENSION_MAX_PCT
+    eng = SignalEngine()
+    for i in range(25):
+        eng.add_bar(_make_bar(close=1.0 + i * 0.05, volume=1000.0, ts=i * 300))
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=2.3, volume=2000.0),
+        obi=0.25,
+        ask_wall_usd=100.0,
+    )
+    assert gates["not_extended"] is False
+    assert gates["all_pass"] is False
+
+
+def test_entry_gate_extension_passes_normal():
+    """Extension guard passes when price is within 20% of slow EMA."""
+    eng = _warmed_engine(close=1.0, n_bars=25)
+    gates = eng.evaluate_entry_gates(
+        latest_bar=_make_bar(close=1.015, volume=2000.0),
+        obi=0.25,
+        ask_wall_usd=100.0,
+    )
+    assert gates["not_extended"] is True
+
+
 def test_ema_simple():
     """EMA with alpha = 2/(period+1)."""
     from hydra_meme_agent import ema

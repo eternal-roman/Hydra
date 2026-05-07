@@ -62,6 +62,8 @@ SELL_MAX_RETRIES = 5         # abandon after N failed sell attempts
 COMPETITION_ANOMALY_RATIO = 5.0
 COMPETITION_EMA_ALPHA = 1 / 7
 
+EXTENSION_MAX_PCT = 0.20  # block entry when price is >20% above slow EMA
+
 COMPETITION_SEED_PAIRS = [
     # Meme tokens
     "WIF/USD", "POPCAT/USD", "BONK/USD", "PEPE/USD", "PLAY/USD", "LION/USD",
@@ -238,6 +240,13 @@ class SignalEngine:
             ema_slow = ema(closes, EMA_TREND_SLOW)
             trend_aligned = ema_fast > ema_slow
 
+        not_extended = True
+        if len(self._bars) >= EMA_TREND_SLOW:
+            ema_slow_val = ema(closes, EMA_TREND_SLOW)
+            if ema_slow_val > 0:
+                extension = (latest_bar.close - ema_slow_val) / ema_slow_val
+                not_extended = extension <= EXTENSION_MAX_PCT
+
         gates = {
             "volume_spike": latest_bar.volume > VOLUME_SPIKE_MULTIPLIER * vol_baseline,
             "obi": obi > OBI_ENTRY_THRESHOLD,
@@ -245,13 +254,14 @@ class SignalEngine:
             "rsi_window": RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH,
             "ask_wall_clear": ask_wall_usd < ASK_WALL_USD_LIMIT,
             "trend_aligned": trend_aligned,
+            "not_extended": not_extended,
             "rsi_value": round(rsi, 1),
             "vwap_value": round(vwap, 8),
             "vol_ema_value": round(vol_baseline, 2),
         }
         gates["all_pass"] = all(gates[k] for k in
                                 ["volume_spike", "obi", "vwap_align", "rsi_window",
-                                 "ask_wall_clear", "trend_aligned"])
+                                 "ask_wall_clear", "trend_aligned", "not_extended"])
         return gates
 
     def evaluate_exit_bar(self, position, latest_bar: CandleBar) -> Optional[str]:
