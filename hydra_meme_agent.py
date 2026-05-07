@@ -48,12 +48,13 @@ COMPETITION_ANOMALY_RATIO = 5.0
 COMPETITION_EMA_ALPHA = 1 / 7
 
 COMPETITION_SEED_PAIRS = [
-    "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD",
-    "DOT/USD", "LINK/USD", "AVAX/USD", "ATOM/USD", "NEAR/USD",
-    "FIL/USD", "APT/USD", "OP/USD", "ARB/USD", "INJ/USD",
-    "TIA/USD", "SEI/USD", "PYTH/USD", "WIF/USD", "POPCAT/USD",
-    "BONK/USD", "PEPE/USD", "PLAY/USD", "LION/USD",
-    "MATIC/USD", "SAND/USD", "MANA/USD", "ENJ/USD", "CHZ/USD",
+    # Meme tokens
+    "WIF/USD", "POPCAT/USD", "BONK/USD", "PEPE/USD", "PLAY/USD", "LION/USD",
+    # Gaming / metaverse tokens
+    "SAND/USD", "MANA/USD", "ENJ/USD", "CHZ/USD",
+    # Newer ecosystem tokens Kraken actively promotes
+    "NEAR/USD", "APT/USD", "OP/USD", "ARB/USD", "INJ/USD",
+    "TIA/USD", "SEI/USD", "PYTH/USD",
 ]
 
 

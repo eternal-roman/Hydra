@@ -20,12 +20,13 @@ const APEX_DAILY_CAP_USD = 30;
 const POSITION_SIZE_USD = 300;
 
 const SEED_PAIRS = [
-  "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "ADA/USD",
-  "DOT/USD", "LINK/USD", "AVAX/USD", "ATOM/USD", "NEAR/USD",
-  "FIL/USD", "APT/USD", "OP/USD", "ARB/USD", "INJ/USD",
-  "TIA/USD", "SEI/USD", "PYTH/USD", "WIF/USD", "POPCAT/USD",
-  "BONK/USD", "PEPE/USD", "PLAY/USD", "LION/USD",
-  "MATIC/USD", "SAND/USD", "MANA/USD", "ENJ/USD", "CHZ/USD",
+  // Meme tokens
+  "WIF/USD", "POPCAT/USD", "BONK/USD", "PEPE/USD", "PLAY/USD", "LION/USD",
+  // Gaming / metaverse
+  "SAND/USD", "MANA/USD", "ENJ/USD", "CHZ/USD",
+  // Newer ecosystem tokens Kraken actively promotes
+  "NEAR/USD", "APT/USD", "OP/USD", "ARB/USD", "INJ/USD",
+  "TIA/USD", "SEI/USD", "PYTH/USD",
 ];
 
 // ─── Candle Chart (hero element) ─────────────────────────────────────────────
