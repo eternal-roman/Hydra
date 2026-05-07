@@ -431,3 +431,103 @@ def _kraken_cli(args: list[str], timeout: int = 20) -> dict:
         return {"error": f"JSON parse: {e}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ─── Meme Executor ─────────────────────────────────────────────────────────────
+
+TAKER_FEE_RATE = 0.004   # 0.40% taker fee on competition tokens
+
+
+class MemeExecutor:
+    """Places taker limit orders and tracks position + daily P&L."""
+
+    def __init__(self, pair: str, position_size: float, daily_cap: float):
+        self.pair = pair
+        self.position_size = position_size
+        self.daily_cap = daily_cap
+        self._daily_pnl: float = 0.0
+        self._daily_loss: float = 0.0
+        self._halted: bool = False
+        self._pair_nodash = pair.replace("/", "")
+
+    def is_halted(self) -> bool:
+        return self._halted or self._daily_loss <= -self.daily_cap
+
+    def record_pnl(self, net_pnl: float) -> None:
+        self._daily_pnl += net_pnl
+        if net_pnl < 0:
+            self._daily_loss += net_pnl
+        if self._daily_loss <= -self.daily_cap:
+            self._halted = True
+
+    def _buy_limit_price(self, ask: float) -> float:
+        return ask * (1 + TAKER_SLIPPAGE_BPS / 10_000)
+
+    def _sell_limit_price(self, bid: float) -> float:
+        return bid * (1 - TAKER_SLIPPAGE_BPS / 10_000)
+
+    def _buy_qty(self, ask: float) -> float:
+        return self.position_size / ask
+
+    def _compute_net_pnl(self, position: Position, exit_price: float) -> float:
+        gross = (exit_price - position.entry_price) * position.qty
+        entry_fee = position.notional_usd * TAKER_FEE_RATE
+        exit_notional = exit_price * position.qty
+        exit_fee = exit_notional * TAKER_FEE_RATE
+        return gross - entry_fee - exit_fee
+
+    def place_buy(self, ask: float) -> Optional[Position]:
+        """Place a taker BUY limit order. Returns Position on success, None on failure."""
+        if self.is_halted():
+            return None
+        limit_price = self._buy_limit_price(ask)
+        qty = self._buy_qty(ask)
+        result = _kraken_cli([
+            "order", "buy",
+            self.pair,
+            f"{qty:.8f}",
+            "--type", "limit",
+            "--price", f"{limit_price:.8f}",
+            "--yes",
+        ])
+        if "error" in result:
+            return None
+        order_id = result.get("txid", [""])[0] if isinstance(result.get("txid"), list) else result.get("txid", "")
+        return Position(
+            entry_price=limit_price,
+            qty=qty,
+            notional_usd=self.position_size,
+            entry_ts=int(time.time()),
+            order_id=str(order_id),
+        )
+
+    def place_sell(self, position: Position, bid: float, reason: str) -> dict:
+        """Place a taker SELL limit order. Returns trade record dict."""
+        limit_price = self._sell_limit_price(bid)
+        result = _kraken_cli([
+            "order", "sell",
+            self.pair,
+            f"{position.qty:.8f}",
+            "--type", "limit",
+            "--price", f"{limit_price:.8f}",
+            "--yes",
+        ])
+        exit_price = limit_price  # assume fill at limit
+        net_pnl = self._compute_net_pnl(position, exit_price)
+        self.record_pnl(net_pnl)
+        gross = (exit_price - position.entry_price) * position.qty
+        entry_fee = position.notional_usd * TAKER_FEE_RATE
+        exit_fee = exit_price * position.qty * TAKER_FEE_RATE
+        record = TradeRecord(
+            entry_ts=position.entry_ts,
+            exit_ts=int(time.time()),
+            entry_price=position.entry_price,
+            exit_price=exit_price,
+            qty=position.qty,
+            gross_pnl=gross,
+            fees_usd=entry_fee + exit_fee,
+            net_pnl=net_pnl,
+            exit_reason=reason,
+            hold_candles=position.candles_held,
+        )
+        return {"record": record, "order_result": result}

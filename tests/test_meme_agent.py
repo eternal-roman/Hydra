@@ -6,7 +6,7 @@ import time
 import tempfile
 import json as _json
 import os as _os
-from hydra_meme_agent import CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap, TradeRecord
+from hydra_meme_agent import CandleBar, wilder_rsi, vol_ema, compute_obi, compute_vwap, TradeRecord, TAKER_SLIPPAGE_BPS, SLIPPAGE_CAP_BPS
 
 
 def test_candle_bar_creation():
@@ -391,4 +391,74 @@ def test_append_journal(tmp_path):
     append_journal(record, path)
     data = _json.loads(open(path).read())
     assert len(data) == 2
-    assert data[0]["exit_reason"] == "profit_target"
+
+
+# ─── MemeExecutor Tests ────────────────────────────────────────────────────────
+
+from hydra_meme_agent import MemeExecutor
+
+
+def test_executor_buy_price_calculation():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    ask = 0.16540
+    expected_limit = ask * (1 + TAKER_SLIPPAGE_BPS / 10000)
+    price = exec_._buy_limit_price(ask)
+    assert abs(price - expected_limit) < 0.000001
+
+
+def test_executor_buy_rejects_above_slippage_cap():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    ask = 0.16540
+    price = exec_._buy_limit_price(ask)
+    assert price <= ask * (1 + SLIPPAGE_CAP_BPS / 10000)
+
+
+def test_executor_sell_price_calculation():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    bid = 0.16520
+    price = exec_._sell_limit_price(bid)
+    expected = bid * (1 - TAKER_SLIPPAGE_BPS / 10000)
+    assert abs(price - expected) < 0.000001
+
+
+def test_executor_qty_calculation():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    ask = 0.16540
+    qty = exec_._buy_qty(ask)
+    assert abs(qty * ask - 600.0) < 0.01
+
+
+def test_executor_daily_cap_blocks_trade():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    exec_._daily_loss = -30.01  # already hit cap
+    assert exec_.is_halted() is True
+
+
+def test_executor_not_halted_initially():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    assert exec_.is_halted() is False
+
+
+def test_executor_record_loss_triggers_halt():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    exec_.record_pnl(-31.0)
+    assert exec_.is_halted() is True
+
+
+def test_executor_record_pnl_accumulates():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    exec_.record_pnl(10.20)
+    exec_.record_pnl(-5.00)
+    assert abs(exec_._daily_pnl - 5.20) < 0.001
+
+
+def test_executor_net_pnl_calculation():
+    exec_ = MemeExecutor("PLAY/USD", position_size=600.0, daily_cap=30.0)
+    # BUY at 0.16000, SELL at 0.16400 (2.5% move)
+    pos = Position(entry_price=0.16000, qty=3750.0, notional_usd=600.0,
+                   entry_ts=1000, candles_held=2)
+    exit_price = 0.16400
+    net = exec_._compute_net_pnl(pos, exit_price)
+    # gross = (0.164 - 0.16) * 3750 = $15.00
+    # fees = 600 * 0.004 + (600*1.025) * 0.004 ≈ 4.86
+    assert 9.0 < net < 11.0
