@@ -650,3 +650,9 @@ def test_place_sell_uses_actual_fill_price():
 def test_sell_max_retries_constant():
     assert SELL_MAX_RETRIES > 0
     assert SELL_MAX_RETRIES <= 10
+
+
+def test_apex_ws_port_no_collision():
+    """APEX port must not collide with hydra_ws_server.next_agent_port."""
+    from hydra_meme_agent import WS_PORT
+    assert WS_PORT >= 8770, f"WS_PORT={WS_PORT} collides with hydra_ws_server agent port range (8766+)"

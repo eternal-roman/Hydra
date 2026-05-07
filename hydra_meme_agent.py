@@ -34,7 +34,7 @@ if os.path.exists(_env_path):
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-WS_PORT = 8766
+WS_PORT = 8770
 CANDLE_INTERVAL = 5          # minutes
 WARMUP_BARS = 15
 CANDLE_BUFFER_SIZE = 100

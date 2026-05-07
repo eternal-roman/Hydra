@@ -15,7 +15,7 @@ const C = {
   sans: "Space Grotesk, system-ui, sans-serif",
 };
 
-const APEX_WS = "ws://localhost:8766";
+const APEX_WS = "ws://localhost:8770";
 const APEX_DAILY_CAP_USD = 30;
 const POSITION_SIZE_USD = 300;
 
