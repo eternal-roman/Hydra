@@ -531,3 +531,371 @@ class MemeExecutor:
             hold_candles=position.candles_held,
         )
         return {"record": record, "order_result": result}
+
+
+# ─── OBI Poller ────────────────────────────────────────────────────────────────
+
+class OBIPoller:
+    """Polls kraken orderbook every 10s and caches OBI + best bid/ask."""
+
+    def __init__(self, pair: str):
+        self.pair = pair
+        self._pair_nodash = pair.replace("/", "")
+        self._obi: float = 0.0
+        self._best_bid: float = 0.0
+        self._best_ask: float = 0.0
+        self._last_poll: float = 0.0
+
+    def poll(self) -> None:
+        """Fetch orderbook and update cached values. Enforces 2s floor."""
+        now = time.time()
+        if now - self._last_poll < KRAKEN_REST_FLOOR:
+            return
+        self._last_poll = now
+        result = _kraken_cli(["orderbook", self._pair_nodash, "--count", str(OBI_LEVELS)])
+        if "error" in result:
+            return
+        # Kraken orderbook response: {PAIR: {bids: [[price, qty, ts], ...], asks: [...]}}
+        book = result.get(self._pair_nodash) or result.get(self.pair) or {}
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        if bids and asks:
+            self._obi = compute_obi(
+                [(b[0], b[1]) for b in bids],
+                [(a[0], a[1]) for a in asks],
+            )
+            self._best_bid = float(bids[0][0])
+            self._best_ask = float(asks[0][0])
+
+    @property
+    def obi(self) -> float:
+        return self._obi
+
+    @property
+    def mid_price(self) -> float:
+        return (self._best_bid + self._best_ask) / 2 if self._best_bid else 0.0
+
+    @property
+    def best_bid(self) -> float:
+        return self._best_bid
+
+    @property
+    def best_ask(self) -> float:
+        return self._best_ask
+
+    def ask_wall_usd(self) -> float:
+        """Compute top-3 ask levels total USD depth (for ask_wall_clear gate)."""
+        result = _kraken_cli(["orderbook", self._pair_nodash, "--count", "3"])
+        if "error" in result:
+            return 999_999.0
+        book = result.get(self._pair_nodash) or result.get(self.pair) or {}
+        asks = book.get("asks", [])
+        return sum(float(a[0]) * float(a[1]) for a in asks[:3])
+
+
+# ─── Candle Aggregator ─────────────────────────────────────────────────────────
+
+class CandleAggregator:
+    """Subscribes to Kraken public WebSocket ohlc-5 channel.
+
+    Fires on_bar callback with each newly closed CandleBar.
+    Reconnects with exponential backoff on disconnect.
+    """
+    WS_URL = "wss://ws.kraken.com"
+
+    def __init__(self, pair: str, on_bar):
+        self.pair = pair          # e.g. "PLAY/USD"
+        self._on_bar = on_bar
+        self._last_etime: str = ""
+        self._last_bar: Optional[CandleBar] = None
+        self._running = True
+
+    def stop(self) -> None:
+        self._running = False
+
+    async def run(self) -> None:
+        backoff = 5
+        while self._running:
+            try:
+                async with websockets.connect(self.WS_URL, ping_interval=20) as ws:
+                    backoff = 5  # reset on successful connect
+                    await ws.send(json.dumps({
+                        "event": "subscribe",
+                        "pair": [self.pair],
+                        "subscription": {"name": "ohlc", "interval": CANDLE_INTERVAL},
+                    }))
+                    async for raw in ws:
+                        if not self._running:
+                            return
+                        self._handle(raw)
+            except Exception:
+                if not self._running:
+                    return
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    def _handle(self, raw: str) -> None:
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        # Subscription confirmation / heartbeat — skip
+        if not isinstance(msg, list) or len(msg) < 4:
+            return
+        channel_name = msg[2] if len(msg) > 2 else ""
+        if not str(channel_name).startswith("ohlc"):
+            return
+        ohlc = msg[1]  # [time, etime, open, high, low, close, vwap, volume, count]
+        if len(ohlc) < 9:
+            return
+        etime = str(ohlc[1])
+        # New etime means previous bar closed; emit that bar
+        if etime != self._last_etime and self._last_bar is not None:
+            self._on_bar(self._last_bar)
+        # Update running bar
+        self._last_etime = etime
+        self._last_bar = CandleBar(
+            ts=int(float(ohlc[0])),
+            open=float(ohlc[2]),
+            high=float(ohlc[3]),
+            low=float(ohlc[4]),
+            close=float(ohlc[5]),
+            vwap=float(ohlc[6]),
+            volume=float(ohlc[7]),
+            count=int(ohlc[8]),
+        )
+
+
+# ─── Meme Agent ────────────────────────────────────────────────────────────────
+
+class MemeAgent:
+    """Orchestrates all components and broadcasts state on port 8766."""
+
+    def __init__(self, pair: str, position_size: float, daily_cap: float,
+                 session_path: str = "hydra_meme_session.json",
+                 journal_path: str = "hydra_meme_journal.json",
+                 watchlist_path: str = "hydra_meme_watchlist.json"):
+        self.pair = pair
+        self._clients: set = set()
+        self._signal_engine = SignalEngine()
+        self._obi_poller = OBIPoller(pair)
+        self._executor = MemeExecutor(pair, position_size, daily_cap)
+        self._detector = CompetitionDetector(watchlist_path)
+        self._candle_agg = CandleAggregator(pair, self._on_bar)
+        self._position: Optional[Position] = None
+        self._session_path = session_path
+        self._journal_path = journal_path
+        self._trade_log: list[TradeRecord] = []
+        self._engine_state = "warmup"
+        self._last_competition_scan = 0.0
+
+    # ── WebSocket server ──
+
+    async def _ws_handler(self, websocket) -> None:
+        self._clients.add(websocket)
+        try:
+            async for raw in websocket:
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "dismiss_alert":
+                        pair = msg.get("pair", "")
+                        if pair:
+                            self._detector._suppress(pair, time.time() + 7200)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            self._clients.discard(websocket)
+
+    async def _broadcast(self, msg: dict) -> None:
+        if not self._clients:
+            return
+        data = json.dumps(msg)
+        await asyncio.gather(*[c.send(data) for c in list(self._clients)],
+                             return_exceptions=True)
+
+    def _broadcast_sync(self, msg: dict) -> None:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._broadcast(msg))
+        except Exception:
+            pass
+
+    # ── Bar callback (from CandleAggregator, called in WS thread) ──
+
+    def _on_bar(self, bar: CandleBar) -> None:
+        self._signal_engine.add_bar(bar)
+        if not self._signal_engine.is_warmed_up():
+            self._engine_state = "warmup"
+            return
+        self._engine_state = "running"
+        # Broadcast signal state
+        gates = self._signal_engine.evaluate_entry_gates(
+            bar, self._obi_poller.obi, self._obi_poller.ask_wall_usd()
+        )
+        self._broadcast_sync({"type": "signal_state", "gates": gates,
+                               "pair": self.pair, "ts": bar.ts})
+        # Bar-close exit check
+        if self._position is not None:
+            self._position.candles_held += 1
+            reason = self._signal_engine.evaluate_exit_bar(self._position, bar)
+            if reason:
+                self._exit_position(reason)
+                return
+        # Entry check (only when no position)
+        if self._position is None and not self._executor.is_halted():
+            if gates["all_pass"]:
+                pos = self._executor.place_buy(self._obi_poller.best_ask)
+                if pos:
+                    self._position = pos
+                    self._broadcast_sync({"type": "order_placed",
+                                          "side": "buy",
+                                          "price": pos.entry_price,
+                                          "qty": pos.qty})
+
+    def _exit_position(self, reason: str) -> None:
+        if self._position is None:
+            return
+        result = self._executor.place_sell(
+            self._position, self._obi_poller.best_bid, reason
+        )
+        record: TradeRecord = result["record"]
+        self._trade_log.append(record)
+        append_journal(record, self._journal_path)
+        self._broadcast_sync({"type": "trade_closed",
+                               "net_pnl": record.net_pnl,
+                               "exit_reason": reason,
+                               "entry": record.entry_price,
+                               "exit": record.exit_price})
+        self._position = None
+        if self._executor.is_halted():
+            self._engine_state = "halted"
+            self._broadcast_sync({"type": "engine_halted",
+                                   "reason": "daily_cap",
+                                   "daily_pnl": self._executor._daily_pnl})
+        self._broadcast_sync({
+            "type": "session_stats",
+            "session_pnl": self._executor._daily_pnl,
+            "trade_count": len(self._trade_log),
+            "win_rate": sum(1 for t in self._trade_log if t.net_pnl > 0) / len(self._trade_log),
+            "daily_cap_remaining": self._executor.daily_cap + self._executor._daily_loss,
+        })
+
+    # ── 10-second OBI loop ──
+
+    async def _obi_loop(self) -> None:
+        while True:
+            if os.environ.get("HYDRA_APEX_DISABLED") == "1":
+                self._engine_state = "halted"
+                await self._broadcast({"type": "engine_halted", "reason": "kill_switch"})
+                return
+            await asyncio.to_thread(self._obi_poller.poll)
+            if self._position is not None and self._engine_state == "running":
+                reason = self._signal_engine.evaluate_exit_intracandle(
+                    self._position, self._obi_poller.mid_price, self._obi_poller.obi
+                )
+                if reason:
+                    self._exit_position(reason)
+            if self._position is not None:
+                await self._broadcast({
+                    "type": "position_update",
+                    "price": self._obi_poller.mid_price,
+                    "obi": self._obi_poller.obi,
+                    "entry": self._position.entry_price,
+                    "unrealised_pnl": (self._obi_poller.mid_price - self._position.entry_price)
+                                      * self._position.qty,
+                })
+            await asyncio.sleep(OBI_POLL_INTERVAL)
+
+    # ── 15-minute competition scan loop ──
+
+    async def _competition_loop(self) -> None:
+        while True:
+            await asyncio.sleep(COMPETITION_SCAN_INTERVAL)
+            tokens = self._detector.get_all_tokens()
+            last_call = 0.0
+            for token in tokens:
+                elapsed = time.time() - last_call
+                if elapsed < KRAKEN_REST_FLOOR:
+                    await asyncio.sleep(KRAKEN_REST_FLOOR - elapsed)
+                pair_nodash = token["pair"].replace("/", "")
+                result = await asyncio.to_thread(
+                    _kraken_cli, ["ticker", pair_nodash]
+                )
+                last_call = time.time()
+                if "error" in result:
+                    continue
+                ticker_data = result.get(pair_nodash) or result.get(token["pair"]) or {}
+                # Kraken ticker: v[1] = 24h volume
+                vol_str = ticker_data.get("v", [None, None])[1]
+                if not vol_str:
+                    continue
+                volume = float(vol_str)
+                if self._detector._get_baseline(token["pair"]) is None:
+                    self._detector._set_baseline(token["pair"], volume)
+                    continue
+                self._detector._update_baseline(token["pair"], volume)
+                if (not self._detector._is_suppressed(token["pair"])
+                        and self._detector._is_anomaly(token["pair"], volume)):
+                    comp_type = self._detector.infer_competition_type(token["pair"])
+                    await self._broadcast({
+                        "type": "competition_alert",
+                        "pair": token["pair"],
+                        "volume": volume,
+                        "baseline": self._detector._get_baseline(token["pair"]),
+                        "ratio": volume / self._detector._get_baseline(token["pair"]),
+                        "competition_type": comp_type,
+                    })
+            # Broadcast full token list after scan
+            await self._broadcast({
+                "type": "watchlist_update",
+                "tokens": self._detector.get_all_tokens(),
+            })
+
+    # ── Main run ──
+
+    async def run(self) -> None:
+        server = await websockets.serve(self._ws_handler, "localhost", WS_PORT)
+        print(f"[APEX] WebSocket server on ws://localhost:{WS_PORT}")
+        print(f"[APEX] Trading {self.pair} | Warmup: {WARMUP_BARS} bars ({WARMUP_BARS * CANDLE_INTERVAL} min)")
+        try:
+            await asyncio.gather(
+                self._candle_agg.run(),
+                self._obi_loop(),
+                self._competition_loop(),
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+# ─── Entry Point ───────────────────────────────────────────────────────────────
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="APEX Meme Engine")
+    p.add_argument("--pair", required=True, help="Trading pair e.g. PLAY/USD")
+    p.add_argument("--position-size", type=float, default=600.0)
+    p.add_argument("--daily-cap", type=float, default=30.0)
+    p.add_argument("--session-path", default="hydra_meme_session.json")
+    p.add_argument("--journal-path", default="hydra_meme_journal.json")
+    p.add_argument("--watchlist-path", default="hydra_meme_watchlist.json")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    agent = MemeAgent(
+        pair=args.pair,
+        position_size=args.position_size,
+        daily_cap=args.daily_cap,
+        session_path=args.session_path,
+        journal_path=args.journal_path,
+        watchlist_path=args.watchlist_path,
+    )
+    asyncio.run(agent.run())
+
+
+if __name__ == "__main__":
+    main()
