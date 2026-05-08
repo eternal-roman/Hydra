@@ -4232,7 +4232,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                                   `CLAMPED (raw ×${(ai.size_multiplier_unclamped ?? 0).toFixed(2)})`,
                                   COLORS.warn
                                 )}
-                                {ai.rules_force_hold && pill("RULES FORCE-HOLD", COLORS.sell, `${COLORS.sell}25`)}
+                                {ai.rules_force_hold && !ai.qfe_active && pill("RULES FORCE-HOLD", COLORS.sell, `${COLORS.sell}25`)}
+                                {ai.qfe_active && pill("QFE PROFIT EXIT", COLORS.buy, `${COLORS.buy}25`)}
                                 {ai.cached && (
                                   <span
                                     title={tickDelta != null && tickDelta > 30 ? `Stale — brain has not re-deliberated in ${tickDelta} ticks` : undefined}
@@ -4262,9 +4263,14 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                                   })}
                                 </div>
                               )}
-                              {ai.rules_force_hold && ai.rules_force_hold_reason && (
+                              {ai.rules_force_hold && ai.rules_force_hold_reason && !ai.qfe_active && (
                                 <div style={{ fontSize: 9, color: COLORS.sell, lineHeight: 1.4 }}>
                                   {ai.rules_force_hold_reason}
+                                </div>
+                              )}
+                              {ai.qfe_active && ai.qfe_reason && (
+                                <div style={{ fontSize: 9, color: COLORS.buy, lineHeight: 1.4 }}>
+                                  {ai.qfe_reason}
                                 </div>
                               )}
                             </div>
@@ -4555,7 +4561,7 @@ export function HydraDashboard({ jwtToken, onLogout }) {
       {/* Footer */}
       <div style={{ padding: "10px 24px", borderTop: `1px solid ${COLORS.panelBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ fontSize: 8, color: COLORS.textMuted, fontFamily: mono }}>
-          HYDRA v2.23.0 | kraken-cli v0.3.2 (WSL) | {DEFAULT_WS_URL}
+          HYDRA v2.24.0 | kraken-cli v0.3.2 (WSL) | {DEFAULT_WS_URL}
           {jwtToken && (
             <span style={{ marginLeft: 16, cursor: "pointer", color: COLORS.warn }} onClick={onLogout}>
               [Logout]

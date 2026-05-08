@@ -47,7 +47,7 @@ regression bug, not a style issue.
   `STABLE_QUOTES = {USD, USDC, USDT}` are first-class. v2.19 flipped
   the default from USDC → USD; opt back into USDC by passing
   `--pairs SOL/USDC,SOL/BTC,BTC/USDC`.
-- **Version pin:** v2.23.0
+- **Version pin:** v2.24.0
 
 ## Defaults (inherited)
 
@@ -80,6 +80,7 @@ regression bug, not a style issue.
 - **`PLACEMENT_FAILED` entries are session-only** — pre-exchange diagnostics (`insufficient_USD_balance`, `placement_error:api`) live in the in-memory `HydraAgent.order_journal` for live debugging but MUST NOT persist to `hydra_session_snapshot.json` or the rolling `hydra_order_journal.json`. The `_journal_for_persistence()` helper is the single chokepoint; both write paths (`_save_snapshot` and the per-tick rolling write) go through it. If you add a third write path, route it through the helper too.
 - **Pair identity has one source of truth** — `hydra_pair_registry.PairRegistry` owns alias resolution (XBT↔BTC, ZUSD↔USD, USDC.F→USDC, slashed↔slashless, case-insensitive) and per-pair metadata (price decimals, ordermin, costmin, tick size). `hydra_kraken_cli.KrakenCLI` delegates to the class-level `registry`. New pair-handling code must consume the registry — never re-implement an alias dict. v2.19 absorbed 1048 USDC literals into a single registry + role binding.
 - **Roles, not literal pair names, in coordinator/agent logic** — CrossPairCoordinator and HydraAgent address pairs by their `TradingTriangle` role (`stable_sol`, `stable_btc`, `bridge`), not by hardcoded `"SOL/USDC"` etc. `STABLE_QUOTES = {USD, USDC, USDT}`; the engine treats every member as $1. Switching the default quote is a config flip, not a refactor — see `hydra_config.HydraConfig.from_quote`.
+- **R11/QFE is exit-only, profit-only, squeeze-filtered** — `evaluate_qfe()` in `hydra_quant_rules.py` lets a SELL through force_hold ONLY when: position is in profit (≥`QFE_MIN_PROFIT_PCT` = 0.5%), the engine already generated SELL, and no squeeze catalyst is present (`crowded_short` positioning, `short_squeeze` OI regime, or extreme-short-funding + accumulation CVD). QFE must never open a position, must never fire on an underwater position, and force_hold remains active for entries after QFE exits. Every QFE event logs a full trigger snapshot via `qfe_trigger_values` in `state["ai_decision"]`.
 
 Subsystem detail (indicators, regime, Kelly sizing, price precision,
 execution stream lifecycle, resume reconciliation, forex modifier,
@@ -93,7 +94,7 @@ shutdown) → `cbp --label hydra.engine_invariants` + `hydra.trading_invariants`
 | agent | `hydra_agent.py` | live agent: Kraken CLI via WSL, WS broadcast, execution, reconciler, snapshot + `--resume` |
 | brain | `hydra_brain.py` | 3-agent AI: Claude Market Quant + Risk Manager + Grok Strategist |
 | derivatives_stream | `hydra_derivatives_stream.py` | Kraken Futures public data via kraken CLI (funding, OI, basis) — read-only, SIGNAL INPUT ONLY |
-| quant_rules | `hydra_quant_rules.py` | R1-R10 deterministic guardrails (funding extreme, OI regime, basis euphoric, CVD divergence, contrarian edge, staleness) |
+| quant_rules | `hydra_quant_rules.py` | R1-R11 deterministic guardrails (funding extreme, OI regime, basis euphoric, CVD divergence, contrarian edge, staleness, QFE profit exit) |
 | rm_features | `hydra_rm_features.py` | pure engine-internal RM signals (realized vol, DD velocity, fill rate, slippage, cross-pair corr, idle minutes) — stdlib only, no I/O, no mutation |
 | tuner | `hydra_tuner.py` | self-tuning params; `apply_external_param_update` + `rollback_to_previous` (depth=1 deque) |
 | companions | `hydra_companions/` | chat/proposals/nudges/ladder/live executor/CBP client/souls |

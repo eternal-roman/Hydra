@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.24.0] — 2026-05-08
+
+R11/QFE — Quant Force Exit: profit-capture gate override for force_hold.
+
+### Added
+- **R11/QFE (Quant Force Exit):** new deterministic rule in `hydra_quant_rules.py` that lets a profitable SELL through force_hold when no squeeze catalyst is present. Addresses the trapped-position failure mode where force_hold (R1/R2/R10 or Quant LLM) blocks an exit on a position that's in profit, surrendering gains during a cascade.
+- **`evaluate_qfe()` function:** standalone QFE evaluator called by the agent after `apply_rules()`. Takes position context + quant indicators, returns `QfeResult` with `force_exit`, `force_exit_reason`, and full `trigger_values` snapshot for post-mortem.
+- **Squeeze catalyst filter:** QFE suppressed when `positioning_bias == "crowded_short"`, `oi_price_regime == "short_squeeze"`, or extreme-short-funding + accumulation CVD (≥2σ) — conditions where holding may protect an even larger gain.
+- **Dashboard QFE display:** "QFE PROFIT EXIT" pill (green) in Band 6 of the AI decision card, with reason text. Replaces "RULES FORCE-HOLD" pill when QFE overrides.
+- **17 new tests:** comprehensive QFE coverage in `tests/test_quant_rules.py` — fire/no-fire, all three squeeze filters, edge cases, R2+QFE and R10+QFE integration tests.
+
+### Changed
+- Agent signal rewriting now includes a QFE post-processor that checks for profitable exits blocked by force_hold (from any source: rules or brain OVERRIDE→HOLD). On QFE fire, signal restored to SELL with size_multiplier=1.0 (full exit).
+- `QFE_MIN_PROFIT_PCT = 0.5` — minimum unrealized P&L floor to qualify for QFE. Not a take-profit trigger; QFE only fires when the engine already decided to SELL.
+
+---
+
 ## [2.23.0] — 2026-05-07
 
 APEX Meme Discover — runtime pair switching, warm-start seed history, competition-only token filter, tab state persistence.
