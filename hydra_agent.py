@@ -2298,6 +2298,56 @@ class HydraAgent:
             elif decision.action == "ADJUST":
                 state["signal"]["reason"] = f"[AI ADJUSTED] {decision.combined_summary}"
             # CONFIRM leaves signal unchanged, just adds reasoning
+
+            # R11/QFE — Quant Force Exit: rescue profitable exits from
+            # force_hold.  Runs AFTER signal rewriting — if the engine
+            # wanted SELL and it got blocked to HOLD (by rules OR brain),
+            # check if we should let the exit through to capture profit.
+            qfe_active = False
+            qfe_reason = ""
+            qfe_trigger_values: dict = {}
+            if (engine_action_for_rules == "SELL"
+                    and state["signal"]["action"] == "HOLD"
+                    and not blocked_by_api_down):
+                pos = state.get("position", {})
+                pos_size = pos.get("size", 0)
+                avg_entry = pos.get("avg_entry", 0)
+                current_price = state.get("price", 0)
+                if pos_size > 0 and avg_entry > 0:
+                    pnl_pct = (current_price - avg_entry) / avg_entry * 100
+                    try:
+                        from hydra_quant_rules import evaluate_qfe as _evaluate_qfe
+                        positioning = (
+                            getattr(decision, "positioning_bias", None)
+                            or state.get("ai_positioning_bias") or ""
+                        )
+                        qfe_result = _evaluate_qfe(
+                            position_size=pos_size,
+                            unrealized_pnl_pct=pnl_pct,
+                            quant_indicators=state.get("quant_indicators"),
+                            positioning_bias=positioning,
+                        )
+                        if qfe_result.force_exit:
+                            qfe_active = True
+                            qfe_reason = qfe_result.force_exit_reason
+                            qfe_trigger_values = qfe_result.trigger_values
+                            state["signal"]["action"] = "SELL"
+                            state["signal"]["reason"] = (
+                                f"[QFE PROFIT EXIT] {qfe_reason}"
+                            )
+                            final_size_multiplier = 1.0
+                            state["ai_decision"]["size_multiplier"] = 1.0
+                            print(
+                                f"  [QFE] {pair}: force_exit overrides "
+                                f"force_hold — P&L {pnl_pct:+.2f}%, "
+                                f"no squeeze catalyst"
+                            )
+                    except Exception as qe:
+                        print(f"  [QFE] evaluate_qfe error ({type(qe).__name__}: {qe})")
+
+            state["ai_decision"]["qfe_active"] = qfe_active
+            state["ai_decision"]["qfe_reason"] = qfe_reason
+            state["ai_decision"]["qfe_trigger_values"] = qfe_trigger_values
         except Exception as e:
             state["ai_decision"] = {"action": "FALLBACK", "error": str(e), "fallback": True}
             # Do NOT update _last_brain_candle_ts — allow retry on next tick

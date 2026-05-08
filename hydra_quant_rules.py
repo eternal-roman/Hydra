@@ -20,7 +20,7 @@ What this module does:
   non-negotiable guardrails in Python, fired on the indicator values
   themselves, not the LLM's interpretation of them.
 
-The 8 rules (v2.14; options-related R6/R9 deferred):
+The 9 rules (v2.14+; options-related R6/R9 deferred):
   R1: funding_bps_8h > 80 AND engine=BUY  → force_hold (crowded long top)
   R2: funding_bps_8h < -80 AND engine=SELL → force_hold (capitulation low)
   R3: oi_price_regime = short_squeeze AND engine=BUY → size *= 0.5
@@ -29,6 +29,9 @@ The 8 rules (v2.14; options-related R6/R9 deferred):
   R7: |cvd_divergence_sigma| > 2 opposing engine direction → size *= 0.5
   R8: engine direction FADES positioning_bias (contrarian edge) → size *= 1.15
   R10: staleness_s > 300 on 2+ indicator fields → force_hold (fly blind)
+  R11: QFE — force_hold active + engine=SELL + position in profit + no
+       squeeze catalyst → force_exit (let the SELL through). Evaluated
+       by the agent via evaluate_qfe() after apply_rules() returns.
 
 Rule fires ARE multiplicative. force_hold from any rule takes
 precedence over all size multipliers. Final multiplier clamped to
@@ -73,6 +76,12 @@ CVD_DIVERGENCE_PENALTY = 0.5
 MULTIPLIER_CLAMP_MAX = 1.5
 MULTIPLIER_CLAMP_MIN = 0.0
 
+# R11 — Quant Force Exit (QFE): profit-capture gate override.
+# When force_hold blocks a SELL on a profitable position, QFE lets the
+# exit through if no squeeze catalyst contradicts it.  This is NOT a
+# stop-loss — it only fires when the position is in profit.
+QFE_MIN_PROFIT_PCT = 0.5  # minimum unrealized P&L % to trigger QFE
+
 
 @dataclass
 class RuleFiring:
@@ -83,6 +92,18 @@ class RuleFiring:
     effect: str             # "force_hold" | "size_mult"
     size_mult: float = 1.0  # 1.0 = no effect; <1 = penalty; >1 = boost
     reason: str = ""        # cites specific indicator values
+
+
+@dataclass
+class QfeResult:
+    """Output of evaluate_qfe — the Quant Force Exit assessment.
+
+    force_exit=True means the caller should let the SELL through despite
+    an active force_hold.  trigger_values captures the exact indicator
+    snapshot for post-mortem logging."""
+    force_exit: bool = False
+    force_exit_reason: str = ""
+    trigger_values: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -224,6 +245,94 @@ def apply_rules(
         min(MULTIPLIER_CLAMP_MAX, result.size_multiplier),
     )
     return result
+
+
+def evaluate_qfe(
+    position_size: float,
+    unrealized_pnl_pct: float,
+    quant_indicators: Optional[Dict[str, Any]] = None,
+    positioning_bias: str = "",
+) -> QfeResult:
+    """R11 — Quant Force Exit: should a profitable SELL bypass force_hold?
+
+    Called by the agent AFTER apply_rules() when force_hold would block
+    a SELL on an open position.  QFE is exit-only, profit-only, and
+    squeeze-filtered.
+
+    Preconditions (caller must verify):
+      - The original engine signal was SELL.
+      - force_hold is active (from rules or brain).
+
+    Args:
+        position_size: current position size (>0 means open long).
+        unrealized_pnl_pct: (current_price - avg_entry) / avg_entry * 100.
+        quant_indicators: derivatives + CVD indicator block (same as
+            passed to apply_rules). None-safe.
+        positioning_bias: Quant's positioning assessment
+            ("crowded_short" | "crowded_long" | "balanced" | "unknown").
+
+    Returns:
+        QfeResult with force_exit=True if the SELL should proceed.
+    """
+    qi = quant_indicators or {}
+    bias = (positioning_bias or "").lower()
+
+    if position_size <= 0:
+        return QfeResult()
+
+    if unrealized_pnl_pct < QFE_MIN_PROFIT_PCT:
+        return QfeResult()
+
+    # Squeeze catalyst filter — if any of these are present, the hold
+    # may be protecting a gain that's about to get bigger.  Don't exit.
+    oi_regime = qi.get("oi_price_regime", "")
+    funding = qi.get("funding_bps_8h")
+    cvd = qi.get("cvd_divergence_sigma")
+
+    # 1. Shorts are crowded — squeeze likely, long benefits from holding
+    if bias == "crowded_short":
+        return QfeResult(
+            trigger_values=_qfe_snapshot(qi, unrealized_pnl_pct, bias),
+        )
+
+    # 2. Squeeze already in progress (OI falling + price rising)
+    if oi_regime == "short_squeeze":
+        return QfeResult(
+            trigger_values=_qfe_snapshot(qi, unrealized_pnl_pct, bias),
+        )
+
+    # 3. Extreme short funding + accumulation flow = squeeze setup
+    if (funding is not None and funding < -FUNDING_EXTREME_BPS
+            and cvd is not None and cvd > CVD_DIVERGENCE_SIGMA_THRESHOLD):
+        return QfeResult(
+            trigger_values=_qfe_snapshot(qi, unrealized_pnl_pct, bias),
+        )
+
+    triggers = _qfe_snapshot(qi, unrealized_pnl_pct, bias)
+    reason = (
+        f"R11/QFE: profit {unrealized_pnl_pct:+.2f}% > "
+        f"{QFE_MIN_PROFIT_PCT:.1f}% floor, no squeeze catalyst; "
+        f"releasing SELL through force_hold"
+    )
+    return QfeResult(
+        force_exit=True,
+        force_exit_reason=reason,
+        trigger_values=triggers,
+    )
+
+
+def _qfe_snapshot(
+    qi: Dict[str, Any], pnl_pct: float, bias: str,
+) -> Dict[str, Any]:
+    """Capture indicator state at QFE evaluation for post-mortem logging."""
+    return {
+        "unrealized_pnl_pct": round(pnl_pct, 4),
+        "funding_bps_8h": qi.get("funding_bps_8h"),
+        "oi_price_regime": qi.get("oi_price_regime"),
+        "cvd_divergence_sigma": qi.get("cvd_divergence_sigma"),
+        "basis_apr_pct": qi.get("basis_apr_pct"),
+        "positioning_bias": bias,
+    }
 
 
 def _apply_size_rule(

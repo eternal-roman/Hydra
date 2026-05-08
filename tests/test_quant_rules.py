@@ -11,15 +11,19 @@ from hydra_quant_rules import (
     BASIS_EUPHORIC_APR_PCT,
     CONTRARIAN_BOOST,
     CVD_DIVERGENCE_PENALTY,
+    CVD_DIVERGENCE_SIGMA_THRESHOLD,
     EUPHORIC_BASIS_PENALTY,
     FUNDING_EXTREME_BPS,
     MULTIPLIER_CLAMP_MAX,
+    QFE_MIN_PROFIT_PCT,
+    QfeResult,
     RuleFiring,
     RuleResult,
     SQUEEZE_PENALTY,
     STALENESS_SECONDS_MAX,
     STALE_FIELDS_FOR_FORCE_HOLD,
     apply_rules,
+    evaluate_qfe,
 )
 
 
@@ -324,6 +328,206 @@ def test_empty_dict_indicators_fires_r10():
     r = apply_rules("BUY", {}, {})
     assert r.force_hold is True
     assert "R10" in [f.rule_id for f in r.triggered]
+
+
+# ─── R11/QFE: Quant Force Exit ─────────────────────────────
+
+
+def test_qfe_fires_on_profitable_position_no_squeeze():
+    """Core case: position in profit, no squeeze catalyst → force_exit."""
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+        positioning_bias="balanced",
+    )
+    assert r.force_exit is True
+    assert "R11/QFE" in r.force_exit_reason
+    assert r.trigger_values["unrealized_pnl_pct"] == pytest.approx(5.0, abs=0.01)
+
+
+def test_qfe_does_not_fire_on_no_position():
+    r = evaluate_qfe(
+        position_size=0,
+        unrealized_pnl_pct=0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_does_not_fire_on_underwater_position():
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=-2.0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_does_not_fire_below_min_profit():
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=QFE_MIN_PROFIT_PCT - 0.1,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_fires_at_exact_min_profit():
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=QFE_MIN_PROFIT_PCT,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+    )
+    assert r.force_exit is True
+
+
+def test_qfe_blocked_by_crowded_short_bias():
+    """Shorts crowded = squeeze likely, don't exit the long."""
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+        positioning_bias="crowded_short",
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_blocked_by_short_squeeze_regime():
+    """Squeeze in progress = long is winning, hold it."""
+    qi = dict(FRESH_INDICATORS_BALANCED, oi_price_regime="short_squeeze")
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_blocked_by_squeeze_setup():
+    """Extreme short funding + accumulation CVD = squeeze imminent."""
+    qi = dict(
+        FRESH_INDICATORS_BALANCED,
+        funding_bps_8h=-(FUNDING_EXTREME_BPS + 10),
+        cvd_divergence_sigma=CVD_DIVERGENCE_SIGMA_THRESHOLD + 0.5,
+    )
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_fires_with_extreme_negative_funding_but_no_accumulation():
+    """Extreme short funding alone (no CVD accumulation) is NOT a
+    squeeze catalyst — R2 may have blocked us, QFE should override."""
+    qi = dict(
+        FRESH_INDICATORS_BALANCED,
+        funding_bps_8h=-(FUNDING_EXTREME_BPS + 10),
+        cvd_divergence_sigma=0.5,  # below threshold, no accumulation
+    )
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+    )
+    assert r.force_exit is True
+
+
+def test_qfe_fires_with_liquidation_cascade():
+    """Cascade regime is dangerous but NOT a squeeze — QFE should fire."""
+    qi = dict(FRESH_INDICATORS_BALANCED, oi_price_regime="liquidation_cascade")
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+    )
+    assert r.force_exit is True
+
+
+def test_qfe_with_none_indicators():
+    """Missing indicators should not crash; no squeeze signal = fire."""
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=3.0,
+        quant_indicators=None,
+    )
+    assert r.force_exit is True
+
+
+def test_qfe_trigger_values_populated():
+    """Trigger snapshot must capture all relevant fields."""
+    qi = dict(FRESH_INDICATORS_BALANCED, oi_price_regime="short_squeeze")
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+        positioning_bias="balanced",
+    )
+    assert r.force_exit is False
+    assert "unrealized_pnl_pct" in r.trigger_values
+    assert "oi_price_regime" in r.trigger_values
+    assert r.trigger_values["oi_price_regime"] == "short_squeeze"
+
+
+def test_qfe_is_exit_only():
+    """QFE should never fire with zero position regardless of P&L pct."""
+    r = evaluate_qfe(
+        position_size=0.0,
+        unrealized_pnl_pct=10.0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+    )
+    assert r.force_exit is False
+
+
+def test_qfe_crowded_long_does_not_block():
+    """Crowded LONG is not a squeeze catalyst for a long exit.
+    Only crowded_short blocks (shorts crowded → squeeze benefits longs)."""
+    r = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=FRESH_INDICATORS_BALANCED,
+        positioning_bias="crowded_long",
+    )
+    assert r.force_exit is True
+
+
+def test_qfe_integration_with_r2_force_hold():
+    """Simulate R2 (funding extreme short + SELL) blocking a profitable exit.
+    apply_rules should set force_hold, then evaluate_qfe should override."""
+    qi = dict(
+        FRESH_INDICATORS_BALANCED,
+        funding_bps_8h=-(FUNDING_EXTREME_BPS + 10),
+    )
+    rule_result = apply_rules("SELL", {"positioning_bias": "balanced"}, qi)
+    assert rule_result.force_hold is True, "R2 should fire"
+    assert "R2" in [f.rule_id for f in rule_result.triggered]
+
+    qfe = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=5.0,
+        quant_indicators=qi,
+        positioning_bias="balanced",
+    )
+    assert qfe.force_exit is True, "QFE should override R2 for profitable exit"
+
+
+def test_qfe_integration_with_r10_force_hold():
+    """Simulate R10 (stale data) blocking a profitable exit.
+    QFE should override if position is in profit and no squeeze catalyst."""
+    qi = {"funding_bps_8h": None, "oi_price_regime": None,
+          "basis_apr_pct": None, "cvd_divergence_sigma": None,
+          "oi_delta_1h_pct": None}
+    rule_result = apply_rules("SELL", {}, qi)
+    assert rule_result.force_hold is True, "R10 should fire"
+
+    qfe = evaluate_qfe(
+        position_size=1.5,
+        unrealized_pnl_pct=3.0,
+        quant_indicators=qi,
+    )
+    assert qfe.force_exit is True
 
 
 # ─── Spot-only invariant (meta-test) ────────────────────────
