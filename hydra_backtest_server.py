@@ -119,6 +119,8 @@ class BacktestWorkerPool:
         self._queue: "queue.Queue[Optional[_PoolJob]]" = queue.Queue(maxsize=queue_depth)
         self._cancel_tokens: Dict[str, threading.Event] = {}
         self._status_cache: Dict[str, str] = {}     # experiment_id -> last known status
+        self._completed_at: Dict[str, float] = {}
+        self._PRUNE_AFTER_SEC = 60.0
         self._running = True
         self._lock = threading.Lock()
         self._workers: List[threading.Thread] = []
@@ -264,6 +266,7 @@ class BacktestWorkerPool:
         except KeyError:
             self._log_error(experiment_id,
                             RuntimeError(f"experiment vanished from store: {experiment_id}"))
+            self._prune_terminal()
             return
 
         with self._lock:
@@ -300,6 +303,7 @@ class BacktestWorkerPool:
 
             with self._lock:
                 self._status_cache[experiment_id] = result.status
+                self._completed_at[experiment_id] = time.time()
 
             if result.status == "cancelled":
                 self._broadcast_progress(experiment_id, None,
@@ -335,8 +339,23 @@ class BacktestWorkerPool:
             self.store.save(exp)
             with self._lock:
                 self._status_cache[experiment_id] = "failed"
+                self._completed_at[experiment_id] = time.time()
             self._broadcast_error(experiment_id, str(e))
             self._log_error(experiment_id, e)
+        finally:
+            self._prune_terminal()
+
+    def _prune_terminal(self) -> None:
+        """Remove stale entries from _cancel_tokens, _status_cache, and
+        _completed_at for experiments that finished more than
+        _PRUNE_AFTER_SEC ago."""
+        cutoff = time.time() - self._PRUNE_AFTER_SEC
+        with self._lock:
+            expired = [eid for eid, t in self._completed_at.items() if t < cutoff]
+            for eid in expired:
+                self._cancel_tokens.pop(eid, None)
+                self._status_cache.pop(eid, None)
+                self._completed_at.pop(eid, None)
 
     # ─── broadcasting ───
 
