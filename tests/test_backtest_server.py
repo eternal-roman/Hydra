@@ -570,5 +570,43 @@ class TestCompact(unittest.TestCase):
         self.assertAlmostEqual(out["metrics"]["sharpe"], 1.234)
 
 
+class TestWorkerPoolPrune(_PoolFixture):
+    def test_terminal_entries_pruned_after_run(self):
+        """_cancel_tokens and _status_cache entries for completed experiments
+        should be pruned after _PRUNE_AFTER_SEC, not grow forever."""
+        cfg = make_quick_config(pairs=("SOL/USD",))
+        eid = self.pool.submit_config(cfg, triggered_by="test")
+        self._wait_status(eid, "complete", "failed")
+
+        # Immediately after completion, entry should still be queryable
+        self.assertIn(self.pool.status(eid)["status"], ("complete", "failed"))
+
+        # Entry exists in status cache
+        with self.pool._lock:
+            has_cache = eid in self.pool._status_cache
+        self.assertTrue(has_cache, "_status_cache should have the entry post-run")
+
+        # Force-expire by backdating _completed_at, then submit+complete
+        # another experiment to trigger a prune cycle
+        with self.pool._lock:
+            self.assertIn(eid, self.pool._completed_at,
+                          "_completed_at should be set on completion")
+            self.pool._completed_at[eid] = time.time() - 120  # 2 min ago
+
+        cfg2 = make_quick_config(pairs=("BTC/USD",))
+        eid2 = self.pool.submit_config(cfg2, triggered_by="test")
+        self._wait_status(eid2, "complete", "failed")
+
+        # After second run completes, the first (expired) entry should be pruned
+        with self.pool._lock:
+            pruned_token = eid not in self.pool._cancel_tokens
+            pruned_cache = eid not in self.pool._status_cache
+            pruned_completed = eid not in self.pool._completed_at
+
+        self.assertTrue(pruned_token, "_cancel_tokens should prune expired entry")
+        self.assertTrue(pruned_cache, "_status_cache should prune expired entry")
+        self.assertTrue(pruned_completed, "_completed_at should prune expired entry")
+
+
 if __name__ == "__main__":
     unittest.main()
