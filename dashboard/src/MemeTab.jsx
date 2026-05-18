@@ -806,9 +806,9 @@ function TradeLog({ trades }) {
 
 // ─── Trading View ─────────────────────────────────────────────────────────────
 
-function TradingView({ state, connected, pair, onDisable, candleInterval }) {
+function TradingView({ state, connected, pair, onDisable, onPark, candleInterval }) {
   const { gates, position, midPrice, obi, engineState, sessionStats, trades, bars, spreadBps,
-          enabled, confidence, kellySize, gateHistory } = state;
+          enabled, confidence, kellySize, gateHistory, parked } = state;
 
   if (!connected) {
     return (
@@ -878,16 +878,29 @@ function TradingView({ state, connected, pair, onDisable, candleInterval }) {
             {engineState}
           </span>
         </div>
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          <button
+            onClick={onPark}
+            style={{
+              padding: "6px 18px", borderRadius: 6,
+              border: `1px solid ${parked ? C.accent : C.danger}50`,
+              background: parked ? `${C.danger}15` : "transparent",
+              color: parked ? C.accent : C.danger,
+              fontFamily: C.mono, fontSize: 12, fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            {parked ? "UNPARK" : "PARK"}
+          </button>
           <button
             onClick={onDisable}
-            disabled={!enabled}
+            disabled={!enabled || parked}
             style={{
               padding: "6px 18px", borderRadius: 6,
               border: `1px solid ${C.warn}50`, background: "transparent",
               color: C.warn, fontFamily: C.mono, fontSize: 12, fontWeight: 700,
-              cursor: enabled ? "pointer" : "not-allowed",
-              opacity: enabled ? 1 : 0.3,
+              cursor: enabled && !parked ? "pointer" : "not-allowed",
+              opacity: enabled && !parked ? 1 : 0.3,
             }}
           >
             DISABLE
@@ -1274,6 +1287,7 @@ function buildInitialPairState() {
       port: APEX_WS_BASE + i,
       connected: false,
       enabled: true,
+      parked: false,
       gates: null,
       position: null,
       midPrice: 0,
@@ -1326,6 +1340,7 @@ export default function MemeTab() {
             position: msg.position ?? null,
             trades: msg.trades ?? [],
             enabled: msg.enabled !== undefined ? msg.enabled : true,
+            parked: msg.parked ?? false,
             candleInterval: msg.candle_interval ?? 15,
             ...(msg.session_pnl != null || msg.trade_count != null ? {
               sessionStats: {
@@ -1399,7 +1414,10 @@ export default function MemeTab() {
           if (msg.gates?.all_pass && selectedPairRef.current === pair) setSubView("trading");
           break;
         case "pair_enabled":
-          updatePair(pair, { enabled: msg.enabled !== undefined ? msg.enabled : true });
+          updatePair(pair, {
+            enabled: msg.enabled !== undefined ? msg.enabled : true,
+            ...(msg.parked !== undefined ? { parked: msg.parked } : {}),
+          });
           break;
         case "position_update":
           setPairStates(prev => {
@@ -1546,6 +1564,19 @@ export default function MemeTab() {
     updatePair(pair, { enabled: false });
   }
 
+  function handlePark(pair) {
+    const ws = wsRefs.current[pair];
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const isParked = pairStates[pair]?.parked ?? false;
+    if (isParked) {
+      ws.send(JSON.stringify({ type: "unpark_pair" }));
+      updatePair(pair, { parked: false, enabled: true });
+    } else {
+      ws.send(JSON.stringify({ type: "park_pair" }));
+      updatePair(pair, { parked: true, enabled: false });
+    }
+  }
+
   const selectedState = pairStates[selectedPair] ?? buildInitialPairState()[SEED_PAIRS[0]];
 
   return (
@@ -1626,7 +1657,7 @@ export default function MemeTab() {
                 >
                   <div style={{
                     width: 6, height: 6, borderRadius: "50%",
-                    background: ps?.connected ? (ps.enabled ? C.accent : C.warn) : C.danger,
+                    background: ps?.connected ? (ps.parked ? C.danger : ps.enabled ? C.accent : C.warn) : C.danger,
                     flexShrink: 0,
                   }} />
                   <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700,
@@ -1635,6 +1666,11 @@ export default function MemeTab() {
                     <span style={{ fontFamily: C.mono, fontSize: 10, color: confColor }}>
                       {(conf * 100).toFixed(0)}%
                     </span>
+                  )}
+                  {ps?.parked && (
+                    <span style={{ fontFamily: C.mono, fontSize: 9, color: C.danger,
+                                   background: `${C.danger}20`, padding: "1px 5px",
+                                   borderRadius: 3 }}>PARKED</span>
                   )}
                   {ps?.position && (
                     <span style={{ fontFamily: C.mono, fontSize: 9, color: C.purple,
@@ -1651,6 +1687,7 @@ export default function MemeTab() {
             connected={selectedState.connected}
             pair={selectedPair}
             onDisable={() => handleDisable(selectedPair)}
+            onPark={() => handlePark(selectedPair)}
             candleInterval={selectedState.candleInterval}
           />
         </div>

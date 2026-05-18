@@ -89,6 +89,8 @@ hydra_meme_journal*.json
 hydra_meme_journal*.json.tmp
 hydra_meme_watchlist.json
 hydra_meme_watchlist.json.tmp
+hydra_meme_prefs.json
+hydra_meme_prefs.json.tmp
 
 # Temporary / Junk / Scratch
 *.diff

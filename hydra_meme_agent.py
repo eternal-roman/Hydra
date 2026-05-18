@@ -36,6 +36,7 @@ if os.path.exists(_env_path):
 
 WS_PORT_BASE = 8770
 WS_PORT_RANGE = 10  # try 8770-8779
+PREFS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hydra_meme_prefs.json")
 CANDLE_INTERVAL = 15         # minutes — 15m bars proven viable for ALT ATR
 WARMUP_BARS = 0              # hot-load history, no warmup gate
 CANDLE_BUFFER_SIZE = 100
@@ -871,6 +872,25 @@ def save_session(state: SessionState, path: str) -> None:
     os.replace(tmp, path)
 
 
+def load_pair_prefs() -> dict:
+    """Load persistent pair preferences (disabled_pairs set)."""
+    if not os.path.exists(PREFS_PATH):
+        return {}
+    try:
+        with open(PREFS_PATH) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_pair_prefs(prefs: dict) -> None:
+    """Atomic write of pair preferences."""
+    tmp = PREFS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(prefs, f, indent=2)
+    os.replace(tmp, PREFS_PATH)
+
+
 def load_session_state(path: str) -> Optional[dict]:
     """Load session state from file. Returns dict or None."""
     if not os.path.exists(path):
@@ -1353,7 +1373,12 @@ class MemeAgent:
             print(f"[APEX] WARNING: verify on Kraken that position is closed before continuing")
             print(f"[APEX] WARNING: engine will trade normally -- close stale position manually if needed")
         self._engine_state = "running"
-        self._enabled: bool = True  # toggled by dashboard; when False, skip entries
+        prefs = load_pair_prefs()
+        parked = prefs.get("parked_pairs", [])
+        self._enabled: bool = pair not in parked
+        self._parked: bool = pair in parked  # persistent disable survives restarts
+        if self._parked:
+            print(f"[APEX] {pair} is PARKED (persistent disable) — entries blocked until re-enabled")
         self._sibling_agents: list["MemeAgent"] = []  # populated in multi-pair mode
         self._last_exit_bar_count: int = -REENTRY_COOLDOWN_BARS
         self._bar_count: int = 0
@@ -1407,6 +1432,7 @@ class MemeAgent:
             "engine_state": self._engine_state,
             "pair": self.pair,
             "enabled": self._enabled,
+            "parked": self._parked,
             "candle_interval": CANDLE_INTERVAL,
             "position": pos_data,
             "session_pnl": self._executor._daily_pnl,
@@ -1460,6 +1486,32 @@ class MemeAgent:
                         self._enabled = False
                         await self._broadcast({
                             "type": "pair_enabled", "pair": self.pair, "enabled": False,
+                        })
+                    elif msg.get("type") == "park_pair":
+                        self._enabled = False
+                        self._parked = True
+                        prefs = load_pair_prefs()
+                        parked = set(prefs.get("parked_pairs", []))
+                        parked.add(self.pair)
+                        prefs["parked_pairs"] = sorted(parked)
+                        save_pair_prefs(prefs)
+                        print(f"[APEX] {self.pair} PARKED (persistent disable)")
+                        await self._broadcast({
+                            "type": "pair_enabled", "pair": self.pair,
+                            "enabled": False, "parked": True,
+                        })
+                    elif msg.get("type") == "unpark_pair":
+                        self._parked = False
+                        self._enabled = True
+                        prefs = load_pair_prefs()
+                        parked = set(prefs.get("parked_pairs", []))
+                        parked.discard(self.pair)
+                        prefs["parked_pairs"] = sorted(parked)
+                        save_pair_prefs(prefs)
+                        print(f"[APEX] {self.pair} UNPARKED (re-enabled)")
+                        await self._broadcast({
+                            "type": "pair_enabled", "pair": self.pair,
+                            "enabled": True, "parked": False,
                         })
                 except Exception:
                     pass
