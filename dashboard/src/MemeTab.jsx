@@ -16,7 +16,6 @@ const C = {
 };
 
 const APEX_WS_BASE = 8770;
-const APEX_DAILY_CAP_USD = 30;
 
 const SEED_PAIRS = [
   "NIGHT/USD", "AAVE/USD", "AAVE/BTC",
@@ -1299,7 +1298,6 @@ function buildInitialPairState() {
       spreadBps: 0,
       confidence: 0,
       kellySize: 0,
-      siblings: [],
       candleInterval: 15,
       gateHistory: [],
     };
@@ -1407,7 +1405,6 @@ export default function MemeTab() {
               confidence: g.confidence ?? 0,
               kellySize: g.kelly_size ?? 0,
               enabled: g.enabled !== undefined ? g.enabled : ps.enabled,
-              siblings: msg.siblings ?? [],
               gateHistory: history,
             }};
           });

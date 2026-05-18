@@ -1479,13 +1479,22 @@ class MemeAgent:
                         asyncio.ensure_future(self._run_competition_scan())
                     elif msg.get("type") == "enable_pair":
                         self._enabled = True
+                        if self._parked:
+                            self._parked = False
+                            prefs = load_pair_prefs()
+                            parked = set(prefs.get("parked_pairs", []))
+                            parked.discard(self.pair)
+                            prefs["parked_pairs"] = sorted(parked)
+                            save_pair_prefs(prefs)
                         await self._broadcast({
-                            "type": "pair_enabled", "pair": self.pair, "enabled": True,
+                            "type": "pair_enabled", "pair": self.pair,
+                            "enabled": True, "parked": False,
                         })
                     elif msg.get("type") == "disable_pair":
                         self._enabled = False
                         await self._broadcast({
-                            "type": "pair_enabled", "pair": self.pair, "enabled": False,
+                            "type": "pair_enabled", "pair": self.pair,
+                            "enabled": False, "parked": self._parked,
                         })
                     elif msg.get("type") == "park_pair":
                         self._enabled = False
@@ -1617,6 +1626,10 @@ class MemeAgent:
             })
         task = asyncio.create_task(self._candle_agg.run())
         task.add_done_callback(self._task_error_cb)
+        prefs = load_pair_prefs()
+        parked_set = set(prefs.get("parked_pairs", []))
+        self._parked = new_pair in parked_set
+        self._enabled = new_pair not in parked_set
         win_count = sum(1 for t in self._trade_log if t.net_pnl > 0)
         await self._broadcast({
             "type": "initial_state",
@@ -1629,6 +1642,8 @@ class MemeAgent:
             "daily_loss": self._executor._daily_loss,
             "trade_count": len(self._trade_log),
             "win_rate": win_count / max(len(self._trade_log), 1),
+            "enabled": self._enabled,
+            "parked": self._parked,
         })
         print(f"[APEX] Switched to {new_pair} — hot, ready to trade")
 

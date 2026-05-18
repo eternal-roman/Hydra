@@ -63,9 +63,6 @@ const getForexSession = () => {
   return { label: "Dead Zone", color: COLORS.danger };
 };
 
-const strategyIcon = (s) =>
-  ({ MOMENTUM: "\u{1F680}", MEAN_REVERSION: "\u{1F504}", GRID: "\u{1F4CA}", DEFENSIVE: "\u{1F6E1}\uFE0F" }[s] || "\u26A1");
-
 const signalColor = (s) =>
   ({ BUY: COLORS.buy, SELL: COLORS.sell, HOLD: COLORS.hold }[s] || COLORS.textDim);
 
