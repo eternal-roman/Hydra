@@ -3967,14 +3967,17 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                         )}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime), boxShadow: `0 0 8px ${regimeColor(ps.regime)}80` }} />
-                        <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono, textTransform: "uppercase" }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime),
+                                      boxShadow: `0 0 12px ${regimeColor(ps.regime)}cc, 0 0 4px ${regimeColor(ps.regime)}` }} />
+                        <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono,
+                                       textTransform: "uppercase", textShadow: `0 0 10px ${regimeColor(ps.regime)}80` }}>
                           {(ps.regime || "").replace("_", " ")}
                         </span>
                         {ps.strategy && (
                           <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textMuted,
                                          background: `${regimeColor(ps.regime)}40`, padding: "2px 7px",
-                                         borderRadius: 3, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                                         borderRadius: 3, letterSpacing: "0.05em", textTransform: "uppercase",
+                                         boxShadow: `0 0 8px ${regimeColor(ps.regime)}30` }}>
                             {ps.strategy.replace("_", " ")}
                           </span>
                         )}
