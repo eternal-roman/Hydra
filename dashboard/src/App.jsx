@@ -213,7 +213,7 @@ function CandleChart({ candles, height = 140 }) {
   if (!candles || candles.length < 2) {
     return <div ref={containerRef} style={{ width: "100%", height }} />;
   }
-  const pad = { top: 12, bottom: 12, left: 6, right: 54 };
+  const pad = { top: 16, bottom: 16, left: 6, right: 54 };
   const innerW = cw - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
   const allHigh = Math.max(...candles.map(c => c.h));
@@ -233,7 +233,7 @@ function CandleChart({ candles, height = 140 }) {
         return (
           <g key={f}>
             <line x1={pad.left} y1={y} x2={pad.left + innerW} y2={y}
-                  stroke={COLORS.panelBorder} strokeWidth={0.4} strokeDasharray="2,3" />
+                  stroke={COLORS.panelBorder} strokeWidth={0.5} strokeDasharray="2,3" />
             <text x={cw - 4} y={y + 3}
                   fontFamily={mono} fontSize={9} fill={COLORS.textMuted} textAnchor="end"
                   opacity={0.7}>
@@ -3979,8 +3979,8 @@ export function HydraDashboard({ jwtToken, onLogout }) {
 
                     {/* Candlestick Chart */}
                     {(ps.candles && ps.candles.length > 5) && (
-                      <div style={{ background: "#0d0d0f", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, overflow: "hidden", margin: "0 -4px" }}>
-                        <CandleChart candles={ps.candles.slice(-80)} height={231} />
+                      <div style={{ background: "#0d0d0f", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`, overflow: "hidden", margin: "0 -4px" }}>
+                        <CandleChart candles={ps.candles.slice(-80)} height={254} />
                       </div>
                     )}
 
