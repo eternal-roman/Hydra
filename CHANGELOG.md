@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [2.25.0] — 2026-05-17
+
+APEX Meme Engine multi-pair upgrade + Live tab chart visual overhaul.
+
+### Added
+- **Multi-pair APEX engine:** `hydra_meme_agent.py` now runs N pairs concurrently via `asyncio.gather()` with per-pair WS ports (8770+). Default: NIGHT/USD, AAVE/USD, AAVE/BTC. `start_meme.bat` updated with `--pairs` flag, PID management, and orphan cleanup.
+- **Meme chart annotations:** trade entry/exit markers on candlestick chart, position level lines (entry, stop-loss, take-profit, trailing stop), and gate health strip showing per-bar gate pass rate.
+- **Adaptive trading sidebar:** position mode (P&L, stops, confidence) and watching mode (blocking reasons with gate details) in MemeTab.
+- **Persistent PARK button:** per-pair disable that survives engine restarts via `hydra_meme_prefs.json` (atomic `.tmp→os.replace` write). Separate from ephemeral enable/disable toggles.
+- **Half-Kelly sizing:** `half_kelly_size()` computes position size from agent confidence, win rate, and risk/reward ratio (`KELLY_FRACTION = 0.75`).
+- **Meme backtest tool:** `tools/backtest_meme_4h.py` for virtual backtesting of SignalEngine gate logic.
+
+### Changed
+- **LIVE tab CandleChart rewrite:** removed `preserveAspectRatio="none"` distortion, added ResizeObserver responsive sizing, unified candle opacity (0.9 for both bull/bear), removed body stroke that caused wick/body shade mismatch, added 5-level price grid with right-gutter labels.
+- **LIVE chart container:** dark background (#0d0d0f) matching Meme tab, height increased 80→254px with proportional padding/font scaling.
+- **Regime/strategy display:** replaced emoji + text with neon-glow pill badge using regime color at 25% background + ambient boxShadow. Dot and label indicators gain glow effects.
+
+### Fixed
+- **Gate count accuracy:** `countPassingGates()` with explicit `GATE_KEYS` array, correct `btc_risk_off` inverted polarity handling.
+- **Volume/gate strip alignment:** `drawW` now accounts for left padding, not just price gutter.
+- **P&L sign formatting:** `$-1.23` → `-$1.23`.
+- **Trade marker proximity:** tightened `findBarIndex` from 86400s to 3600s default.
+- **Park/enable consistency:** `enable_pair` now clears `_parked` and persists to prefs; `_switch_pair` reloads prefs for the new pair; post-switch `initial_state` broadcast includes `enabled`/`parked` fields.
+
+---
+
 ## [2.24.1] — 2026-05-09
 
 Audit bugfixes: experiment persistence + worker pool memory leak.
