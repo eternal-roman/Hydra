@@ -3971,9 +3971,13 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                         <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono, textTransform: "uppercase" }}>
                           {(ps.regime || "").replace("_", " ")}
                         </span>
-                        <span style={{ fontSize: 10, color: COLORS.textDim, fontFamily: mono }}>
-                          {strategyIcon(ps.strategy)} {(ps.strategy || "").replace("_", " ")}
-                        </span>
+                        {ps.strategy && (
+                          <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textMuted,
+                                         background: `${regimeColor(ps.regime)}12`, padding: "2px 7px",
+                                         borderRadius: 3, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                            {ps.strategy.replace("_", " ")}
+                          </span>
+                        )}
                       </div>
                     </div>
 
