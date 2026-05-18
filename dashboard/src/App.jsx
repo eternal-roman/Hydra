@@ -63,9 +63,6 @@ const getForexSession = () => {
   return { label: "Dead Zone", color: COLORS.danger };
 };
 
-const strategyIcon = (s) =>
-  ({ MOMENTUM: "\u{1F680}", MEAN_REVERSION: "\u{1F504}", GRID: "\u{1F4CA}", DEFENSIVE: "\u{1F6E1}\uFE0F" }[s] || "\u26A1");
-
 const signalColor = (s) =>
   ({ BUY: COLORS.buy, SELL: COLORS.sell, HOLD: COLORS.hold }[s] || COLORS.textDim);
 
@@ -195,47 +192,71 @@ function MiniChart({ data, width = 280, height = 60, color = COLORS.accent, fill
   );
 }
 
-function CandleChart({ candles, width = 700, height = 120 }) {
-  if (!candles || candles.length < 2) return null;
-  const pad = 4;
+function useContainerWidth(fallback) {
+  const ref = useRef(null);
+  const [w, setW] = useState(fallback);
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.round(e.contentRect.width)));
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w];
+}
+
+function CandleChart({ candles, height = 140 }) {
+  const [containerRef, cw] = useContainerWidth(600);
+
+  if (!candles || candles.length < 2) {
+    return <div ref={containerRef} style={{ width: "100%", height }} />;
+  }
+  const pad = { top: 16, bottom: 16, left: 6, right: 54 };
+  const innerW = cw - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
   const allHigh = Math.max(...candles.map(c => c.h));
   const allLow = Math.min(...candles.map(c => c.l));
   const range = allHigh - allLow || 1;
   const n = candles.length;
-  const candleW = Math.max(1, Math.min(8, (width - pad * 2) / n - 1));
-  const gap = (width - pad * 2) / n;
-  const yScale = (v) => pad + (height - pad * 2) * (1 - (v - allLow) / range);
+  const slotW = innerW / n;
+  const candleW = Math.max(3, Math.min(slotW * 0.78, 14));
+  const py = (v) => pad.top + innerH * (1 - (v - allLow) / range);
 
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: "block" }}>
-      {[0.25, 0.5, 0.75].map(pct => {
-        const y = pad + (height - pad * 2) * pct;
-        return <line key={pct} x1={pad} x2={width - pad} y1={y} y2={y} stroke={COLORS.panelBorder} strokeWidth={0.5} />;
-      })}
-      {candles.map((c, i) => {
-        const x = pad + i * gap + gap / 2;
-        const bullish = c.c >= c.o;
-        const color = bullish ? COLORS.buy : COLORS.sell;
-        const bodyTop = yScale(Math.max(c.o, c.c));
-        const bodyBot = yScale(Math.min(c.o, c.c));
-        const bodyH = Math.max(1, bodyBot - bodyTop);
+    <div ref={containerRef} style={{ width: "100%" }}>
+    <svg viewBox={`0 0 ${cw} ${height}`} width={cw} height={height} style={{ display: "block" }}>
+      {[0, 0.25, 0.5, 0.75, 1].map(f => {
+        const y = pad.top + innerH * (1 - f);
+        const price = allLow + range * f;
         return (
-          <g key={i}>
-            <line x1={x} x2={x} y1={yScale(c.h)} y2={yScale(c.l)} stroke={color} strokeWidth={0.8} opacity={0.6} />
-            <rect x={x - candleW / 2} y={bodyTop} width={candleW} height={bodyH}
-              fill={color} stroke={color} strokeWidth={0.5}
-              opacity={bullish ? 0.9 : 0.7} rx={0.5}
-            />
+          <g key={f}>
+            <line x1={pad.left} y1={y} x2={pad.left + innerW} y2={y}
+                  stroke={COLORS.panelBorder} strokeWidth={0.5} strokeDasharray="2,3" />
+            <text x={cw - 4} y={y + 3}
+                  fontFamily={mono} fontSize={9} fill={COLORS.textMuted} textAnchor="end"
+                  opacity={0.7}>
+              {fmtInd(price)}
+            </text>
           </g>
         );
       })}
-      <text x={width - pad} y={pad + 8} fill={COLORS.textMuted} fontSize={8} fontFamily={mono} textAnchor="end">
-        {fmtInd(allHigh)}
-      </text>
-      <text x={width - pad} y={height - pad} fill={COLORS.textMuted} fontSize={8} fontFamily={mono} textAnchor="end">
-        {fmtInd(allLow)}
-      </text>
+      {candles.map((c, i) => {
+        const cx = pad.left + (i + 0.5) * slotW;
+        const x = cx - candleW / 2;
+        const bullish = c.c >= c.o;
+        const color = bullish ? COLORS.buy : COLORS.sell;
+        const bodyTop = py(Math.max(c.o, c.c));
+        const bodyH = Math.max(1, py(Math.min(c.o, c.c)) - bodyTop);
+        return (
+          <g key={i}>
+            <line x1={cx} y1={py(c.h)} x2={cx} y2={py(c.l)}
+                  stroke={color} strokeWidth={1} opacity={0.5} />
+            <rect x={x} y={bodyTop} width={candleW} height={bodyH}
+                  fill={color} opacity={0.9} rx={1} />
+          </g>
+        );
+      })}
     </svg>
+    </div>
   );
 }
 
@@ -3943,19 +3964,28 @@ export function HydraDashboard({ jwtToken, onLogout }) {
                         )}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime), boxShadow: `0 0 8px ${regimeColor(ps.regime)}80` }} />
-                        <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono, textTransform: "uppercase" }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: regimeColor(ps.regime),
+                                      boxShadow: `0 0 12px ${regimeColor(ps.regime)}cc, 0 0 4px ${regimeColor(ps.regime)}` }} />
+                        <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor(ps.regime), fontFamily: mono,
+                                       textTransform: "uppercase", textShadow: `0 0 10px ${regimeColor(ps.regime)}80` }}>
                           {(ps.regime || "").replace("_", " ")}
                         </span>
-                        <span style={{ fontSize: 10, color: COLORS.textDim, fontFamily: mono }}>
-                          {strategyIcon(ps.strategy)} {(ps.strategy || "").replace("_", " ")}
-                        </span>
+                        {ps.strategy && (
+                          <span style={{ fontSize: 9, fontFamily: mono, color: COLORS.textMuted,
+                                         background: `${regimeColor(ps.regime)}40`, padding: "2px 7px",
+                                         borderRadius: 3, letterSpacing: "0.05em", textTransform: "uppercase",
+                                         boxShadow: `0 0 8px ${regimeColor(ps.regime)}30` }}>
+                            {ps.strategy.replace("_", " ")}
+                          </span>
+                        )}
                       </div>
                     </div>
 
                     {/* Candlestick Chart */}
                     {(ps.candles && ps.candles.length > 5) && (
-                      <CandleChart candles={ps.candles.slice(-80)} width={700} height={80} />
+                      <div style={{ background: "#0d0d0f", borderRadius: 8, border: `1px solid ${COLORS.panelBorder}`, overflow: "hidden", margin: "0 -4px" }}>
+                        <CandleChart candles={ps.candles.slice(-80)} height={254} />
+                      </div>
                     )}
 
                     {/* Signal + Position + Equity row */}
